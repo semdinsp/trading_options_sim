@@ -549,6 +549,51 @@ guarded by the same `Process.whereis/1` check `trading_live`'s own
 :connected?)` against a from-scratch process, since `HubClient` already
 exposes `connection_status/1` for exactly this.
 
+## 4d. UI style — adhere to this app's own `DESIGN.md`
+
+`trading_options_sim/DESIGN.md` already exists in this app (confirmed
+2026-09-13) — a "Dark Pool" terminal design system: single hardcoded dark
+DaisyUI theme (no light mode/toggle), `Oswald` for headings/labels/nav,
+`JetBrains Mono` (`.font-data`) for every number/price/timestamp/payload,
+hard edges (no rounded corners), borders instead of shadows, bordered-
+rectangle badges (never DaisyUI's pill `badge-*` fills), a `Layouts.trading_navbar`/
+`Layouts.trading_live` layout pair, and a fixed empty-state pattern. Note:
+its own examples (`portfolio_monitor_live.ex`, "Message Monitor") name
+LiveViews that don't exist in this app yet — it reads as carried over
+from a sibling app's dashboard as this app's starting design language,
+not (yet) validated against a real `trading_options_sim` screen. Treat
+the *rules* (typography roles, color-token usage, surface/shape,
+badge/empty-state patterns, "When adding a new screen" checklist) as
+binding for every LiveView this plan calls for; don't carry over the
+specific component names it references until they exist here too.
+
+**Where this plan's own future screens must follow it:**
+
+- **§4b's Settings page** (`/settings`) — token list/create-form rows,
+  the outbound-token panel, and any lifecycle/pricing-config sections all
+  go through this theme: `font-data` on every token value/timestamp,
+  bordered-rectangle status badges (active/revoked, connected/
+  disconnected) rather than pill badges, hard-edged panels separated by
+  `border-base-300`, no drop shadows.
+- **Any future monitor-style dashboard** for `ContractMonitor` state
+  (§5) — a live, dense, `Layouts.trading_live`-wrapped screen showing
+  per-contract snapshots (price, greeks, position, pending sim-fill) is
+  the natural UI for this app's own "monitors" concept, structurally the
+  same three-zone pattern (`header → stats/filter strip → scrollable
+  content`) `DESIGN.md`'s "Layout patterns" section already specifies for
+  `trading_live`'s own monitor screens. `.signal-dot`/`.row-flash` are
+  the existing motion primitives for "hub connected" and "new sim fill
+  arrived," respectively — reuse them rather than inventing new
+  animations, per `DESIGN.md`'s own motion-is-for-liveness rule.
+- Direction badges (long/short) use the existing `text-long`/`text-short`
+  custom tokens, not the success/error P&L tokens — relevant here since a
+  long call and a short put can both show positive unrealized P&L at the
+  same time; keep those two concepts visually distinct the same way
+  `DESIGN.md` already mandates for equities.
+
+No new design system to invent — this is an adopt-as-is, not a
+starting-point-to-diverge-from.
+
 ## 5. Per-contract monitor (the "monitors" pattern)
 
 **Event-driven by construction, deliberately not `trading_system`'s
