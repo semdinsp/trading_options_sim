@@ -53,20 +53,49 @@ process key in this plan uses a `contract_key` built from:
 
 ```elixir
 %{
-  underlying: "AAPL",
-  expiry: ~D[2027-01-15],   # LEAPS is just a far-dated expiry, no separate concept
-  strike: Decimal.new("150.00"),
+  symbol: "AAPL",           # matches tws_api's ContractDetails.symbol —
+                             # deliberately NOT "underlying"; see below
+  expiry: "20270115",       # matches tws_api's raw wire format
+                             # (YYYYMMDD string), NOT a ~D[...] Date
+  strike: Decimal.new("150.00"),  # the one deliberate exception — see below
   right: "C" | "P"
 }
 ```
 
-Serialized as a stable string (`"AAPL:2027-01-15:150.00:C"`) wherever a
-single string key is needed (Registry name, PubSub topic suffix, map key).
-A resolved IBKR `con_id` is stored alongside once available but is **not**
-part of the identity — mirrors `tws_api`'s contract-resolution plan
-(`../OPTIONS_LEAPS_PLAN.md` step 1): con_id is an enrichment, not the key,
-so the sim can carry a contract before/without ever resolving it against
-TWS (this app doesn't need a live IBKR connection to run — see §5).
+**Naming adopted from `tws_api`/`trading_hub`, confirmed 2026-09-13**:
+originally drafted with this app's own vocabulary (`underlying`, a
+`Date` `expiry`), independently designed from `tws_api`'s real
+`ContractDetails` struct (`symbol`, `sec_type`, `expiry`, `strike`,
+`right`, `exchange`, `currency`, ... — see `tws_api/lib/tws_api/messages.ex`).
+A `tws_api` session flagged the mismatch while reviewing this plan
+against its now-shipped `ContractDetails` decode. Decision: adopt
+`tws_api`'s field names and wire-format `expiry` string directly, rather
+than inventing a second vocabulary this app would need to translate at
+every `trading_hub`/`ib_portfolio` boundary crossing. `symbol` here means
+the option contract's own underlying ticker, same as every other
+`symbol` field already flowing through this workspace's `PubSub`
+messages/`ib_portfolio.Message` — not the option contract's own
+(rarely-used) `local_symbol`.
+
+**`strike` is the one deliberate exception, kept as `Decimal`, not
+`tws_api`'s plain `float`** (confirmed 2026-09-13): this app's own
+`trading_core`-based math (`PositionSizing`/`RiskControls`/`ExitStrategy`,
+§4c's future `TRADING_CORE_OPTIONS_UPDATE_PROMPT.md` work) is `Decimal`-only
+throughout, and a `float` strike risks classic floating-point
+equality/comparison bugs wherever a rule or lookup needs to match a
+specific strike exactly. Convert `Decimal` ↔ `float` only at the
+`IBKRLive` pricing-backend adapter boundary (§5a v2) when calling into
+`tws_api`-derived data — never carry a raw `float` strike through this
+app's own schemas or `ContractMonitor` state.
+
+Serialized as a stable string (`"AAPL:20270115:150.00:C"`, matching the
+wire-format expiry above) wherever a single string key is needed
+(Registry name, PubSub topic suffix, map key). A resolved IBKR `con_id`
+is stored alongside once available but is **not** part of the identity —
+mirrors `tws_api`'s contract-resolution plan (`../OPTIONS_LEAPS_PLAN.md`
+step 1): con_id is an enrichment, not the key, so the sim can carry a
+contract before/without ever resolving it against TWS (this app doesn't
+need a live IBKR connection to run — see §5).
 
 ## 2. Schema: Strategy / StrategyVersion / lifecycle
 
@@ -171,8 +200,14 @@ TradingOptionsSim.Sim.TargetPool
 
 TradingOptionsSim.Sim.TargetPoolMember
   - target_pool_id
-  - underlying_symbol, underlying_exchange, underlying_currency
-  - underlying_ib_conid (nil until resolved — see §5)
+  - symbol, exchange, currency (the equity underlying's own identity —
+    plain field names, matching trading_live's own TargetPoolMember and
+    tws_api's ContractDetails.symbol convention rather than an
+    "underlying_" prefix; see §1's naming note for why. This member
+    row's "symbol" is always an equity underlying, never itself an
+    option contract — no prefix is needed to disambiguate that within
+    this schema)
+  - ib_conid (nil until resolved — see §5)
   - contract_selection: same shape as StrategyVersion.option_leg_config's
     expiry/strike selection fields, OR nil to inherit the version's own
     option_leg_config unchanged. Exists for the case where two versions
@@ -518,7 +553,8 @@ from scratch.
   `TradingOptionsSim.PriceRelay` (a new, small GenServer this app does
   need to write) is the `forward_to` recipient: it re-broadcasts each
   underlying tick onto this app's own **local** `TradingOptionsSim.PubSub`
-  as `"prices:" <> underlying_symbol`, which is what `ContractMonitor`
+  as `"prices:" <> symbol` (the underlying's `symbol`, per §1's naming
+  convention), which is what `ContractMonitor`
   (§5) actually subscribes to — mirroring how `trading_live`'s own
   monitors read from the hub relayed onto a local bus rather than every
   monitor independently managing hub connectivity. One `HubClient` for
@@ -635,7 +671,7 @@ TradingOptionsSim.ContractMonitor
 | | `trading_live` `StrategyStockMonitor` | `trading_options_sim` `ContractMonitor` |
 |---|---|---|
 | Identity | `{live_strategy_id, symbol}` | `{run_id, contract_key}` (underlying+expiry+strike+right) |
-| Price feed | subscribes `"prices:" <> symbol` on `TradingHub.PubSub` directly (real IBKR ticks) | subscribes to `"prices:" <> underlying_symbol` on this app's own **local** `TradingOptionsSim.PubSub` (relayed from `trading_hub` by `PriceRelay`/`IbPortfolio.HubClient` — see §4c, not a direct cross-node subscription per monitor), plus a **local options-pricing process** (§5a) for the derived option quote — no live options tick feed is assumed present |
+| Price feed | subscribes `"prices:" <> symbol` on `TradingHub.PubSub` directly (real IBKR ticks) | subscribes to `"prices:" <> symbol` (the underlying's `symbol`) on this app's own **local** `TradingOptionsSim.PubSub` (relayed from `trading_hub` by `PriceRelay`/`IbPortfolio.HubClient` — see §4c, not a direct cross-node subscription per monitor), plus a **local options-pricing process** (§5a) for the derived option quote — no live options tick feed is assumed present |
 | Order execution | `IBKR.Client.place_order/1` — real order, real fill broadcast | simulated fill: on a rule transition, computes a fill price from the current option pricing model (§5a) plus configurable slippage/spread assumptions, records a `SimFill` synchronously — no pending-order/timeout/stuck-order machinery needed since there's no real broker round-trip to wait on |
 | Greeks | n/a | reads current delta/gamma/theta/vega from §5a's pricer, exposed in the rule-evaluation snapshot the same way `regime_trend_ordinal` is injected in `trading_live` (a computed pseudo-signal, not a subscribed catalog signal) |
 | Expiry | n/a | must additionally watch for **contract expiry/DTE crossing zero** — a new lifecycle event stock monitors don't have (see §5b) |
@@ -675,19 +711,16 @@ Two paths, pick based on how soon real IBKR option ticks are needed:
   (`TradingOptionsSim.Pricing.BlackScholes` vs.
   `TradingOptionsSim.Pricing.IBKRLive`), not a rewrite.
 
-  **Known translation gap to resolve when v2 is actually built** (flagged
-  by the `tws_api` session, 2026-09-13, cross-checked against its real
-  `ContractDetails` struct): `tws_api`'s contract identity uses `symbol`
-  (e.g. `"AAPL"`) where this plan's `contract_key` (§1) uses `underlying`
-  for the same concept, and `tws_api`'s `expiry` is a wire-format string
-  (`"YYYYMMDD"`) where this plan's is a `~D[...]` `Date`. Neither
-  vocabulary is wrong — they're two independently-designed schemas that
-  will need an explicit translation at whatever boundary
-  `IBKRLive`/`trading_hub`'s subscription plumbing crosses into this
-  app's own `contract_key`. Decide at that point (not now) whether to
-  adopt `tws_api`'s field names to skip a translation step, or keep this
-  app's own vocabulary and translate at the boundary — either is fine,
-  just don't let it be a surprise then.
+  **Naming consistency already resolved, not deferred** (flagged by the
+  `tws_api` session 2026-09-13, cross-checked against its real
+  `ContractDetails` struct, decided the same day — see §1): this plan's
+  `contract_key` now uses `tws_api`'s own `symbol`/`expiry` (raw
+  `"YYYYMMDD"` wire string, not a `Date`) directly, specifically so
+  `IBKRLive`'s eventual wiring needs no field-renaming translation layer
+  at this boundary. `strike` is the sole deliberate exception — kept
+  `Decimal` here rather than `tws_api`'s plain `float`, converted only at
+  this exact adapter boundary — see §1 for the full reasoning on both
+  decisions.
 
 This ordering also sidesteps a real dependency risk: this app should not
 be blocked on `tws_api`/`trading_hub`'s option work landing (or being
@@ -808,8 +841,10 @@ avoid double-starting on a redundant activation call.
    plumbing) is in progress as of this writing. `TWS_API_OPTIONS_UPDATE_PROMPT.md`
    (this directory) has served its purpose and can be treated as
    historical — the work it requested has already been sent and landed.
-   Resolve §5a's `contract_key` translation-gap note before wiring
-   `IBKRLive` once `trading_hub`'s side also lands.
+   `contract_key`'s naming (§1) already matches `tws_api`'s own field
+   names, so `IBKRLive` needs only a `strike` `Decimal`↔`float`
+   conversion at this boundary once `trading_hub`'s side also lands —
+   no broader translation layer to design.
 
 ## 9. Current skeleton gaps (as of this writing)
 
