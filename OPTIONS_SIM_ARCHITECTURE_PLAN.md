@@ -642,30 +642,56 @@ TradingOptionsSim.ContractMonitor
 
 ### 5a. Options pricing — the piece with no existing analog
 
-Nothing in this workspace currently prices an option today (confirmed:
-`../OPTIONS_LEAPS_PLAN.md` step 2 is still open — `TickOptionComputation`
-decode doesn't exist in `tws_api` yet). Two paths, pick based on how soon
-real IBKR option ticks are needed:
+**Update 2026-09-13**: `tws_api`'s side of `../OPTIONS_LEAPS_PLAN.md`
+has shipped (merged to `tws_api` main, PR #25, commit `0b71feb`) —
+`req_contract_details/2` + `ContractDetails`/`ContractDetailsEnd` decode,
+`req_sec_def_opt_params/5` + `SecurityDefinitionOptionParameter`/`End`
+decode, `place_order/2` generalized for `"OPT"`, and
+`TickOptionComputation` decode for greeks. **Not yet verified against
+live captured frames** — only against a current (non-stale) reference
+bundle — flagged in `tws_api`'s own code and in
+`../OPTIONS_LEAPS_PLAN.md`'s "What shipped" section; don't treat it as
+production-hardened yet. `trading_hub`'s side (contract resolution +
+subscription/order plumbing, plan item 4) is in progress as of this
+writing, not yet landed. This app's v1 (below) is unaffected either way
+— still build it, still don't block on v2.
+
+Two paths, pick based on how soon real IBKR option ticks are needed:
 
 - **v1 (recommended to start): Black-Scholes-derived paper pricing.**
   `ContractMonitor` computes its own theoretical price/greeks from the
   underlying's real tick (flowing in via `PriceRelay`/`ib_portfolio`,
   §4c), a configurable implied-vol input (flat, or a simple vol-surface
-  stub), and time-to-expiry — entirely local, no dependency on `tws_api`'s
-  unfinished option market-data work. Good enough to validate strategy
-  logic (entry/exit rules, position sizing, lifecycle) well before real
-  option quotes are available.
-- **v2 (once `tws_api`/`trading_hub`'s options work lands): real IBKR
-  option quotes.** Swap the pricer for a subscription to
-  `trading_hub`'s option market data (once that exists per
-  `../OPTIONS_LEAPS_PLAN.md`) — `ContractMonitor`'s rule-evaluation
+  stub), and time-to-expiry — entirely local, no dependency on
+  `tws_api`/`trading_hub`'s option market-data work landing or being
+  frame-verified first. Good enough to validate strategy logic (entry/exit
+  rules, position sizing, lifecycle) well before real option quotes are
+  available.
+- **v2 (once `trading_hub`'s side also lands and is frame-verified): real
+  IBKR option quotes.** Swap the pricer for a subscription to
+  `trading_hub`'s option market data — `ContractMonitor`'s rule-evaluation
   interface (a snapshot map with price/greeks keys) stays the same either
   way, so this is meant to be a swappable pricing backend
   (`TradingOptionsSim.Pricing.BlackScholes` vs.
   `TradingOptionsSim.Pricing.IBKRLive`), not a rewrite.
 
+  **Known translation gap to resolve when v2 is actually built** (flagged
+  by the `tws_api` session, 2026-09-13, cross-checked against its real
+  `ContractDetails` struct): `tws_api`'s contract identity uses `symbol`
+  (e.g. `"AAPL"`) where this plan's `contract_key` (§1) uses `underlying`
+  for the same concept, and `tws_api`'s `expiry` is a wire-format string
+  (`"YYYYMMDD"`) where this plan's is a `~D[...]` `Date`. Neither
+  vocabulary is wrong — they're two independently-designed schemas that
+  will need an explicit translation at whatever boundary
+  `IBKRLive`/`trading_hub`'s subscription plumbing crosses into this
+  app's own `contract_key`. Decide at that point (not now) whether to
+  adopt `tws_api`'s field names to skip a translation step, or keep this
+  app's own vocabulary and translate at the boundary — either is fine,
+  just don't let it be a surprise then.
+
 This ordering also sidesteps a real dependency risk: this app should not
-be blocked on `tws_api`'s option decode work landing first.
+be blocked on `tws_api`/`trading_hub`'s option work landing (or being
+frame-verified) first.
 
 ### 5b. Expiry handling
 
@@ -776,11 +802,14 @@ avoid double-starting on a redundant activation call.
    validated the local shape enough to know exactly what promotion needs
    to populate. Also needs step 6's Settings page to exist (where the
    operator configures the outbound token/base URL).
-8. **Real IBKR option pricing swap-in** (§5a v2) — once `tws_api`'s
-   `ContractDetails`/`TickOptionComputation` work lands. See
-   `TWS_API_OPTIONS_UPDATE_PROMPT.md` (this directory) — the handoff
-   prompt for that `tws_api`-side work, per this workspace's cross-app
-   boundary rule.
+8. **Real IBKR option pricing swap-in** (§5a v2) — `tws_api`'s side
+   shipped 2026-09-13 (see §5a's update note), not yet frame-verified;
+   `trading_hub`'s side (contract resolution + subscription/order
+   plumbing) is in progress as of this writing. `TWS_API_OPTIONS_UPDATE_PROMPT.md`
+   (this directory) has served its purpose and can be treated as
+   historical — the work it requested has already been sent and landed.
+   Resolve §5a's `contract_key` translation-gap note before wiring
+   `IBKRLive` once `trading_hub`'s side also lands.
 
 ## 9. Current skeleton gaps (as of this writing)
 
