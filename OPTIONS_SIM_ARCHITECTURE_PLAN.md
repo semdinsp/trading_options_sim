@@ -931,14 +931,31 @@ avoid double-starting on a redundant activation call.
 
 ## 9. Current status (2026-09-13) and remaining gaps
 
-Steps 1-8 of §8's sequencing are **built** — steps 1-7 merged to `main`
-(PRs #1-#4: schema/lifecycle, `ib_portfolio`/`PriceRelay`,
-Black-Scholes pricer, `ContractMonitor`/`SimActivator`, `/api/v1`, MCP
-server + Settings LiveView, `link_live_strategy` rename); step 8
-(`IBKRLive` pricing backend) is on branch `step8-impl`, not yet merged.
-104 tests passing. Verified end-to-end against a real running dev
-server, including a genuine live connection to a running `trading_hub`
-node.
+Steps 1-8 of §8's sequencing are **built and merged to `main`**
+(schema/lifecycle, `ib_portfolio`/`PriceRelay`, Black-Scholes pricer,
+`ContractMonitor`/`SimActivator`, `/api/v1`, MCP server + Settings
+LiveView, `link_live_strategy` rename, `IBKRLive` pricing backend).
+Verified end-to-end against a real running dev server, including a
+genuine live connection to a running `trading_hub` node (which
+surfaced and fixed a real cross-node `Phoenix.PubSub` bug — see
+`TradingHub.PubSub`'s own comment in `application.ex`).
+
+**`trading_signal` integration is also now built** (branch
+`add-trading-signal-integration`): `TradingOptionsSim.SignalConnection`
+(distributed-Erlang connection to `trading_signal`, ported from
+`TradingLive.SignalConnection` — connect/backoff, `:net_kernel.monitor_nodes/1`,
+`request_signal/1` with slug->id caching, `safe_erpc/4`'s 3-shape
+failure normalization) and `TradingOptionsSim.SignalBus` (the
+config-swappable adapter seam, `Live`/`Test` implementations, ported
+from `TradingLive.SignalBus` minus the `regime_sessions_between/2`
+callback, which is `trading_live`-specific historical-regime-backfill
+logic with no analog here). `ContractMonitor` now resolves
+`TradingCore.RuleEngine.signal_names/1` against its `entry`/`exit`
+rules on init, subscribes to each resolved `trading_signal` topic, and
+merges received `{:signal, name, value}` values into the snapshot used
+for the next price-driven rule evaluation (never evaluated
+immediately on its own — same "wait for the next tick" posture
+`:ibkr_live` already uses). 117 tests passing.
 
 `TRADING_HUB_OPTION_TICKS_UPDATE_PROMPT.md`'s ask has been fulfilled —
 `trading_hub` PR #102 added the `TickOptionComputation` broadcast that

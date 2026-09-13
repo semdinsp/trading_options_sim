@@ -32,6 +32,12 @@ config :trading_options_sim, :start_hub_client, false
 # Ported from trading_system's identical test override.
 config :trading_options_sim, :mcp_force_start, true
 
+# No real trading_signal node to connect to in test — ContractMonitor
+# tests drive SignalBus.Test directly (stub_topic/2) rather than a live
+# distributed-Erlang connection. Same adapter-swap pattern trading_live's
+# own config/test.exs uses for TradingLive.SignalBus.
+config :trading_options_sim, :signal_bus_adapter, TradingOptionsSim.SignalBus.Test
+
 # In test we don't send emails
 config :trading_options_sim, TradingOptionsSim.Mailer, adapter: Swoosh.Adapters.Test
 

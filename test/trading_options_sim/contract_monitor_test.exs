@@ -3,6 +3,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.SignalBus.Test, as: SignalBusTest
 
   # async: false — every monitor in this test subscribes to the same
   # real TradingOptionsSim.PubSub server; broadcasting a price for
@@ -322,6 +323,78 @@ defmodule TradingOptionsSim.ContractMonitorTest do
                   quantity: 1,
                   pricing_backend: :ibkr_live}
                )
+    end
+  end
+
+  describe "trading_signal integration" do
+    setup do
+      SignalBusTest.reset()
+      :ok
+    end
+
+    test "resolves and subscribes to every signal referenced in entry/exit rules on init" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "vix_last", "op" => "gt", "value" => 20},
+          "exit" => %{"signal" => "spy_trend_score", "op" => "lt", "value" => 0}
+        })
+
+      key = contract_key("SIGNALTEST1")
+      {_pid, _run} = start_monitor(version, key)
+
+      assert Enum.sort(SignalBusTest.requested_names()) == ["spy_trend_score", "vix_last"]
+    end
+
+    test "a received signal value is merged into the rule-evaluation snapshot on the next price tick" do
+      SignalBusTest.stub_topic("vix_last", "signals:vix_last_test_topic")
+
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "vix_last", "op" => "gt", "value" => 20}
+        })
+
+      symbol = "SIGNALTEST2"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key)
+
+      # Give init/1's subscribe_to_signals/1 a moment to run before
+      # broadcasting — it happens synchronously in init, but
+      # start_supervised/1 itself already waits for init/1 to return, so
+      # this subscription is guaranteed to exist by the time start_monitor
+      # returns.
+      Phoenix.PubSub.broadcast(
+        TradingSignal.PubSub,
+        "signals:vix_last_test_topic",
+        {:signal, "vix_last_test_topic", 25.0}
+      )
+
+      Process.sleep(30)
+
+      # Entry rule isn't satisfied yet — the signal value alone doesn't
+      # trigger evaluation, same as an IBKRLive greeks tick.
+      assert ContractMonitor.snapshot(pid).position_open? == false
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == true
+      assert Sim.list_sim_fills(run) |> length() == 1
+    end
+
+    test "re-subscribes on :trading_signal_connected" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "vix_last", "op" => "gt", "value" => 20}
+        })
+
+      key = contract_key("SIGNALTEST3")
+      {pid, _run} = start_monitor(version, key)
+
+      SignalBusTest.reset()
+      send(pid, :trading_signal_connected)
+      Process.sleep(30)
+
+      assert SignalBusTest.requested_names() == ["vix_last"]
     end
   end
 end
