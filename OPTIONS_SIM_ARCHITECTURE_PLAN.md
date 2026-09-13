@@ -97,6 +97,21 @@ step 1): con_id is an enrichment, not the key, so the sim can carry a
 contract before/without ever resolving it against TWS (this app doesn't
 need a live IBKR connection to run — see §5).
 
+**This is a deliberate divergence from `trading_hub`, not an oversight**
+(confirmed 2026-09-13, `trading_hub`'s options work — PR #101 — landed
+with `TradingHub.IBKR.ContractResolver`, resolving `(symbol, expiry,
+strike, right)` to a cached `con_id` that becomes *the* runtime key
+everywhere downstream there — `Order.contract_id`, `Position.contract_id`,
+subscriptions). `trading_hub` can make `con_id` its real key because it
+always has a live TWS connection and must place real orders against
+IBKR's actual identity system; this app has neither constraint (§7: no
+real order placement) and must be able to carry/simulate a contract with
+no IBKR connection at all, so `contract_key`'s 4-tuple stays the
+identity here, `con_id` stays an optional enrichment. When v2 (§5a)
+consumes `trading_hub`'s relay, `con_id` is useful for correlating a
+quote back to the exact contract `trading_hub` resolved, but never
+becomes this app's own key.
+
 ## 2. Schema: Strategy / StrategyVersion / lifecycle
 
 Reuse `trading_system`'s shape directly, not reinvented:
@@ -687,10 +702,23 @@ decode, `place_order/2` generalized for `"OPT"`, and
 live captured frames** — only against a current (non-stale) reference
 bundle — flagged in `tws_api`'s own code and in
 `../OPTIONS_LEAPS_PLAN.md`'s "What shipped" section; don't treat it as
-production-hardened yet. `trading_hub`'s side (contract resolution +
-subscription/order plumbing, plan item 4) is in progress as of this
-writing, not yet landed. This app's v1 (below) is unaffected either way
-— still build it, still don't block on v2.
+production-hardened yet (this week alone, `OpenOrder` and `ExecDetails`
+each had real field-shift bugs that only a live wire capture caught,
+twice each — the same class of bug could still be lurking in
+`ContractDetails`/`TickOptionComputation`/`SecurityDefinitionOptionParameter`
+until one is actually exercised against real TWS data). **Update
+2026-09-13**: `trading_hub`'s side has also now shipped (PR #101) —
+`TradingHub.IBKR.ContractResolver` (cached `(symbol, expiry, strike,
+right) -> con_id` resolution via `reqContractDetails`),
+`Order`/`Position` structs carrying `:sec_type`/`:expiry`/`:strike`/
+`:right`/`:multiplier`, and `MessageHandler` routing
+`ContractDetails`/`ContractDetailsEnd` to the resolver directly (a
+request/response round-trip, not broadcast as a `TradingHub.Message`).
+Same frame-verification caveat applies to this layer too — nothing
+downstream of `tws_api`'s unverified decoders is verified either. This
+app's v1 (below) is unaffected either way — still build it, still don't
+block on v2, and don't treat "PR merged" as "safe against real quotes"
+until someone actually captures and checks a live frame.
 
 Two paths, pick based on how soon real IBKR option ticks are needed:
 
@@ -703,8 +731,10 @@ Two paths, pick based on how soon real IBKR option ticks are needed:
   frame-verified first. Good enough to validate strategy logic (entry/exit
   rules, position sizing, lifecycle) well before real option quotes are
   available.
-- **v2 (once `trading_hub`'s side also lands and is frame-verified): real
-  IBKR option quotes.** Swap the pricer for a subscription to
+- **v2 (once `trading_hub`'s options relay is frame-verified against real
+  TWS data — its code has landed, per the update above, but that's not
+  the same bar): real IBKR option quotes.** Swap the pricer for a
+  subscription to
   `trading_hub`'s option market data — `ContractMonitor`'s rule-evaluation
   interface (a snapshot map with price/greeks keys) stays the same either
   way, so this is meant to be a swappable pricing backend
@@ -835,16 +865,23 @@ avoid double-starting on a redundant activation call.
    validated the local shape enough to know exactly what promotion needs
    to populate. Also needs step 6's Settings page to exist (where the
    operator configures the outbound token/base URL).
-8. **Real IBKR option pricing swap-in** (§5a v2) — `tws_api`'s side
-   shipped 2026-09-13 (see §5a's update note), not yet frame-verified;
-   `trading_hub`'s side (contract resolution + subscription/order
-   plumbing) is in progress as of this writing. `TWS_API_OPTIONS_UPDATE_PROMPT.md`
-   (this directory) has served its purpose and can be treated as
-   historical — the work it requested has already been sent and landed.
-   `contract_key`'s naming (§1) already matches `tws_api`'s own field
-   names, so `IBKRLive` needs only a `strike` `Decimal`↔`float`
-   conversion at this boundary once `trading_hub`'s side also lands —
-   no broader translation layer to design.
+8. **Real IBKR option pricing swap-in** (§5a v2) — both `tws_api`'s side
+   (2026-09-13) and `trading_hub`'s consuming side, `ContractResolver` +
+   `Order`/`Position` option fields (PR #101, 2026-09-13) have now
+   shipped. **Neither is frame-verified against real TWS data yet** —
+   don't start this step until that verification has actually happened,
+   or until someone is prepared to be the one who does it and hits the
+   same class of field-shift bug `OpenOrder`/`ExecDetails` already hit
+   twice this week. `TWS_API_OPTIONS_UPDATE_PROMPT.md` (this directory)
+   has served its purpose and can be treated as historical — the work it
+   requested has already been sent and landed on both `tws_api`'s and
+   `trading_hub`'s sides.
+   `contract_key`'s naming (§1) already matches `tws_api`/`trading_hub`'s
+   own field names, so `IBKRLive` needs only a `strike`
+   `Decimal`↔`float` conversion at this boundary — no broader
+   translation layer to design. `con_id` stays an enrichment here, never
+   this app's own key, even though it's `trading_hub`'s real runtime key
+   (see §1's divergence note).
 
 ## 9. Current skeleton gaps (as of this writing)
 
