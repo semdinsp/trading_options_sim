@@ -16,9 +16,14 @@ config :trading_options_sim, TradingOptionsSim.Repo,
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
-  http: [ip: {127, 0, 0, 1}, port: 4002],
+  http: [ip: {127, 0, 0, 1}, port: 4008],
   secret_key_base: "9qnJdV2lPPXhLDtGysV5gErJ5j0JtBUl6CpDD3km3uWN/24Ok1yBpOlqxMITX2cu",
   server: false
+
+# No real trading_hub node to connect to in test — every test drives
+# ContractMonitor/PriceRelay directly instead. See Application.start/2's
+# hub_client_child/0.
+config :trading_options_sim, :start_hub_client, false
 
 # In test we don't send emails
 config :trading_options_sim, TradingOptionsSim.Mailer, adapter: Swoosh.Adapters.Test

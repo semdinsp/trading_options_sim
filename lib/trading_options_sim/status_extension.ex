@@ -2,15 +2,10 @@ defmodule TradingOptionsSim.StatusExtension do
   @moduledoc """
   `AppStatus.Extension` implementation exposing `trading_options_sim`-specific
   health: the DB pool, and the distributed connection to `trading_hub`
-  (once `TradingOptionsSim.HubMonitor` exists — see
-  `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §9/§4a's build sequencing; underlying
-  tick data for `ContractMonitor`'s options pricing depends on that same
-  cross-node link `trading_live` already has via its own `HubMonitor`).
-  Same shape as `TradingLive.StatusExtension`/`TradingSystem.StatusExtension`.
-
-  `hub_connected?/0` is written now, ahead of `HubMonitor` itself, so this
-  module's shape (and its `Process.whereis/1` guard) doesn't need to
-  change later — it simply reports `false` until that process exists.
+  via `TradingOptionsSim.PriceRelay` (which tracks the
+  `IbPortfolio.HubClient`-forwarded `{:hub_connection_status, boolean}`
+  transitions — see `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §4c). Same shape
+  as `TradingLive.StatusExtension`/`TradingSystem.StatusExtension`.
 
   Each check hits its own DB/GenServer round-trip independently of the
   others, so they run concurrently rather than paying their latencies
@@ -40,19 +35,9 @@ defmodule TradingOptionsSim.StatusExtension do
     end)
   end
 
-  # TradingOptionsSim.HubMonitor doesn't exist yet (see this module's own
-  # moduledoc) — Process.whereis/1 simply returns nil until it's built,
-  # so this fails closed to `false` rather than crashing. Once HubMonitor
-  # exists, wire its real connection_status()/connected? call here,
-  # matching TradingLive.StatusExtension.hub_connected?/0's shape exactly.
   @doc false
   def hub_connected? do
-    case Process.whereis(TradingOptionsSim.HubMonitor) do
-      nil -> false
-      pid -> GenServer.call(pid, :connected?)
-    end
-  catch
-    :exit, _ -> false
+    TradingOptionsSim.PriceRelay.connected?()
   end
 
   @doc false

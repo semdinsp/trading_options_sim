@@ -19,7 +19,11 @@ config :trading_options_sim, TradingOptionsSim.Repo,
 config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
-  http: [ip: {127, 0, 0, 1}],
+  # Port 4008 — next free slot after the sibling apps' 4000-4007 range
+  # (trading_hub 4000, trading_risk 4001, trading_dashboard 4002,
+  # trading_system 4004 UI / 4005 API, trading_signal 4006, trading_live
+  # 4007). See OPTIONS_SIM_ARCHITECTURE_PLAN.md §9.
+  http: [ip: {127, 0, 0, 1}, port: String.to_integer(System.get_env("PORT") || "4008")],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
@@ -54,6 +58,11 @@ config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
 
 # Enable dev routes for dashboard and mailbox
 config :trading_options_sim, dev_routes: true
+
+# trading_hub node to connect to via IbPortfolio.HubClient (see
+# OPTIONS_SIM_ARCHITECTURE_PLAN.md §4c) — same convention trading_live/
+# trading_risk already use.
+config :trading_options_sim, :hub_node, :"trading_hub@Scotts-Mac-mini.local"
 
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"
