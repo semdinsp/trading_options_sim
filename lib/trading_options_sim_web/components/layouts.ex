@@ -49,10 +49,6 @@ defmodule TradingOptionsSimWeb.Layouts do
 
   @doc """
   Renders this app's only navbar (§ "Layout patterns", DESIGN.md).
-  This app currently has one real operator-facing screen (Settings —
-  token management); the nav is deliberately this small rather than
-  padded out with placeholder links, and should gain entries here as
-  real strategy/version/target-pool/run screens are built.
   """
   def trading_navbar(assigns) do
     ~H"""
@@ -68,6 +64,22 @@ defmodule TradingOptionsSimWeb.Layouts do
 
       <div class="navbar-end">
         <ul class="menu menu-horizontal px-1 gap-1 font-data text-xs uppercase tracking-wider">
+          <li>
+            <a
+              href="/active_strategies"
+              class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+            >
+              <.icon name="hero-signal" class="h-4 w-4 mr-1" /> Active
+            </a>
+          </li>
+          <li>
+            <a
+              href="/runs"
+              class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+            >
+              <.icon name="hero-list-bullet" class="h-4 w-4 mr-1" /> Runs
+            </a>
+          </li>
           <li>
             <a
               href="/settings"
