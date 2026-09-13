@@ -18,6 +18,7 @@ defmodule TradingOptionsSimWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    live "/settings", SettingsLive
   end
 
   # Unauthenticated by design (scraper/uptime-check friendly) — see
@@ -48,6 +49,11 @@ defmodule TradingOptionsSimWeb.Router do
 
     get "/tags", TagController, :index
   end
+
+  # MCP server — bare forward (auth is per-tool `scopes:`, not a
+  # router-level plug), matching trading_system's own mounting.
+  forward "/mcp", Anubis.Server.Transport.StreamableHTTP.Plug,
+    server: TradingOptionsSim.MCP.Server
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:trading_options_sim, :dev_routes) do
