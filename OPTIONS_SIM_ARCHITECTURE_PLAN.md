@@ -147,7 +147,11 @@ TradingOptionsSim.Sim.StrategyVersion
   - source_trading_system_version_id (nil for "native")
   - promoted_at, promoted_snapshot (frozen copy of the trading_system
     version's own params/rules at promotion time, when source is
-    "promoted_from_trading_system" — see §4)
+    "promoted_from_trading_system" — see §4's history: this direction
+    was abandoned once the real requirement was clarified as
+    trading_live pulling FROM this app, not this app pulling from
+    trading_system. These fields exist in the schema but every version
+    today is "native" — see §4 for the corrected design.)
 ```
 
 `multi_leg` is included in the schema now (so the column/shape exists) but
@@ -290,86 +294,88 @@ version, and never handed to `trading_live` on promote-out, matching
 `trading_system`'s own moduledoc note that each app's tag pool is
 independent. An operator re-tags in each app separately if useful there.
 
-## 4. Promotion: pulling a version id from trading_system
+## 4. Promotion: `trading_live` pulls from `trading_options_sim` (going live with real money)
 
-Mirrors `trading_live/lib/trading_live/trading_system/client.ex` closely:
+**Corrected twice, 2026-09-13** — first draft described pulling a
+version *in* from `trading_system` (wrong direction, misread the
+original request). Second draft described `trading_options_sim` pushing
+*out* to `trading_live` (still wrong — doesn't match the real,
+already-working precedent). **Verified directly against
+`trading_live/lib/trading_live/live_trading.ex:47-64`
+(`LiveTrading.promote_version/1`) before writing this**: promotion is a
+**pull initiated by the destination app**. `trading_live` itself calls
+OUT to `trading_system`'s `/api/v1` (`Client.get_version/1`,
+`Client.get_strategy/1`, then fire-and-forget
+`Client.mark_promoted/1`/`Client.link_to_live_strategy/2`) and builds
+its *own* local `LiveStrategy` row from the response.
+`trading_system` never calls `trading_live` — it stays a passive
+source, only ever responding to `trading_live`'s own requests.
+
+The analogous design here: a strategy is authored and gated *inside*
+`trading_options_sim` (discovery → quarantine → test_portfolio, §2).
+Once it reaches `test_portfolio`, **`trading_live` (or a future
+options-capable execution app) pulls it** — calling this app's own
+`/api/v1` (already built, §4a/step 5) to fetch the version, then
+recording the link back here via a new inbound endpoint, mirroring
+`trading_system`'s `link_trading_live`/`unlink_trading_live` shape:
 
 ```
-TradingOptionsSim.TradingSystem.Client
-  - get_version(version_id)       # GET /api/v1/versions/:id
-  - get_strategy(strategy_id)     # GET /api/v1/strategies/:id
-  - get_target_pool(target_pool_id)  # GET /api/v1/target_pools/:id
-  - list_instruments(asset_class) # GET /api/v1/instruments
-  - mark_promoted(version_id)     # POST .../promote {"to": "live"} — bookkeeping only
-  - link_to_live_strategy(version_id, options_sim_strategy_id)  # NEW verb needed on trading_system, see below
-  - unlink_from_live_strategy(version_id)
+POST /api/v1/versions/:id/link_live_strategy   {"live_strategy_id": "..."}
+POST /api/v1/versions/:id/unlink_live_strategy
 ```
 
-Same auth model (bearer token + base URL, operator-configured on this
-app's own `/settings` page — see §4b — rather than hardcoded, once that
-page exists; `config :trading_options_sim, :trading_system_api_token`
-remains the escape-hatch/test default), same fire-and-forget posture for
-the marker POSTs (a promotion here must never roll back because a
-bookkeeping call to `trading_system` failed), same `Req`-based client
-with a `req_plug` test seam.
+`trading_options_sim` implements only the **passive/inbound** side —
+these two endpoints plus the read routes the pull already needs
+(`GET /api/v1/versions/:id`, already built). It does **not** implement
+any outbound client that calls `trading_live` — that HTTP client
+(`TradingLive.TradingOptionsSim.Client`-equivalent) and its own
+`promote_version`-shaped orchestration function belong entirely inside
+`trading_live`'s own app, the same way `TradingLive.TradingSystem.Client`
+lives in `trading_live`, not in `trading_system`. Building that piece is
+out of scope for this app's own session — see the handoff prompt below.
 
-**Promotion flow** (`TradingOptionsSim.Sim.promote_from_trading_system/2`,
-mirrors `trading_live`'s `LiveTrading.promote_version/1`):
+**Schema note**: §2's `promoted_to_live_app`/`promoted_to_live_strategy_id`/
+`promoted_to_live_at` fields and `Sim.promote_to_live_app/3` were built
+under the earlier (incorrect) push-model assumption — an operator/agent
+triggering the marker from *this* app's own side. Under the corrected
+pull model, the marker should instead be written by the new
+`link_live_strategy` endpoint above, called *by* `trading_live` after it
+successfully builds its own local record — same fields, same "marker,
+not a stage advance" semantics (`lifecycle_stage` stays `test_portfolio`,
+matching `trading_system`'s own `promoted_to_live_at` precedent), just
+triggered from the other direction. `Sim.promote_to_live_app/3` needs no
+signature change for this — only its caller changes, from "an operator
+action inside this app" to "the controller action backing
+`link_live_strategy`, invoked by `trading_live`'s pull."
 
-1. Fetch the `trading_system` `StrategyVersion` + parent `Strategy` +
-   `TargetPool` (if any) via the Client.
-2. Validate it's option-eligible — since `trading_system` is currently
-   equity/pairs-oriented (per its `LIFECYCLE.md`/`STRATEGY_SKILL.md`), a
-   promoted version's `rules`/`usage_conditions` describe **entry/exit
-   signal logic**, not option-specific leg selection. Promotion carries
-   the signal logic over into a frozen `promoted_snapshot`, and the
-   operator supplies `option_leg_config` (§2) at promotion time — it has
-   no equivalent on the trading_system side to copy from. This is the one
-   real gap in "just pull a version id over": `trading_system` doesn't
-   know what a call/put/strike/expiry is. Confirmed acceptable scope
-   split: signal logic (when to be long/short) comes from `trading_system`;
-   options-structuring logic (which contract, how the leg is chosen)
-   is `trading_options_sim`-native and supplied at promotion.
-3. Create a local `StrategyVersion` row: `source: "promoted_from_trading_system"`,
-   `source_trading_system_version_id`, `lifecycle_stage: "discovery"`
-   (a promoted version still starts at `discovery` in *this* app's own
-   lifecycle — promotion crosses apps, it doesn't skip this app's own
-   evaluation window), `promoted_snapshot` = frozen copy of the source's
-   `rules`/`usage_conditions`/`params`.
-4. Call `Client.link_to_live_strategy/2` (fire-and-forget) so
-   `trading_system`'s own dashboard shows this version as linked/active
-   elsewhere — same transparency `link_strategy_version_to_trading_live/2`
-   already provides for `trading_live`.
-5. Never re-synced afterward — identical "frozen at promotion" contract as
-   `trading_live`'s `LiveStrategy` (see that schema's moduledoc,
-   `final_imp.md` decision #2). Iterating means re-forking on the
-   `trading_system` side and re-promoting, not editing the local copy.
+**Real blocker, confirmed 2026-09-13, not yet started anywhere**:
+`trading_live` cannot execute an options strategy today —
+`TradingLive.StrategyStockMonitor` (the only execution engine that app
+has) is stock-shaped throughout (a `symbol` identity,
+`IBKR.Client.place_order/1` assuming `sec_type: "STK"`), and while
+`trading_hub`'s own `Order`/`Position` structs now carry
+`:sec_type`/`:expiry`/`:strike`/`:right`/`:multiplier` (PR #101), that
+path is untested end-to-end for a real option order. This pull-based
+promotion cannot be usefully built until `trading_live` (or a new
+options-aware execution app) actually has somewhere to route an option
+order — track as a prerequisite for that app's own future work, not
+something to build in parallel here.
 
-**Cross-app change needed on `trading_system`'s side** (hand off, do not
-edit directly): its `link_trading_live`/`unlink_trading_live` endpoints and
-`trading_live_active`/`trading_live_strategy_id` fields are named for one
-specific consumer app. Two options, to be decided with the user before
-handoff:
-   - (a) Generalize the field/endpoint names to something consumer-agnostic
-     (`linked_consumer_app`, `linked_consumer_strategy_id`) — bigger
-     change, cleaner long-term if a third consumer app ever shows up.
-   - (b) Add a parallel `trading_options_sim_active`/
-     `trading_options_sim_strategy_id` pair, `link_trading_options_sim`/
-     `unlink_trading_options_sim` endpoints — smaller, consistent with how
-     `trading_live`'s own fields were added incrementally, but doesn't
-     generalize.
-   Recommendation: (b) for now, matching the codebase's own incremental
-   pattern (`trading_live_active` etc. were themselves added as a single
-   named link, not a generic one, per `LIFECYCLE.md`'s "Linking to a
-   `trading_live` LiveStrategy" section) — revisit if a third consumer
-   appears.
+**Handoff prompt for `trading_live`'s own session** (do not implement
+from here, per this workspace's cross-app boundary rule): once
+`trading_live` gains real option-order execution, its session should
+build a `TradingOptionsSim.Client` (mirroring its own existing
+`TradingSystem.Client`) plus a `promote_options_version/1`-shaped
+orchestration function, pulling from this app's `/api/v1` the same way
+`LiveTrading.promote_version/1` already pulls from `trading_system`.
 
-**Native (non-promoted) versions**: nothing above is mandatory — an
-operator can author a `StrategyVersion` directly in
-`trading_options_sim` (`source: "native"`) and run it through the same
-discovery/quarantine/target-pool lifecycle without ever touching
-`trading_system`. Promotion is an *optional* on-ramp for reusing signal
-logic already proven elsewhere, not a required path.
+**Native-only for now**: every `StrategyVersion` in this app today is
+authored natively. `source`/`source_trading_system_version_id`/
+`promoted_at`/`promoted_snapshot` were built for an earlier,
+now-abandoned trading_system-promotion-in design and are currently
+unused — left in place rather than migrated out immediately, since that
+direction could still be worth revisiting later if a concrete need
+appears (see Open Questions).
 
 ## 4a. REST API + MCP access (`anubis_mcp`)
 
@@ -401,25 +407,36 @@ One token type backs **both** surfaces below — same precedent
 `trading_system`'s own `ApiToken` already sets (its `/api/v1` plug and
 its `TokenValidator` for MCP both check the same table).
 
-**REST API — `/api/v1`**, mirroring `trading_system`'s `STRATEGYCLAUDE.md`
-surface, scoped to what this app actually needs exposed for cross-app
-promotion (§4) and promote-out (§2):
+**REST API — `/api/v1`, as built** (see `lib/trading_options_sim_web/router.ex`):
 
 ```
-GET    /api/v1/strategies                    strategies:read
-GET    /api/v1/strategies/:id                strategies:read
-POST   /api/v1/strategies                     strategies:write
-POST   /api/v1/strategies/:id/versions        strategies:write
-GET    /api/v1/versions/:id                   strategies:read
-POST   /api/v1/versions/:id/promote           strategies:write   (discovery->quarantine, quarantine->test_portfolio, retired->discovery)
-POST   /api/v1/versions/:id/downgrade         strategies:write   (->retired, or test_portfolio->quarantine)
-POST   /api/v1/versions/:id/promote_from_trading_system   strategies:write   (§4's inbound flow)
-POST   /api/v1/versions/:id/promote_to_live_app           strategies:write   (§2's outbound marker)
-GET    /api/v1/target_pools, /:id             target_pools:read
-POST   /api/v1/target_pools, .../members      target_pools:write
-GET    /api/v1/tags                           tags:read
-POST   /api/v1/versions/:id/tags              tags:write
+GET    /api/v1/strategies                              strategies:read
+GET    /api/v1/strategies/:id                          strategies:read
+POST   /api/v1/strategies                              strategies:write
+POST   /api/v1/strategies/:id/versions                 strategies:write
+GET    /api/v1/versions/:id                            strategies:read
+POST   /api/v1/versions/:id/promote                    strategies:write   (discovery->quarantine, quarantine->test_portfolio, retired->discovery)
+POST   /api/v1/versions/:id/downgrade                  strategies:write   (->retired, or test_portfolio->quarantine)
+POST   /api/v1/versions/:id/promote_to_live_app        strategies:write   (§4's marker — corrected 2026-09-13: now called
+                                                                            BY the pulling app, e.g. trading_live, after it
+                                                                            builds its own local record — see §4's rewrite;
+                                                                            not yet renamed to link_live_strategy in code)
+PUT    /api/v1/versions/:id/tags                       tags:write         (replace full tag set)
+POST   /api/v1/versions/:id/tags                       tags:write         (get-or-create by name, union onto existing)
+GET    /api/v1/target_pools                            target_pools:read
+GET    /api/v1/target_pools/:id                        target_pools:read
+POST   /api/v1/target_pools                            target_pools:write
+POST   /api/v1/target_pools/:id/members                target_pools:write
+GET    /api/v1/tags                                    tags:read
 ```
+
+**Not yet renamed following §4's correction**: the endpoint is still
+`promote_to_live_app` in code, matching its original (push-model)
+design — §4's corrected pull model means `trading_live`'s own session
+should call this endpoint once it has already built its own local
+record, passing its own `live_strategy_id`. Renaming to
+`link_live_strategy`/adding `unlink_live_strategy` (matching
+`trading_system`'s own naming) is a small follow-up, not done yet.
 
 Same auth plug shape as `trading_system`'s (`TradingSystemWeb.ApiAuthPlug`
 equivalent) — Bearer token looked up by hash, scope-checked per route,
@@ -445,22 +462,24 @@ use Anubis.Server,
   ]
 ```
 
-Initial tool set, each a thin wrapper around a `Sim` context function
+Tool set, as built — each a thin wrapper around a `Sim` context function
 (mirrors `trading_system.MCP.Server`'s "thin wrapper around
 already-existing, already-tested context functions" posture) — read
 tools need no scope beyond a valid token, write tools require
 `scopes: ["mcp:write"]` on the component:
 
 ```
-list_strategies            get_strategy             list_strategy_versions
-get_version_performance    list_target_pools        get_target_pool
-list_tags
+list_strategies      get_strategy         list_target_pools
+get_target_pool       list_tags
 ---
-create_strategy            create_strategy_version
-promote_version            downgrade_version
-promote_from_trading_system   promote_to_live_app
-add_strategy_version_tag   set_strategy_version_tags
+create_strategy       promote_version      downgrade_version
+add_strategy_version_tag
 ```
+
+Not yet built as MCP tools (REST-only today): `create_strategy_version`,
+`promote_to_live_app`, `set_strategy_version_tags` (the full-replace
+variant — only the get-or-create-by-name `add_strategy_version_tag`
+exists as an MCP tool). Small follow-ups, not started.
 
 `TradingOptionsSim.MCP.CallGuard` ported the same way — bounded
 `Task.async/yield` timeout wrapper around every tool body (a hung `Repo`
@@ -693,32 +712,57 @@ TradingOptionsSim.ContractMonitor
 
 ### 5a. Options pricing — the piece with no existing analog
 
-**Update 2026-09-13**: `tws_api`'s side of `../OPTIONS_LEAPS_PLAN.md`
-has shipped (merged to `tws_api` main, PR #25, commit `0b71feb`) —
-`req_contract_details/2` + `ContractDetails`/`ContractDetailsEnd` decode,
-`req_sec_def_opt_params/5` + `SecurityDefinitionOptionParameter`/`End`
-decode, `place_order/2` generalized for `"OPT"`, and
-`TickOptionComputation` decode for greeks. **Not yet verified against
-live captured frames** — only against a current (non-stale) reference
-bundle — flagged in `tws_api`'s own code and in
-`../OPTIONS_LEAPS_PLAN.md`'s "What shipped" section; don't treat it as
-production-hardened yet (this week alone, `OpenOrder` and `ExecDetails`
-each had real field-shift bugs that only a live wire capture caught,
-twice each — the same class of bug could still be lurking in
-`ContractDetails`/`TickOptionComputation`/`SecurityDefinitionOptionParameter`
-until one is actually exercised against real TWS data). **Update
-2026-09-13**: `trading_hub`'s side has also now shipped (PR #101) —
-`TradingHub.IBKR.ContractResolver` (cached `(symbol, expiry, strike,
-right) -> con_id` resolution via `reqContractDetails`),
-`Order`/`Position` structs carrying `:sec_type`/`:expiry`/`:strike`/
-`:right`/`:multiplier`, and `MessageHandler` routing
-`ContractDetails`/`ContractDetailsEnd` to the resolver directly (a
-request/response round-trip, not broadcast as a `TradingHub.Message`).
-Same frame-verification caveat applies to this layer too — nothing
-downstream of `tws_api`'s unverified decoders is verified either. This
-app's v1 (below) is unaffected either way — still build it, still don't
-block on v2, and don't treat "PR merged" as "safe against real quotes"
-until someone actually captures and checks a live frame.
+**Update 2026-09-13, re-verified directly against `trading_hub`'s
+current code (not secondhand reports)** — the picture is better than
+earlier notes assumed on one front, and precisely gapped on another:
+
+- `tws_api` (PR #25, `0b71feb`): `req_contract_details/2` +
+  `ContractDetails`/`ContractDetailsEnd` decode,
+  `req_sec_def_opt_params/5` + `SecurityDefinitionOptionParameter`/`End`
+  decode, `place_order/2` generalized for `"OPT"`, `TickOptionComputation`
+  decode for greeks. **Not yet verified against live captured frames** —
+  only against a reference bundle; `tws_api`'s own code flags this, and
+  this week alone `OpenOrder`/`ExecDetails` each had real field-shift
+  bugs only a live capture caught, twice each.
+- `trading_hub` `TradingHub.IBKR.ContractResolver` (PR #101): resolves
+  `(symbol, expiry, strike, right) -> con_id`, caches it. Confirmed
+  still exists, unchanged shape (`contract_resolver.ex:72-77`).
+- **New finding, corrects the earlier "not yet" note**:
+  `trading_hub`'s market-data *subscription* wire support for options
+  has actually landed — `TradingHub.IBKR.Subscriptions.send_req_mkt_data/3`
+  now reads `:expiry`/`:strike`/`:right`/`:multiplier` off the contract
+  map and places them in the `reqMktData` frame end-to-end, from
+  `MarketData.Manager.subscribe_symbol/3` all the way down
+  (`subscriptions.ex:284-334`). The caller must pass the option's
+  OCC-style `local_symbol` as `symbol` (not the bare ticker) — that
+  module's own doc comment explains why (`Subscriptions`' internal
+  `symbol_to_req` map is keyed by bare string and would otherwise
+  collide with the underlying stock's own subscription).
+- **The real, still-open gap, confirmed by direct code read**: nothing
+  turns a `TickOptionComputation` reply into a broadcast.
+  `TradingHub.IBKR.MessageHandler` has **no clause at all** for
+  `%Messages.TickOptionComputation{}` (`grep` across `trading_hub/lib`
+  and `trading_hub/test`: zero hits) — greeks (delta/gamma/theta/vega/
+  IV) are never decoded into anything a consumer app could subscribe to.
+  Separately, `TradingHub.Message` has no option-aware shape at all:
+  no `:greeks`/options message type in its type union, and
+  `to_topic/1`'s only `:price` clause (`message.ex:160-162`) keys purely
+  on a bare `symbol` string — no `con_id`/expiry/strike/right fields
+  exist on the struct, so even a plain option price tick (via the
+  now-working `TickPrice`/`TickSize` subscription) would carry identity
+  only by informal convention (whatever OCC-style string a caller chose
+  to subscribe with), never a structured field. `ContractResolver` is
+  also not wired to the subscription path anywhere — nothing calls
+  `resolve/4` and then turns the resulting `con_id` into a `subscribe/2`
+  call; a consumer would have to glue those two independently-built
+  pieces together itself.
+- Net: this app's v2 (below) is blocked specifically on (a) a
+  `TickOptionComputation` → broadcast path landing in `trading_hub`, and
+  (b) `TradingHub.Message` gaining real option identity (at minimum
+  `con_id` and/or expiry/strike/right fields, not just a
+  convention-only symbol string) — not on the subscription wire support,
+  which is already done. Neither (a) nor (b) is `trading_options_sim`'s
+  own work to do; see the handoff prompt in §9.
 
 Two paths, pick based on how soon real IBKR option ticks are needed:
 
@@ -731,13 +775,13 @@ Two paths, pick based on how soon real IBKR option ticks are needed:
   frame-verified first. Good enough to validate strategy logic (entry/exit
   rules, position sizing, lifecycle) well before real option quotes are
   available.
-- **v2 (once `trading_hub`'s options relay is frame-verified against real
-  TWS data — its code has landed, per the update above, but that's not
-  the same bar): real IBKR option quotes.** Swap the pricer for a
-  subscription to
-  `trading_hub`'s option market data — `ContractMonitor`'s rule-evaluation
-  interface (a snapshot map with price/greeks keys) stays the same either
-  way, so this is meant to be a swappable pricing backend
+- **v2 (once `trading_hub` closes the `TickOptionComputation`/`Message`
+  gap above, AND that path is frame-verified against real TWS data —
+  two separate bars, neither cleared yet): real IBKR option quotes.**
+  Swap the pricer for a subscription to `trading_hub`'s option market
+  data — `ContractMonitor`'s rule-evaluation interface (a snapshot map
+  with price/greeks keys) stays the same either way, so this is meant
+  to be a swappable pricing backend
   (`TradingOptionsSim.Pricing.BlackScholes` vs.
   `TradingOptionsSim.Pricing.IBKRLive`), not a rewrite.
 
@@ -859,78 +903,107 @@ avoid double-starting on a redundant activation call.
    management. Buildable once §1-3a's schema exists, independent of §4's
    actual cross-app client — this is what the client (and any operator
    or agent) will call against.
-7. **`TradingSystem.Client` + promotion flow** (§4): needs the
-   `link_trading_options_sim`/`unlink_trading_options_sim` endpoints added
-   to `trading_system` first — hand off that prompt once steps 1-5 have
-   validated the local shape enough to know exactly what promotion needs
-   to populate. Also needs step 6's Settings page to exist (where the
-   operator configures the outbound token/base URL).
-8. **Real IBKR option pricing swap-in** (§5a v2) — both `tws_api`'s side
-   (2026-09-13) and `trading_hub`'s consuming side, `ContractResolver` +
-   `Order`/`Position` option fields (PR #101, 2026-09-13) have now
-   shipped. **Neither is frame-verified against real TWS data yet** —
-   don't start this step until that verification has actually happened,
-   or until someone is prepared to be the one who does it and hits the
-   same class of field-shift bug `OpenOrder`/`ExecDetails` already hit
-   twice this week. `TWS_API_OPTIONS_UPDATE_PROMPT.md` (this directory)
-   has served its purpose and can be treated as historical — the work it
-   requested has already been sent and landed on both `tws_api`'s and
-   `trading_hub`'s sides.
+7. **Rename `promote_to_live_app` → `link_live_strategy`/`unlink_live_strategy`**
+   (§4, corrected 2026-09-13): small, self-contained rename inside this
+   app — no cross-app work needed on this app's own side. The actual
+   pull-based promotion orchestration (`TradingLive.Client`,
+   `promote_options_version/1`) is `trading_live`'s own future work, per
+   §4's handoff prompt — not built here, not this app's session's job.
+8. **Real IBKR option pricing swap-in** (§5a v2) — blocked on
+   `trading_hub` closing two gaps confirmed still open by direct code
+   read 2026-09-13: (a) a `TickOptionComputation` → broadcast path (zero
+   references anywhere in `trading_hub/lib`/`trading_hub/test` today),
+   and (b) real option identity on `TradingHub.Message`
+   (`to_topic/1`'s `:price` clause keys on a bare `symbol` string only —
+   no `con_id`/expiry/strike/right fields exist on the struct). Contract
+   resolution (`ContractResolver`) and market-data subscription wire
+   support (`Subscriptions.send_req_mkt_data/3`) are already done on
+   `trading_hub`'s side — this step is narrower than earlier drafts of
+   this plan assumed. Once (a)/(b) land, they'd also need the same
+   frame-verification discipline `tws_api`'s own decoders still lack.
    `contract_key`'s naming (§1) already matches `tws_api`/`trading_hub`'s
    own field names, so `IBKRLive` needs only a `strike`
    `Decimal`↔`float` conversion at this boundary — no broader
    translation layer to design. `con_id` stays an enrichment here, never
    this app's own key, even though it's `trading_hub`'s real runtime key
-   (see §1's divergence note).
+   (see §1's divergence note). See the handoff prompt in §9 for the
+   `trading_hub`-side work this step depends on.
 
-## 9. Current skeleton gaps (as of this writing)
+## 9. Current status (2026-09-13) and remaining gaps
 
-Confirmed by reading the app directly: `trading_options_sim` is a fresh,
-unmodified `mix phx.new` generator output. Concretely missing, all
-addressed by the sequencing above:
+Steps 1-6 of §8's sequencing are **built and merged to `main`** (PRs #1,
+#2 — schema/lifecycle, `ib_portfolio`/`PriceRelay`, Black-Scholes
+pricer, `ContractMonitor`/`SimActivator`, `/api/v1`, MCP server +
+Settings LiveView). 90 tests passing. Verified end-to-end against a real
+running dev server, including a genuine live connection to a running
+`trading_hub` node.
 
-- No `Registry`/`DynamicSupervisor` in `Application.start/2` yet (§6).
-- `{:app_status, git: ...}` and its `/status`/`/status/metrics`
-  wiring, `TradingOptionsSim.StatusExtension` — **done** (added this
-  session; see git history). `hub_connected?/0` currently reports `false`
-  unconditionally pending §4c's `ib_portfolio`/`HubClient` integration —
-  update it once that lands, per §4c's own note.
-- `{:ib_portfolio, path: "../ib_portfolio"}` (§4c) — not yet added.
-  Needed before `PriceRelay`/`ContractMonitor` (§5) can receive real
-  underlying ticks from `trading_hub`.
+Known remaining gaps, all real and none blocking further v1 work:
+
+- `Layouts`/`root.html.heex` are still the plain `mix phx.new` generator
+  output — this app's own `DESIGN.md` "Dark Pool" theme (hardcoded dark
+  DaisyUI theme, `Oswald`/`JetBrains Mono`, custom navbar) was never
+  actually implemented. `SettingsLive` (step 6) ships functional but
+  unstyled against it. Separate design pass, not started.
+- `promote_to_live_app` needs the rename to `link_live_strategy`/
+  `unlink_live_strategy` per §4's correction (step 7) — small, no
+  cross-app dependency.
 - No `dev.exs` port assignment or entry in `trading_hub`'s
   `:cluster_app_ports` registry the way `trading_live` (4007) and
-  `trading_system` (4004 UI / 4005 API) already have — needed before this
-  app's `IbPortfolio.HubClient` can actually reach `trading_hub`'s node
-  (Erlang distribution needs both sides configured, not just this app's
-  own `hub_node` setting). Since this touches `trading_hub`'s own config,
-  adding the registry entry is a small hand-off prompt for that app's
-  session, not a direct edit here; picking this app's own unused dev port
-  is a local, unilateral choice.
-- `req` is already a dependency (used for the `trading_system` promotion
-  client, §4) — no new HTTP-client dependency needed.
+  `trading_system` (4004 UI / 4005 API) have — this app picked its own
+  unused dev port (4008) unilaterally, but Erlang distribution needs
+  `trading_hub`'s own side configured too for `IbPortfolio.HubClient` to
+  reach it reliably outside this developer's own machine. Confirmed
+  live 2026-09-13 that it *does* connect on this machine already (both
+  nodes were already running under compatible names), so this gap may
+  be narrower in practice than it looks — worth confirming before
+  treating it as blocking.
 - No `oban` dependency — needed once the automatic quarantine-eligibility
   worker (§2, deferred to a later phase) is built; not needed for v1.
 
-## Open questions for the user before implementation starts
+**Handoff prompt for `trading_hub`'s own session** (do not implement
+from here, per this workspace's cross-app boundary rule): confirmed
+2026-09-13 by direct code read — add a `TickOptionComputation` decode
+path in `TradingHub.IBKR.MessageHandler` (mirroring how
+`ContractDetails`/`ContractDetailsEnd` already route to
+`ContractResolver`) and give `TradingHub.Message` real option identity
+(at minimum `con_id`, ideally also `expiry`/`strike`/`right`, not a
+convention-only `symbol` string) so `to_topic/1` can produce an
+unambiguous per-contract topic. `ContractResolver.resolve/4` and
+`Subscriptions.send_req_mkt_data/3`'s option fields already exist and
+work — this handoff is specifically about the decode-to-broadcast layer
+above them, which today has zero references to `TickOptionComputation`
+anywhere in `trading_hub/lib` or `trading_hub/test`. Frame-verification
+against real captured TWS data (same discipline `tws_api`'s own
+`OpenOrder`/`ExecDetails` fixes required) applies once this lands, same
+as everything else downstream of `tws_api`'s still-unverified decoders.
 
-- Confirm scope split in §4 step 2: signal logic from `trading_system`,
-  option-structuring config supplied locally at promotion — or should
-  `trading_system` itself grow option-aware `usage_conditions` so a
-  promoted version arrives fully configured?
-- Confirm §4's cross-app link naming choice (a vs. b) before that handoff
-  prompt is drafted.
+## Open questions
+
+**Resolved 2026-09-13** (kept for history): "what does live mean for a
+promoted options strategy" — answered by this session: `trading_live`
+is the intended destination, via the same pull-based mechanism it
+already uses against `trading_system` (§4). `trading_system` itself is
+not involved in this app's design at all — an earlier draft of this
+plan wrongly assumed it was.
+
+Still open:
+
 - Confirm quarantine/lifecycle settings (days required, min trades, min
   PnL) should start as direct copies of `trading_system`'s current
   defaults (20 trading days, 10 trades, $0 PnL — `LIFECYCLE.md` Settings
   table) or something else, given options' different trade cadence/sizing.
-- What does "live" actually mean for a promoted options strategy? Does an
-  options-capable execution app already exist or is planned (a
-  `trading_live`-equivalent that knows how to place real option orders,
-  which itself depends on `../OPTIONS_LEAPS_PLAN.md`'s still-open
-  `tws_api` order-placement work, step 3), or is `promote_to_live_app/2`
-  (above) meant to sit unimplemented/stubbed until that consumer exists?
-  This plan assumes the latter — `test_portfolio` is as far as this app's
-  own lifecycle goes, and the handoff point is deliberately left
-  consumer-agnostic — but worth confirming before building the promotion
-  marker fields.
+  Not yet operator-configurable in this app at all — still hardcoded
+  where referenced (§2's schema defaults).
+- Is promotion-in from `trading_system` (the originally-drafted, now
+  abandoned §4 design — pulling proven equity signal logic into this
+  app, supplying `option_leg_config` locally) worth building later as a
+  *second*, additional on-ramp alongside native authoring and the
+  trading_live pull-out? Nothing today requires it, and the schema
+  fields for it (`source`, `source_trading_system_version_id`,
+  `promoted_snapshot`) already exist unused if the answer is later yes —
+  no urgency either way.
+- §7's `promote_to_live_app` → `link_live_strategy` rename: worth doing
+  now (cheap, no dependency) or waiting until `trading_live`'s own
+  pull-side implementation actually exists and its session can confirm
+  the exact field/endpoint shape it wants to call?
