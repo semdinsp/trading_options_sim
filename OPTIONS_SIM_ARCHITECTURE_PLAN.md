@@ -551,6 +551,25 @@ exposes `connection_status/1` for exactly this.
 
 ## 5. Per-contract monitor (the "monitors" pattern)
 
+**Event-driven by construction, deliberately not `trading_system`'s
+poll/worker style** (confirmed direction, 2026-09-13): `trading_system`'s
+own entry/exit path is a fixed-interval tick loop
+(`TradingSystem.Trading.EntryEvaluator`, run on a timer) that periodically
+queries candidate versions and enqueues `Oban.Worker` jobs to act on
+them — a batch/poll model, correct for that app's actual needs (backtest-
+style paper simulation across a large universe, no real-time order
+latency to protect) but not what `trading_options_sim` should copy. Each
+`ContractMonitor` below is instead a live subscriber that reacts the
+instant a relevant tick/signal broadcast arrives on its own local PubSub
+subscription (§4c) — the same responsiveness property `trading_live`'s
+`StrategyStockMonitor` already has, and the reason this plan's §"Why not
+just extend `trading_live`" chose that app's monitor pattern as the model
+in the first place rather than `trading_system`'s. Nothing in this
+section should be read as introducing a polling loop anywhere in the hot
+path; a periodic worker is acceptable only for things that are genuinely
+periodic by nature (§2's future daily quarantine-eligibility check,
+§6's `PerformanceSnapshot` rollups) — never for reacting to a price move.
+
 Mirrors `TradingLive.StrategyStockMonitor` structurally, renamed for the
 options identity and paper-only execution:
 
