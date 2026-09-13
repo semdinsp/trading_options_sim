@@ -756,49 +756,57 @@ earlier notes assumed on one front, and precisely gapped on another:
   `resolve/4` and then turns the resulting `con_id` into a `subscribe/2`
   call; a consumer would have to glue those two independently-built
   pieces together itself.
-- Net: this app's v2 (below) is blocked specifically on (a) a
-  `TickOptionComputation` → broadcast path landing in `trading_hub`, and
-  (b) `TradingHub.Message` gaining real option identity (at minimum
-  `con_id` and/or expiry/strike/right fields, not just a
-  convention-only symbol string) — not on the subscription wire support,
-  which is already done. Neither (a) nor (b) is `trading_options_sim`'s
-  own work to do; see the handoff prompt in §9.
+**Update 2026-09-13, gap closed**: `trading_hub` shipped PR #102
+(`e3e909e`/`995c2c3`), adding a `TickOptionComputation` handler clause.
+Verified directly against the real code before building against it:
+`MessageHandler` broadcasts a plain `%TradingHub.Message{type: :price,
+symbol: <caller's OCC-style subscribe string>, data: %{implied_vol:,
+delta:, opt_price:, pv_dividend:, gamma:, vega:, theta:, und_price:}}`
+on `"prices:<symbol>"` — it reuses the existing `:price` type/topic
+shape rather than adding a distinct `:greeks` type or structured
+con_id/expiry/strike/right fields, so identity is still symbol-string-
+only, exactly as flagged above. **`trading_hub`'s own commit message
+states this is unverified against live TWS** — whether greeks actually
+stream for a plain `"OPT"` subscription, or need an explicit generic-tick
+code `Subscriptions.send_req_mkt_data/3` doesn't currently send, is an
+open question on that app's side, not something `trading_options_sim`
+can resolve from here.
 
-Two paths, pick based on how soon real IBKR option ticks are needed:
+Both pricing backends are now implemented:
 
-- **v1 (recommended to start): Black-Scholes-derived paper pricing.**
-  `ContractMonitor` computes its own theoretical price/greeks from the
-  underlying's real tick (flowing in via `PriceRelay`/`ib_portfolio`,
-  §4c), a configurable implied-vol input (flat, or a simple vol-surface
-  stub), and time-to-expiry — entirely local, no dependency on
-  `tws_api`/`trading_hub`'s option market-data work landing or being
-  frame-verified first. Good enough to validate strategy logic (entry/exit
-  rules, position sizing, lifecycle) well before real option quotes are
-  available.
-- **v2 (once `trading_hub` closes the `TickOptionComputation`/`Message`
-  gap above, AND that path is frame-verified against real TWS data —
-  two separate bars, neither cleared yet): real IBKR option quotes.**
-  Swap the pricer for a subscription to `trading_hub`'s option market
-  data — `ContractMonitor`'s rule-evaluation interface (a snapshot map
-  with price/greeks keys) stays the same either way, so this is meant
-  to be a swappable pricing backend
-  (`TradingOptionsSim.Pricing.BlackScholes` vs.
-  `TradingOptionsSim.Pricing.IBKRLive`), not a rewrite.
+- **v1 (default): Black-Scholes-derived paper pricing.**
+  `TradingOptionsSim.Pricing.BlackScholes` + `ContractMonitor`'s
+  `:black_scholes` mode (the default) — computes theoretical
+  price/greeks from the underlying's real tick, a configurable
+  implied-vol input, and time-to-expiry. Entirely local, no dependency
+  on `trading_hub`'s option work being frame-verified.
+- **v2 (opt-in, not the default): real IBKR quotes.**
+  `TradingOptionsSim.Pricing.IBKRLive` + `ContractMonitor`'s
+  `:pricing_backend: :ibkr_live` option — a small `GenServer` per
+  contract's OCC symbol, subscribing to `"prices:<occ_symbol>"` and
+  caching the latest greeks tick; `ContractMonitor` reads
+  `IBKRLive.latest/1` on every underlying tick rather than polling.
+  **Fails closed, never falls back to `BlackScholes`**: if no real tick
+  has arrived yet (`{:error, :no_data}`), that evaluation is simply
+  skipped — mixing a real quote with a synthetic one for the same
+  contract would be worse than waiting. Requires `:occ_symbol` at
+  start (raises `ArgumentError` without it) — this app does not derive
+  an OCC symbol itself; that's `trading_hub`/`tws_api`'s own convention,
+  supplied by whatever resolves the contract before starting the
+  monitor (not yet built — see §9's remaining gap).
 
-  **Naming consistency already resolved, not deferred** (flagged by the
-  `tws_api` session 2026-09-13, cross-checked against its real
-  `ContractDetails` struct, decided the same day — see §1): this plan's
-  `contract_key` now uses `tws_api`'s own `symbol`/`expiry` (raw
-  `"YYYYMMDD"` wire string, not a `Date`) directly, specifically so
-  `IBKRLive`'s eventual wiring needs no field-renaming translation layer
-  at this boundary. `strike` is the sole deliberate exception — kept
-  `Decimal` here rather than `tws_api`'s plain `float`, converted only at
-  this exact adapter boundary — see §1 for the full reasoning on both
-  decisions.
+  Given `trading_hub`'s own frame-verification caveat, `:ibkr_live` is
+  built and tested (with synthetic broadcasts, matching the confirmed
+  wire shape) but is **not** the default — flip it per-monitor once
+  someone confirms live greeks actually arrive against a real
+  connection, not before.
 
-This ordering also sidesteps a real dependency risk: this app should not
-be blocked on `tws_api`/`trading_hub`'s option work landing (or being
-frame-verified) first.
+  **Naming consistency paid off as intended**: `contract_key`'s
+  `symbol`/`expiry` (raw `"YYYYMMDD"` string) fields, decided in §1
+  specifically so this boundary would need no translation layer, meant
+  `IBKRLive` needed zero field-renaming — only the already-planned
+  `strike` `Decimal`↔`float` conversion at the `BlackScholes.compute/1`
+  call site, unrelated to this new module.
 
 ### 5b. Expiry handling
 
@@ -909,45 +917,44 @@ avoid double-starting on a redundant activation call.
    pull-based promotion orchestration (`TradingLive.Client`,
    `promote_options_version/1`) is `trading_live`'s own future work, per
    §4's handoff prompt — not built here, not this app's session's job.
-8. **Real IBKR option pricing swap-in** (§5a v2) — blocked on
-   `trading_hub` closing two gaps confirmed still open by direct code
-   read 2026-09-13: (a) a `TickOptionComputation` → broadcast path (zero
-   references anywhere in `trading_hub/lib`/`trading_hub/test` today),
-   and (b) real option identity on `TradingHub.Message`
-   (`to_topic/1`'s `:price` clause keys on a bare `symbol` string only —
-   no `con_id`/expiry/strike/right fields exist on the struct). Contract
-   resolution (`ContractResolver`) and market-data subscription wire
-   support (`Subscriptions.send_req_mkt_data/3`) are already done on
-   `trading_hub`'s side — this step is narrower than earlier drafts of
-   this plan assumed. Once (a)/(b) land, they'd also need the same
-   frame-verification discipline `tws_api`'s own decoders still lack.
-   `contract_key`'s naming (§1) already matches `tws_api`/`trading_hub`'s
-   own field names, so `IBKRLive` needs only a `strike`
-   `Decimal`↔`float` conversion at this boundary — no broader
-   translation layer to design. `con_id` stays an enrichment here, never
-   this app's own key, even though it's `trading_hub`'s real runtime key
-   (see §1's divergence note). See the handoff prompt in §9 for the
-   `trading_hub`-side work this step depends on.
+8. **Real IBKR option pricing swap-in** (§5a v2) — **done**, on
+   `step8-impl` branch: `TradingOptionsSim.Pricing.IBKRLive` +
+   `ContractMonitor`'s `:pricing_backend: :ibkr_live` option, consuming
+   `trading_hub` PR #102's `TickOptionComputation` broadcast (which
+   landed after this plan's earlier drafts, closing the gap those
+   drafts described). Not the default — `trading_hub`'s own commit
+   message flags live greeks streaming as unverified against real TWS,
+   so `:black_scholes` stays the default until someone confirms it
+   works end-to-end. `con_id` still stays an enrichment, never this
+   app's own key (§1's divergence note) — `IBKRLive` doesn't use it
+   either, since `trading_hub`'s broadcast doesn't carry one.
 
 ## 9. Current status (2026-09-13) and remaining gaps
 
-Steps 1-6 of §8's sequencing are **built and merged to `main`** (PRs #1,
-#2 — schema/lifecycle, `ib_portfolio`/`PriceRelay`, Black-Scholes
-pricer, `ContractMonitor`/`SimActivator`, `/api/v1`, MCP server +
-Settings LiveView). 90 tests passing. Verified end-to-end against a real
-running dev server, including a genuine live connection to a running
-`trading_hub` node.
+Steps 1-8 of §8's sequencing are **built** — steps 1-7 merged to `main`
+(PRs #1-#4: schema/lifecycle, `ib_portfolio`/`PriceRelay`,
+Black-Scholes pricer, `ContractMonitor`/`SimActivator`, `/api/v1`, MCP
+server + Settings LiveView, `link_live_strategy` rename); step 8
+(`IBKRLive` pricing backend) is on branch `step8-impl`, not yet merged.
+104 tests passing. Verified end-to-end against a real running dev
+server, including a genuine live connection to a running `trading_hub`
+node.
 
-Known remaining gaps, all real and none blocking further v1 work:
+`TRADING_HUB_OPTION_TICKS_UPDATE_PROMPT.md`'s ask has been fulfilled —
+`trading_hub` PR #102 added the `TickOptionComputation` broadcast that
+prompt requested. That file is now historical; no further action needed
+on it. See §5a's own update note for the precise wire shape this app now
+consumes, and the real caveat (`trading_hub`'s own commit message: live
+greeks streaming is unverified against real TWS) that keeps
+`:ibkr_live` opt-in rather than the default.
+
+Known remaining gaps, all real and none blocking current v1/v2 work:
 
 - `Layouts`/`root.html.heex` are still the plain `mix phx.new` generator
   output — this app's own `DESIGN.md` "Dark Pool" theme (hardcoded dark
   DaisyUI theme, `Oswald`/`JetBrains Mono`, custom navbar) was never
-  actually implemented. `SettingsLive` (step 6) ships functional but
-  unstyled against it. Separate design pass, not started.
-- `promote_to_live_app` needs the rename to `link_live_strategy`/
-  `unlink_live_strategy` per §4's correction (step 7) — small, no
-  cross-app dependency.
+  actually implemented. `SettingsLive` ships functional but unstyled
+  against it. Separate design pass, not started.
 - No `dev.exs` port assignment or entry in `trading_hub`'s
   `:cluster_app_ports` registry the way `trading_live` (4007) and
   `trading_system` (4004 UI / 4005 API) have — this app picked its own
@@ -960,23 +967,21 @@ Known remaining gaps, all real and none blocking further v1 work:
   treating it as blocking.
 - No `oban` dependency — needed once the automatic quarantine-eligibility
   worker (§2, deferred to a later phase) is built; not needed for v1.
-
-**Handoff prompt for `trading_hub`'s own session** (do not implement
-from here, per this workspace's cross-app boundary rule): confirmed
-2026-09-13 by direct code read — add a `TickOptionComputation` decode
-path in `TradingHub.IBKR.MessageHandler` (mirroring how
-`ContractDetails`/`ContractDetailsEnd` already route to
-`ContractResolver`) and give `TradingHub.Message` real option identity
-(at minimum `con_id`, ideally also `expiry`/`strike`/`right`, not a
-convention-only `symbol` string) so `to_topic/1` can produce an
-unambiguous per-contract topic. `ContractResolver.resolve/4` and
-`Subscriptions.send_req_mkt_data/3`'s option fields already exist and
-work — this handoff is specifically about the decode-to-broadcast layer
-above them, which today has zero references to `TickOptionComputation`
-anywhere in `trading_hub/lib` or `trading_hub/test`. Frame-verification
-against real captured TWS data (same discipline `tws_api`'s own
-`OpenOrder`/`ExecDetails` fixes required) applies once this lands, same
-as everything else downstream of `tws_api`'s still-unverified decoders.
+- **New, from building `:ibkr_live`**: nothing in this app resolves an
+  option contract to its OCC-style subscribe symbol yet —
+  `ContractMonitor`'s `:occ_symbol` option must be supplied by the
+  caller (`SimActivator` today never passes it; `:pricing_backend`
+  defaults to `:black_scholes`, so this isn't exercised in practice
+  yet). Building that resolution step (calling `tws_api`/`trading_hub`'s
+  `ContractResolver`-adjacent machinery, or constructing the OCC string
+  directly from `contract_key`) is real work still ahead of actually
+  flipping any monitor to `:ibkr_live` for a specific contract.
+- Whether `:ibkr_live` actually receives any ticks at all against a real
+  TWS connection remains unverified — this app's own code is tested
+  against the confirmed wire shape (synthetic broadcasts matching
+  `trading_hub`'s real struct), but nobody has exercised it against a
+  live option subscription yet. Do not flip a monitor to `:ibkr_live` in
+  anything but a deliberate experiment until that's confirmed.
 
 ## Open questions
 

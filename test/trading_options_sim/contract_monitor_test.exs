@@ -227,4 +227,101 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert closed_run.exit_reason == "expiry"
     end
   end
+
+  describe ":ibkr_live pricing backend" do
+    defp broadcast_option_greeks(occ_symbol, data) do
+      message =
+        %{type: :price, symbol: occ_symbol, source: :ibkr, data: data}
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{occ_symbol}", message)
+    end
+
+    test "does not evaluate (stays flat) until a real greeks tick arrives" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "IBKRLIVE1"
+      occ_symbol = "IBKRLIVE1_OCC"
+      key = contract_key(symbol)
+
+      {pid, run} =
+        start_monitor(version, key, pricing_backend: :ibkr_live, occ_symbol: occ_symbol)
+
+      # An underlying tick arrives, but IBKRLive has no data yet for this
+      # contract — must not enter, must not fall back to Black-Scholes.
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    test "enters using the real greeks tick's own price, once one arrives" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "IBKRLIVE2"
+      occ_symbol = "IBKRLIVE2_OCC"
+      key = contract_key(symbol)
+
+      {pid, run} =
+        start_monitor(version, key, pricing_backend: :ibkr_live, occ_symbol: occ_symbol)
+
+      broadcast_option_greeks(occ_symbol, %{
+        implied_vol: 0.30,
+        delta: 0.55,
+        opt_price: 6.25,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        und_price: 150.0
+      })
+
+      Process.sleep(50)
+
+      # The greeks tick alone doesn't trigger evaluation (per design,
+      # evaluation is driven by the underlying's own tick, reading
+      # whatever IBKRLive has cached) — a subsequent underlying tick is
+      # what actually fires the rule check.
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      fills = Sim.list_sim_fills(run)
+      assert length(fills) == 1
+      assert Decimal.equal?(hd(fills).fill_price, Decimal.new("6.25"))
+    end
+
+    test "raises if :occ_symbol is missing for :ibkr_live" do
+      version = version_fixture(%{})
+      key = contract_key("IBKRLIVE3")
+
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: "IBKRLIVE3",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      assert {:error, {{%ArgumentError{}, _init_stacktrace}, _child_spec}} =
+               start_supervised(
+                 {ContractMonitor,
+                  sim_run_id: run.id,
+                  contract_key: key,
+                  strategy_version: version,
+                  direction: "long",
+                  quantity: 1,
+                  pricing_backend: :ibkr_live}
+               )
+    end
+  end
 end

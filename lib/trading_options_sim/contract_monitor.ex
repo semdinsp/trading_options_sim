@@ -19,13 +19,31 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   ## v1 scope
 
-  Single-leg long/short only (no multi-leg — plan §7). Pricing is
-  synthetic (`TradingOptionsSim.Pricing.BlackScholes`, plan §5a v1) — no
-  live options tick feed is assumed. Entry/exit rules are evaluated via
-  `TradingCore.RuleEngine.evaluate/2` against a snapshot built from the
-  current theoretical price/greeks plus a synthetic `run_current_price`
-  key (matching the `run_` naming convention `TradingCore.RuleEngine`'s
-  own moduledoc documents for caller-supplied, non-catalog values).
+  Single-leg long/short only (no multi-leg — plan §7). Pricing defaults
+  to synthetic (`TradingOptionsSim.Pricing.BlackScholes`, plan §5a v1) —
+  no live options tick feed is assumed. Entry/exit rules are evaluated
+  via `TradingCore.RuleEngine.evaluate/2` against a snapshot built from
+  the current theoretical price/greeks plus a synthetic
+  `run_current_price` key (matching the `run_` naming convention
+  `TradingCore.RuleEngine`'s own moduledoc documents for caller-supplied,
+  non-catalog values).
+
+  ## v2: real IBKR quotes (opt-in, not the default)
+
+  `:pricing_backend` (`:black_scholes` default, or `:ibkr_live`) selects
+  `TradingOptionsSim.Pricing.IBKRLive` instead — see that module's own
+  moduledoc for the real, confirmed-unverified risk that live greeks
+  streaming may simply never arrive (an upstream `trading_hub` question,
+  not a bug in this module). When `:ibkr_live` is selected, `:occ_symbol`
+  (the exact string `trading_hub`'s own subscription was made with for
+  this contract) is required — this module does not derive it, since
+  contract-to-OCC-symbol resolution lives outside this app entirely (see
+  plan §5a v2's naming note). If no real tick has arrived yet
+  (`IBKRLive.latest/1` returns `{:error, :no_data}`), this monitor simply
+  does not evaluate that tick — same fail-closed posture
+  `TradingCore.RuleEngine` already uses for a missing signal, not a
+  fallback to the synthetic pricer (mixing real and synthetic prices for
+  the same contract would be worse than waiting).
 
   ## Expiry handling (plan §5b)
 
@@ -41,6 +59,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   alias TradingCore.RuleEngine
   alias TradingOptionsSim.Pricing.BlackScholes
+  alias TradingOptionsSim.Pricing.IBKRLive
   alias TradingOptionsSim.Sim
 
   # How many days before expiry to force-close a still-open position,
@@ -71,6 +90,8 @@ defmodule TradingOptionsSim.ContractMonitor do
     :expiry_close_dte,
     :entry_rule,
     :exit_rule,
+    :occ_symbol,
+    pricing_backend: :black_scholes,
     position_open?: false,
     last_snapshot: %{}
   ]
@@ -126,8 +147,15 @@ defmodule TradingOptionsSim.ContractMonitor do
     direction = Keyword.get(opts, :direction, "long")
     quantity = Keyword.get(opts, :quantity, 1)
     multiplier = Keyword.get(opts, :multiplier, 100)
+    pricing_backend = Keyword.get(opts, :pricing_backend, :black_scholes)
+    occ_symbol = Keyword.get(opts, :occ_symbol)
+
+    if pricing_backend == :ibkr_live and is_nil(occ_symbol) do
+      raise ArgumentError, ":occ_symbol is required when :pricing_backend is :ibkr_live"
+    end
 
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{symbol}")
+    maybe_start_ibkr_live(pricing_backend, occ_symbol)
 
     rules = strategy_version.rules || %{}
 
@@ -147,10 +175,37 @@ defmodule TradingOptionsSim.ContractMonitor do
       expiry_close_dte: Keyword.get(opts, :expiry_close_dte, @default_expiry_close_dte),
       entry_rule: Map.get(rules, "entry"),
       exit_rule: Map.get(rules, "exit"),
+      occ_symbol: occ_symbol,
+      pricing_backend: pricing_backend,
       position_open?: Keyword.get(opts, :position_open?, false)
     }
 
     {:ok, state}
+  end
+
+  # Starts (or finds an already-running) IBKRLive listener for this
+  # contract's OCC symbol when :ibkr_live is selected — a no-op in
+  # :black_scholes mode. Multiple ContractMonitors for the same contract
+  # would share one listener (Registry-keyed by occ_symbol, not by this
+  # monitor's own {sim_run_id, contract_key}), matching how
+  # IbPortfolio.HubClient is one shared connection for the whole app
+  # rather than one per monitor.
+  defp maybe_start_ibkr_live(:black_scholes, _occ_symbol), do: :ok
+
+  defp maybe_start_ibkr_live(:ibkr_live, occ_symbol) do
+    case IBKRLive.whereis(occ_symbol) do
+      nil ->
+        case DynamicSupervisor.start_child(
+               TradingOptionsSim.MonitorSupervisor,
+               {IBKRLive, occ_symbol: occ_symbol}
+             ) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+
+      _pid ->
+        :ok
+    end
   end
 
   @impl true
@@ -168,14 +223,30 @@ defmodule TradingOptionsSim.ContractMonitor do
     {:reply, reply, state}
   end
 
-  # A %TradingHub.Message{type: :price} broadcast from PriceRelay —
-  # recognized structurally (see IbPortfolio.Message's own moduledoc for
+  # A %TradingHub.Message{type: :price} broadcast from PriceRelay — the
+  # underlying's own tick, always subscribed (see init/1). In
+  # :black_scholes mode this alone drives evaluation, since the pricer
+  # computes the option price on-demand from it. In :ibkr_live mode this
+  # is only useful for tracking spot in the snapshot; the real trigger is
+  # the option contract's OWN quote/greeks tick, handled below — this
+  # matches how a real options tick stream works (the underlying and its
+  # option quote arrive as genuinely separate broadcasts), rather than
+  # pretending an underlying tick alone tells you anything new about the
+  # option's own live price.
+  #
+  # Recognized structurally (see IbPortfolio.Message's own moduledoc for
   # why this app has no compile-time TradingHub dependency).
   @impl true
   def handle_info(%{__struct__: TradingHub.Message, type: :price, data: data}, state) do
     case underlying_price(data) do
-      nil -> {:noreply, state}
-      spot -> {:noreply, evaluate(state, spot)}
+      nil ->
+        {:noreply, state}
+
+      spot ->
+        case state.pricing_backend do
+          :black_scholes -> {:noreply, evaluate_black_scholes(state, spot)}
+          :ibkr_live -> {:noreply, evaluate_ibkr_live(state, spot)}
+        end
     end
   end
 
@@ -188,7 +259,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp underlying_price(_data), do: nil
 
-  defp evaluate(state, spot) do
+  defp evaluate_black_scholes(state, spot) do
     dte = days_to_expiry(state.expiry)
 
     cond do
@@ -199,7 +270,7 @@ defmodule TradingOptionsSim.ContractMonitor do
         state
 
       true ->
-        priced = price_contract(state, spot, dte)
+        priced = price_contract_black_scholes(state, spot, dte)
         snapshot = build_snapshot(priced, spot)
 
         state
@@ -208,7 +279,40 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
-  defp price_contract(state, spot, dte) do
+  # Every underlying tick in :ibkr_live mode reads whatever the option's
+  # own listener last cached (IBKRLive.latest/1) — an underlying tick
+  # never blocks on the option quote arriving, it just re-checks the most
+  # recent one. {:error, :no_data} (no real tick has arrived for this
+  # contract yet) means this evaluation is skipped entirely — fail
+  # closed, never fall back to the synthetic pricer for a contract this
+  # monitor was explicitly told to price with real quotes (see this
+  # module's own moduledoc on why mixing the two would be worse).
+  defp evaluate_ibkr_live(state, spot) do
+    dte = days_to_expiry(state.expiry)
+
+    cond do
+      dte <= 0 and state.position_open? ->
+        force_close_expiry(state, spot, dte)
+
+      dte <= 0 ->
+        state
+
+      true ->
+        case IBKRLive.latest(state.occ_symbol) do
+          {:error, :no_data} ->
+            state
+
+          {:ok, tick} ->
+            snapshot = build_ibkr_live_snapshot(tick, spot)
+
+            state
+            |> Map.put(:last_snapshot, snapshot)
+            |> maybe_transition(snapshot)
+        end
+    end
+  end
+
+  defp price_contract_black_scholes(state, spot, dte) do
     BlackScholes.compute(%{
       spot: spot,
       strike: Decimal.to_float(state.strike),
@@ -217,6 +321,25 @@ defmodule TradingOptionsSim.ContractMonitor do
       volatility: state.implied_volatility,
       right: state.right
     })
+  end
+
+  # tick.underlying_price (from IBKR's own und_price field, when
+  # present) is deliberately preferred over the separately-tracked spot
+  # from the underlying's own stock tick when both are available — it's
+  # the value IBKR itself used to compute this exact tick's greeks, so
+  # it's the more internally-consistent number for run_underlying_price.
+  # Falls back to the stock tick's spot only if IBKR didn't send
+  # und_price on this particular computation.
+  defp build_ibkr_live_snapshot(tick, spot) do
+    %{
+      "run_current_price" => tick.price,
+      "run_underlying_price" => tick.underlying_price || spot,
+      "run_delta" => tick.delta,
+      "run_gamma" => tick.gamma,
+      "run_theta" => tick.theta,
+      "run_vega" => tick.vega,
+      "run_implied_vol" => tick.implied_vol
+    }
   end
 
   defp build_snapshot(priced, spot) do
