@@ -818,6 +818,110 @@ versions simply have a much longer runway before this fires — no special
 casing needed beyond "the expiry is far away," confirmed consistent with
 `../OPTIONS_LEAPS_PLAN.md`'s framing that LEAPS aren't a separate concept.
 
+### 5c. Exchange hours (2026-09-13, planned)
+
+This app has no exchange-hours concept today — `ContractMonitor` opens
+and closes simulated positions on any tick, any time, including
+weekends/holidays if a synthetic or replayed tick happened to arrive
+then. `trading_live` solved this exact problem for stock strategies;
+this section ports its design rather than inventing a new one.
+
+**Researched first, before designing anything here**: `trading_live`'s
+exchange-hours handling turned out to already be a two-layer,
+partially-shared design, not something to extract from scratch —
+
+- **`TradingCore.MarketHours`** (already a dependency of this app,
+  `mix.exs`) is a *pure* module — five functions (`open?/2`,
+  `closed_for_today?/2`, `next_close/2`, `today_open/2`,
+  `today_is_a_trading_day?/2`) operating on a plain
+  `%TradingCore.MarketHours.Session{}` struct (timezone, start/end time,
+  days_of_week, market, extra_holidays — no Ecto dependency). Backed by
+  a hardcoded static `UsEquitiesHolidays` calendar. Both `trading_system`
+  (`MarketHour` schema) and `trading_live` (`ExchangeTradingHours`/
+  `ExchangeSession` schemas) already call through to this exact same
+  shared time-math from their own independently-owned session *data* —
+  each app's schema is a thin `to_session/1` wrapper, nothing more. This
+  logic has already absorbed several real production incidents
+  (DST/holiday/cross-timezone edge cases) — see the module's own
+  extensive per-function docs; do not reimplement any of this math here.
+- **Considered and rejected**: extracting the wrapper (schema +
+  `to_session/1` + cache) into a *third* shared layer so all apps use
+  one implementation. Decided against — confirmed with the user
+  2026-09-13 — since `trading_system`/`trading_live` already establish
+  "independent per-app data, shared compute" as the precedent; forcing a
+  shared wrapper now would mean redesigning two already-working apps'
+  schemas for a benefit (one shared wrapper impl) smaller than the cost
+  (a third app's schema, a migration path for the other two, more
+  indirection). Revisit only if a fourth app needs the same thing and
+  the duplication is still bothering someone then.
+
+**What this app ports, almost verbatim**:
+
+- `TradingOptionsSim.Sim.ExchangeTradingHours` (schema: `name`,
+  `timezone`, `start_time`, `end_time`, `enabled`, `days_of_week`,
+  `market` default `"US_EQUITIES"`) and `TradingOptionsSim.Sim.ExchangeSession`
+  (bare `exchange => exchange_trading_hours_id` join, e.g. `"NASDAQ"` ->
+  the "US" row) — own tables, own migration, seeded once with a single
+  "US" row (this app has no non-US target pool members today; a second
+  session can be added later with zero code change, same as
+  `trading_live`'s own multi-session support). No `ManualMarketHoliday`
+  equivalent for v1 — `extra_holidays` defaults to `[]`; add that table
+  only once an operator actually needs a one-off manual closure.
+- `TradingOptionsSim.ExchangeSessionCache` — same ETS-backed,
+  periodic-refresh design as `trading_live`'s (avoids a DB round trip on
+  every tick of every running `ContractMonitor`, the identical
+  pool-exhaustion risk that module's own moduledoc documents as a real
+  incident it was written to fix). Same `:test`-env bypass (direct
+  uncached query) so tests see their own fixtures immediately.
+
+**What's actually gated, adapted for this app's own shape** (confirmed
+with the user 2026-09-13 — `ContractMonitor` has no order-transmission
+concept the way `StrategyStockMonitor` does; its only real-world action
+is recording a `SimFill`):
+
+- `ContractMonitor` resolves its own `member.exchange` (threaded through
+  from `SimActivator.activate/1`, same as `symbol`/`direction` already
+  are) to a session via `ExchangeSessionCache.fetch/1` once at init, then
+  checks `MarketHours.open?/2` at evaluation time — same "observation
+  always runs, the resulting *action* is what's gated" split
+  `trading_live`'s `transmission_allowed?/1` uses, mapped onto this
+  app's own real action: **a triggered entry/exit transition is skipped
+  (not recorded, logged, and left for the next in-hours tick) when the
+  session is closed** — rather than gating rule evaluation itself, which
+  would silently lose the "what would this rule have done overnight"
+  signal `trading_live` deliberately preserves. `last_snapshot` keeps
+  updating either way, matching `StrategyStockMonitor.evaluate/1`'s own
+  "snapshot updates regardless of the transmission gate."
+- An unresolved exchange (no `ExchangeSession` row, or `member.exchange`
+  itself `nil`) fails closed — never transmits/records — same
+  fail-closed convention every check in this module family already
+  uses.
+
+**Scoped down from `trading_live`'s full feature set** — v1 explicitly
+does NOT include: `after_hours_policy` (no per-version "unrestricted"
+override — every version is `regular_hours_only`-equivalent until an
+operator need for the other three policies actually shows up),
+`entry_delay_minutes`, `overnight_hold`, `time_box_exit_et`,
+`close_after_hours` — all real `trading_live` features with no
+`trading_options_sim` config surface (Settings page, `StrategyVersion`
+field) to hang them off yet. Add each only when a concrete need appears,
+not preemptively.
+
+**EOD force-close** — a scoped-down `TradingOptionsSim.EodCloser`
+(confirmed in scope with the user 2026-09-13): an Oban-cron worker
+(joining `QuarantineEligibilityWorker` in `daily_rollups`, or its own
+queue if the schedule needs finer than daily — TBD at implementation
+time, likely every-minute-ish like `trading_live`'s 60s GenServer tick,
+which argues for a `Process.send_after` loop instead of Oban's cron
+granularity) that scans every running `ContractMonitor`, and for one
+with `position_open?: true` whose exchange session's `next_close/2`
+falls within a fixed close-before window, force-closes it with
+`exit_reason: "eod_flatten"` — same mechanism as `trading_live`'s
+`EodCloser`, minus `overnight_hold`/`time_box_exit_et`/
+`close_after_hours` (no equivalent operator toggle exists here yet, so
+there is nothing to check before force-closing — every open position
+gets flattened near close, universally, v1).
+
 ## 6. Runs, fills, supervision tree
 
 ```
