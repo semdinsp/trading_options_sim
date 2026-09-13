@@ -24,6 +24,7 @@ defmodule TradingOptionsSimWeb.Router do
     live "/settings", SettingsLive
     live "/runs", RunsLive
     live "/active_strategies", ActiveStrategiesLive
+    live "/strategy_versions", StrategyVersionsLive
   end
 
   # Unauthenticated by design (scraper/uptime-check friendly) — see

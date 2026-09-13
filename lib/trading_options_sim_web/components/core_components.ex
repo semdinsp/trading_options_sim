@@ -452,6 +452,41 @@ defmodule TradingOptionsSimWeb.CoreComponents do
     """
   end
 
+  @doc """
+  A `StrategyVersion.lifecycle_stage` badge — bordered rectangle, per
+  DESIGN.md's badge convention, colored per stage rather than one flat
+  gray for all four: `discovery` (neutral, nothing proven yet),
+  `quarantine` (warning/amber, under evaluation), `test_portfolio`
+  (success/green, proven and paper-live), `retired` (muted, terminal).
+  Shared between `ActiveStrategiesLive` and `StrategyVersionsLive` so
+  the same stage always reads the same color everywhere it appears.
+
+  ## Examples
+
+      <.lifecycle_badge stage={version.lifecycle_stage} />
+  """
+  attr :stage, :string, required: true
+
+  def lifecycle_badge(assigns) do
+    ~H"""
+    <span class={[
+      "inline-block px-1.5 py-0.5 border text-[11px] uppercase tracking-wide font-data",
+      lifecycle_badge_class(@stage)
+    ]}>
+      {String.replace(@stage, "_", " ")}
+    </span>
+    """
+  end
+
+  defp lifecycle_badge_class("discovery"), do: "border-base-content/20 text-base-content/60"
+  defp lifecycle_badge_class("quarantine"), do: "border-warning/40 text-warning bg-warning/10"
+
+  defp lifecycle_badge_class("test_portfolio"),
+    do: "border-success/40 text-success bg-success/10"
+
+  defp lifecycle_badge_class("retired"), do: "border-base-content/15 text-base-content/40"
+  defp lifecycle_badge_class(_other), do: "border-base-content/20 text-base-content/60"
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do

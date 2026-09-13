@@ -27,6 +27,7 @@ defmodule TradingOptionsSimWeb.RunsLive do
      socket
      |> assign(:page_title, "Runs")
      |> assign(:status_filter, nil)
+     |> assign(:tagging_run_id, nil)
      |> load_runs()}
   end
 
@@ -43,6 +44,31 @@ defmodule TradingOptionsSimWeb.RunsLive do
 
   @impl true
   def handle_info(:refresh, socket) do
+    {:noreply, load_runs(socket)}
+  end
+
+  @impl true
+  def handle_event("toggle_tag_control", %{"id" => id}, socket) do
+    next_id = if socket.assigns.tagging_run_id == id, do: nil, else: id
+    {:noreply, assign(socket, :tagging_run_id, next_id)}
+  end
+
+  def handle_event("add_tag", %{"run_id" => run_id, "tag_name" => tag_name}, socket) do
+    trimmed = String.trim(tag_name)
+
+    if trimmed == "" do
+      {:noreply, socket}
+    else
+      run = Sim.get_sim_run!(run_id)
+      {:ok, _run} = Sim.add_tag_to_run_by_name(run, trimmed)
+      {:noreply, load_runs(socket)}
+    end
+  end
+
+  def handle_event("remove_tag", %{"id" => id, "tag_id" => tag_id}, socket) do
+    run = Sim.get_sim_run!(id) |> TradingOptionsSim.Repo.preload(:tags)
+    remaining_ids = run.tags |> Enum.reject(&(&1.id == tag_id)) |> Enum.map(& &1.id)
+    {:ok, _run} = Sim.put_run_tags(run, remaining_ids)
     {:noreply, load_runs(socket)}
   end
 
@@ -123,6 +149,7 @@ defmodule TradingOptionsSimWeb.RunsLive do
               <th>Exit</th>
               <th>Realized P&amp;L</th>
               <th>Exit reason</th>
+              <th>Tags</th>
             </tr>
           </thead>
           <tbody>
@@ -147,6 +174,46 @@ defmodule TradingOptionsSimWeb.RunsLive do
                 {run.realized_pnl || "—"}
               </td>
               <td class="text-base-content/60">{run.exit_reason || "—"}</td>
+              <td>
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span
+                    :for={tag <- run.tags}
+                    class="inline-flex items-center gap-1 px-1.5 py-0.5 border border-secondary/40 text-secondary bg-secondary/10 text-[11px] uppercase tracking-wide"
+                  >
+                    {tag.name}
+                    <button
+                      type="button"
+                      phx-click="remove_tag"
+                      phx-value-id={run.id}
+                      phx-value-tag_id={tag.id}
+                      class="hover:text-error"
+                    >
+                      <.icon name="hero-x-mark" class="h-3 w-3" />
+                    </button>
+                  </span>
+
+                  <button
+                    type="button"
+                    phx-click="toggle_tag_control"
+                    phx-value-id={run.id}
+                    class="text-base-content/40 hover:text-primary"
+                    title="Manage tags"
+                  >
+                    <.icon name="hero-tag" class="h-4 w-4" />
+                  </button>
+
+                  <form :if={@tagging_run_id == run.id} phx-submit="add_tag" class="inline-flex">
+                    <input type="hidden" name="run_id" value={run.id} />
+                    <input
+                      type="text"
+                      name="tag_name"
+                      placeholder="add tag…"
+                      class="input input-xs input-bordered font-data text-[11px]"
+                      autofocus
+                    />
+                  </form>
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>

@@ -82,6 +82,14 @@ defmodule TradingOptionsSimWeb.Layouts do
           </li>
           <li>
             <a
+              href="/strategy_versions"
+              class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+            >
+              <.icon name="hero-squares-2x2" class="h-4 w-4 mr-1" /> Versions
+            </a>
+          </li>
+          <li>
+            <a
               href="/settings"
               class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
             >

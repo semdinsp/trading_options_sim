@@ -52,6 +52,10 @@ defmodule TradingOptionsSim.Sim.SimRun do
 
     has_many :sim_fills, TradingOptionsSim.Sim.SimFill
 
+    many_to_many :tags, TradingOptionsSim.Sim.Tag,
+      join_through: TradingOptionsSim.Sim.RunTag,
+      on_replace: :delete
+
     timestamps(type: :utc_datetime)
   end
 

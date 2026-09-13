@@ -223,6 +223,98 @@ defmodule TradingOptionsSim.SimTest do
       {:ok, version} = Sim.put_strategy_version_tags(version, [])
       assert version.tags == []
     end
+
+    test "delete_tag/1 removes it from every strategy version and run it was applied to" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.add_tag_to_strategy_version_by_name(version, "doomed")
+      tag = hd(version.tags)
+
+      assert {:ok, _} = Sim.delete_tag(tag)
+
+      version = Sim.get_strategy_version!(version.id) |> TradingOptionsSim.Repo.preload(:tags)
+      assert version.tags == []
+      assert Sim.list_tags() == []
+    end
+
+    test "add_tag_to_run_by_name/2 is a no-op if already present" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: "AAPL",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, run} = Sim.add_tag_to_run_by_name(run, "needs review")
+      {:ok, run} = Sim.add_tag_to_run_by_name(run, "needs review")
+
+      assert length(run.tags) == 1
+    end
+
+    test "put_run_tags/2 replaces the full tag set" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: "AAPL",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, tag_a} = Sim.get_or_create_tag("a")
+      {:ok, tag_b} = Sim.get_or_create_tag("b")
+
+      {:ok, run} = Sim.put_run_tags(run, [tag_a.id, tag_b.id])
+      assert length(run.tags) == 2
+
+      {:ok, run} = Sim.put_run_tags(run, [])
+      assert run.tags == []
+    end
+  end
+
+  describe "list_strategy_versions/1" do
+    test "returns every version across every strategy when stage is nil" do
+      strategy = strategy_fixture()
+      version_fixture(strategy, %{version: 1})
+      version_fixture(strategy, %{version: 2})
+
+      assert length(Sim.list_strategy_versions()) == 2
+    end
+
+    test "filters to one lifecycle_stage" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      discovery_version = version_fixture(strategy, %{version: 1})
+      quarantine_version = version_fixture(strategy, %{version: 2, target_pool_id: pool.id})
+      {:ok, quarantine_version} = Sim.promote_strategy_version(quarantine_version, "quarantine")
+
+      discovery_ids = Sim.list_strategy_versions("discovery") |> Enum.map(& &1.id)
+      quarantine_ids = Sim.list_strategy_versions("quarantine") |> Enum.map(& &1.id)
+
+      assert discovery_version.id in discovery_ids
+      refute quarantine_version.id in discovery_ids
+      assert quarantine_version.id in quarantine_ids
+    end
+
+    test "preloads :strategy and :tags" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, _version} = Sim.add_tag_to_strategy_version_by_name(version, "reviewed")
+
+      [loaded] = Sim.list_strategy_versions()
+      assert loaded.strategy.id == strategy.id
+      assert Enum.map(loaded.tags, & &1.name) == ["reviewed"]
+    end
   end
 
   describe "list_sim_runs/1" do
