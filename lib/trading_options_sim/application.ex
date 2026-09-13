@@ -30,12 +30,22 @@ defmodule TradingOptionsSim.Application do
         # comment/incident) for the exact same reason; see that file for
         # the fuller "what actually happens without this" writeup.
         Supervisor.child_spec({Phoenix.PubSub, name: TradingHub.PubSub}, id: :trading_hub_pubsub),
+        # Same cross-node PubSub pattern as TradingHub.PubSub just above,
+        # new target app — required for TradingOptionsSim.SignalConnection's
+        # ContractMonitor callers to Phoenix.PubSub.subscribe/2 against a
+        # resolved trading_signal topic and actually receive values. See
+        # SignalConnection's own moduledoc (ported from
+        # TradingLive.SignalConnection) for the full erpc/subscribe split.
+        Supervisor.child_spec({Phoenix.PubSub, name: TradingSignal.PubSub},
+          id: :trading_signal_pubsub
+        ),
         # Per-contract monitor supervision (OPTIONS_SIM_ARCHITECTURE_PLAN.md
         # §5/§6) — Registry + DynamicSupervisor pair, mirroring trading_live's
         # MonitorRegistry/MonitorSupervisor.
         {Registry, keys: :unique, name: TradingOptionsSim.MonitorRegistry},
         {DynamicSupervisor, name: TradingOptionsSim.MonitorSupervisor, strategy: :one_for_one},
         TradingOptionsSim.PriceRelay,
+        TradingOptionsSim.SignalConnection,
         # MCP write-tool rate-limit table — see CallGuard.TableOwner's own
         # moduledoc for why this must be a permanent supervised owner,
         # not a lazily-created ETS table inside a short-lived MCP

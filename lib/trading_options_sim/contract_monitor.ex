@@ -52,6 +52,32 @@ defmodule TradingOptionsSim.ContractMonitor do
   a configurable cutoff — a new lifecycle event with no stock
   equivalent, since `StrategyStockMonitor` never has to reason about a
   position's own instrument ceasing to exist.
+
+  ## `trading_signal` integration
+
+  On init, resolves `TradingCore.RuleEngine.signal_names/1` against
+  `entry_rule`/`exit_rule` and, for each name, calls
+  `TradingOptionsSim.SignalBus.request/1` (erpc's `trading_signal` via
+  `SignalConnection`, ported from `StrategyStockMonitor`'s identical
+  pattern) to resolve it to a canonical topic and subscribe to
+  `TradingSignal.PubSub`. An incoming `{:signal, canonical_name, value}`
+  broadcast is translated back to the rule tree's own name and merged
+  into `last_signal_values` — carried forward into every subsequent
+  price-driven evaluation's snapshot (unlike `StrategyStockMonitor`,
+  which mutates one long-lived snapshot map directly, this module
+  rebuilds its pricing snapshot fresh on every tick — see
+  `build_snapshot/2`/`build_ibkr_live_snapshot/2` — so a received signal
+  value is stashed separately and merged in at evaluation time instead).
+
+  This app has no `trading_live`-style regime pseudo-signal concept —
+  every name `signal_names/1` returns is requested from `SignalBus`
+  as-is, no filtering.
+
+  Also subscribes to this app's own local `"trading_signal:connected"`
+  topic and re-subscribes on every broadcast there, same as
+  `StrategyStockMonitor` — `SignalConnection` broadcasts this on every
+  (re)connect, covering both "monitor started before the connection
+  existed" and "connection dropped and came back."
   """
 
   use GenServer
@@ -61,6 +87,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   alias TradingOptionsSim.Pricing.BlackScholes
   alias TradingOptionsSim.Pricing.IBKRLive
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.SignalBus
 
   # How many days before expiry to force-close a still-open position,
   # to approximate avoiding assignment/exercise mechanics this simulator
@@ -93,7 +120,10 @@ defmodule TradingOptionsSim.ContractMonitor do
     :occ_symbol,
     pricing_backend: :black_scholes,
     position_open?: false,
-    last_snapshot: %{}
+    last_snapshot: %{},
+    signal_names: [],
+    canonical_names: %{},
+    last_signal_values: %{}
   ]
 
   @type t :: %__MODULE__{}
@@ -158,6 +188,15 @@ defmodule TradingOptionsSim.ContractMonitor do
     maybe_start_ibkr_live(pricing_backend, occ_symbol)
 
     rules = strategy_version.rules || %{}
+    entry_rule = Map.get(rules, "entry")
+    exit_rule = Map.get(rules, "exit")
+
+    signal_names =
+      (RuleEngine.signal_names(entry_rule) ++ RuleEngine.signal_names(exit_rule))
+      |> Enum.uniq()
+
+    Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "trading_signal:connected")
+    canonical_names = subscribe_to_signals(signal_names)
 
     state = %__MODULE__{
       sim_run_id: sim_run_id,
@@ -173,11 +212,13 @@ defmodule TradingOptionsSim.ContractMonitor do
       implied_volatility: Keyword.get(opts, :implied_volatility, @default_implied_volatility),
       risk_free_rate: Keyword.get(opts, :risk_free_rate, @default_risk_free_rate),
       expiry_close_dte: Keyword.get(opts, :expiry_close_dte, @default_expiry_close_dte),
-      entry_rule: Map.get(rules, "entry"),
-      exit_rule: Map.get(rules, "exit"),
+      entry_rule: entry_rule,
+      exit_rule: exit_rule,
       occ_symbol: occ_symbol,
       pricing_backend: pricing_backend,
-      position_open?: Keyword.get(opts, :position_open?, false)
+      position_open?: Keyword.get(opts, :position_open?, false),
+      signal_names: signal_names,
+      canonical_names: canonical_names
     }
 
     {:ok, state}
@@ -250,7 +291,62 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
+  # A resolved trading_signal value — merged into last_signal_values
+  # (never evaluated immediately, unlike StrategyStockMonitor: this
+  # monitor's own trigger is always the next price tick, matching
+  # evaluate_ibkr_live/2's identical "cache and wait for the next price
+  # tick" posture for real greeks).
+  def handle_info({:signal, canonical_name, value}, state) do
+    name = Map.get(state.canonical_names, canonical_name, canonical_name)
+    {:noreply, put_in(state.last_signal_values[name], value)}
+  end
+
+  def handle_info(:trading_signal_connected, state) do
+    canonical_names = subscribe_to_signals(state.signal_names)
+    {:noreply, %{state | canonical_names: Map.merge(state.canonical_names, canonical_names)}}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
+
+  # See StrategyStockMonitor.subscribe_to_signals/1's identical
+  # implementation/comment for why both the SignalBus.request/1 call and
+  # the subsequent Phoenix.PubSub.subscribe/2 are required, and why
+  # ArgumentError/:exit here are swallowed rather than crashing this
+  # monitor's init/1 — TradingSignal.PubSub or SignalConnection not being
+  # up yet just means "retry on the next :trading_signal_connected
+  # broadcast," not a fatal error for a contract monitor that may have
+  # nothing to do with live signals failing.
+  defp subscribe_to_signals(signal_names) do
+    Map.new(signal_names, fn name -> {name, SignalBus.request(name)} end)
+    |> Enum.reduce(%{}, fn
+      {name, {:ok, topic}}, acc ->
+        Phoenix.PubSub.subscribe(TradingSignal.PubSub, topic)
+        canonical_name = String.trim_leading(topic, "signals:")
+        Map.put(acc, canonical_name, name)
+
+      {name, {:error, reason}}, acc ->
+        Logger.debug(
+          "ContractMonitor: could not request signal #{name}: #{inspect(reason)} " <>
+            "— will retry on next :trading_signal_connected"
+        )
+
+        acc
+    end)
+  catch
+    :error, %ArgumentError{} ->
+      Logger.debug(
+        "ContractMonitor: TradingSignal.PubSub not reachable yet, will retry on next :trading_signal_connected"
+      )
+
+      %{}
+
+    :exit, _reason ->
+      Logger.debug(
+        "ContractMonitor: TradingOptionsSim.SignalConnection unavailable, will retry on next :trading_signal_connected"
+      )
+
+      %{}
+  end
 
   defp underlying_price(%{last: last}) when is_number(last), do: last
 
@@ -271,7 +367,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
       true ->
         priced = price_contract_black_scholes(state, spot, dte)
-        snapshot = build_snapshot(priced, spot)
+        snapshot = build_snapshot(priced, spot, state.last_signal_values)
 
         state
         |> Map.put(:last_snapshot, snapshot)
@@ -303,7 +399,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             state
 
           {:ok, tick} ->
-            snapshot = build_ibkr_live_snapshot(tick, spot)
+            snapshot = build_ibkr_live_snapshot(tick, spot, state.last_signal_values)
 
             state
             |> Map.put(:last_snapshot, snapshot)
@@ -330,8 +426,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # it's the more internally-consistent number for run_underlying_price.
   # Falls back to the stock tick's spot only if IBKR didn't send
   # und_price on this particular computation.
-  defp build_ibkr_live_snapshot(tick, spot) do
-    %{
+  defp build_ibkr_live_snapshot(tick, spot, signal_values) do
+    Map.merge(signal_values, %{
       "run_current_price" => tick.price,
       "run_underlying_price" => tick.underlying_price || spot,
       "run_delta" => tick.delta,
@@ -339,18 +435,22 @@ defmodule TradingOptionsSim.ContractMonitor do
       "run_theta" => tick.theta,
       "run_vega" => tick.vega,
       "run_implied_vol" => tick.implied_vol
-    }
+    })
   end
 
-  defp build_snapshot(priced, spot) do
-    %{
+  # signal_values (named trading_signal values, keyed by the rule tree's
+  # own signal name) are merged in first so a run_-prefixed pricing key
+  # of the same name always wins — matches TradingCore.RuleEngine's own
+  # documented run_ precedence convention.
+  defp build_snapshot(priced, spot, signal_values) do
+    Map.merge(signal_values, %{
       "run_current_price" => priced.price,
       "run_underlying_price" => spot,
       "run_delta" => priced.delta,
       "run_gamma" => priced.gamma,
       "run_theta" => priced.theta,
       "run_vega" => priced.vega
-    }
+    })
   end
 
   defp maybe_transition(%{position_open?: false} = state, snapshot) do

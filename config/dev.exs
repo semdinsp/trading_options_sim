@@ -64,6 +64,11 @@ config :trading_options_sim, dev_routes: true
 # trading_risk already use.
 config :trading_options_sim, :hub_node, :"trading_hub@Scotts-Mac-mini.local"
 
+# trading_signal node to connect to via SignalConnection — same
+# convention as :hub_node above, matching trading_live's identical
+# :signal_node config.
+config :trading_options_sim, :signal_node, :"trading_signal@Scotts-Mac-mini.local"
+
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"
 
