@@ -19,7 +19,28 @@ defmodule TradingOptionsSim.Application do
         # MonitorRegistry/MonitorSupervisor.
         {Registry, keys: :unique, name: TradingOptionsSim.MonitorRegistry},
         {DynamicSupervisor, name: TradingOptionsSim.MonitorSupervisor, strategy: :one_for_one},
-        TradingOptionsSim.PriceRelay
+        TradingOptionsSim.PriceRelay,
+        # MCP write-tool rate-limit table — see CallGuard.TableOwner's own
+        # moduledoc for why this must be a permanent supervised owner,
+        # not a lazily-created ETS table inside a short-lived MCP
+        # session process.
+        TradingOptionsSim.MCP.CallGuard.TableOwner,
+        # Binds no port of its own: :streamable_http here only registers a
+        # named transport process the Plug mounted at `/mcp` in
+        # TradingOptionsSimWeb.Router talks to, riding on the main
+        # Endpoint below. `start:` left unset in dev/prod —
+        # Anubis.Server.Supervisor's own should_start?/1 defers to
+        # Phoenix's "am I actually serving HTTP" signal, matching
+        # config/test.exs's Endpoint `server: false`. config/test.exs
+        # overrides this to `true` via :trading_options_sim,
+        # :mcp_force_start specifically so an MCP integration test can
+        # exercise the real `/mcp` HTTP transport (Plug.Test dispatches
+        # straight into the plug pipeline without a listening socket, so
+        # Anubis's own heuristic would otherwise leave it off there) —
+        # ported from trading_system's identical setup.
+        {TradingOptionsSim.MCP.Server,
+         transport:
+           {:streamable_http, start: Application.get_env(:trading_options_sim, :mcp_force_start)}}
       ] ++
         hub_client_children() ++
         [

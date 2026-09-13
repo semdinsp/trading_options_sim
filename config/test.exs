@@ -25,6 +25,13 @@ config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
 # hub_client_child/0.
 config :trading_options_sim, :start_hub_client, false
 
+# Force the MCP transport to start even though the Endpoint isn't
+# actually listening under `server: false` — an MCP integration test
+# dispatches straight into the plug pipeline via Plug.Test, which
+# Anubis.Server.Supervisor's own "am I serving HTTP" heuristic can't see.
+# Ported from trading_system's identical test override.
+config :trading_options_sim, :mcp_force_start, true
+
 # In test we don't send emails
 config :trading_options_sim, TradingOptionsSim.Mailer, adapter: Swoosh.Adapters.Test
 

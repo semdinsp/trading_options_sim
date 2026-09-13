@@ -18,6 +18,7 @@ defmodule TradingOptionsSimWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    live "/settings", SettingsLive
   end
 
   # Unauthenticated by design (scraper/uptime-check friendly) — see
@@ -26,10 +27,33 @@ defmodule TradingOptionsSimWeb.Router do
   # auth) before exposing this publicly.
   forward "/status", AppStatus.Plug
 
-  # Other scopes may use custom stacks.
-  # scope "/api", TradingOptionsSimWeb do
-  #   pipe_through :api
-  # end
+  scope "/api/v1", TradingOptionsSimWeb.Api do
+    pipe_through :api
+
+    get "/strategies", StrategyController, :index
+    get "/strategies/:id", StrategyController, :show
+    post "/strategies", StrategyController, :create
+    post "/strategies/:id/versions", StrategyController, :create_version
+
+    get "/versions/:id", StrategyVersionController, :show
+    post "/versions/:id/promote", StrategyVersionController, :promote
+    post "/versions/:id/downgrade", StrategyVersionController, :downgrade
+    post "/versions/:id/promote_to_live_app", StrategyVersionController, :promote_to_live_app
+    put "/versions/:id/tags", StrategyVersionController, :put_tags
+    post "/versions/:id/tags", StrategyVersionController, :add_tag
+
+    get "/target_pools", TargetPoolController, :index
+    get "/target_pools/:id", TargetPoolController, :show
+    post "/target_pools", TargetPoolController, :create
+    post "/target_pools/:id/members", TargetPoolController, :create_member
+
+    get "/tags", TagController, :index
+  end
+
+  # MCP server — bare forward (auth is per-tool `scopes:`, not a
+  # router-level plug), matching trading_system's own mounting.
+  forward "/mcp", Anubis.Server.Transport.StreamableHTTP.Plug,
+    server: TradingOptionsSim.MCP.Server
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:trading_options_sim, :dev_routes) do
