@@ -9,6 +9,7 @@ defmodule TradingOptionsSim.Sim do
   alias TradingOptionsSim.Repo
 
   alias TradingOptionsSim.Sim.{
+    ApiToken,
     SimFill,
     SimRun,
     Strategy,
@@ -42,7 +43,7 @@ defmodule TradingOptionsSim.Sim do
 
   def create_strategy_version(%Strategy{} = strategy, attrs) do
     %StrategyVersion{}
-    |> StrategyVersion.changeset(Map.put(attrs, :strategy_id, strategy.id))
+    |> StrategyVersion.changeset(put_key(attrs, :strategy_id, strategy.id))
     |> Repo.insert()
   end
 
@@ -213,7 +214,7 @@ defmodule TradingOptionsSim.Sim do
 
   def add_target_pool_member(%TargetPool{} = pool, attrs) do
     %TargetPoolMember{}
-    |> TargetPoolMember.changeset(Map.put(attrs, :target_pool_id, pool.id))
+    |> TargetPoolMember.changeset(put_key(attrs, :target_pool_id, pool.id))
     |> Repo.insert()
   end
 
@@ -274,7 +275,7 @@ defmodule TradingOptionsSim.Sim do
   @doc "Opens a new `SimRun` for `version` against the resolved contract in `attrs`."
   def open_sim_run(%StrategyVersion{} = version, attrs) do
     %SimRun{}
-    |> SimRun.changeset(Map.put(attrs, :strategy_version_id, version.id))
+    |> SimRun.changeset(put_key(attrs, :strategy_version_id, version.id))
     |> Repo.insert()
   end
 
@@ -306,7 +307,7 @@ defmodule TradingOptionsSim.Sim do
 
   defp create_sim_fill(%SimRun{} = run, attrs) do
     %SimFill{}
-    |> SimFill.changeset(Map.put(attrs, :sim_run_id, run.id))
+    |> SimFill.changeset(put_key(attrs, :sim_run_id, run.id))
     |> Repo.insert()
   end
 
@@ -321,5 +322,64 @@ defmodule TradingOptionsSim.Sim do
     |> where([f], f.sim_run_id == ^sim_run_id)
     |> order_by([f], asc: f.filled_at)
     |> Repo.all()
+  end
+
+  # --- API tokens -----------------------------------------------------------
+  #
+  # Backs both /api/v1 (TradingOptionsSimWeb.ApiAuthPlug) and this app's
+  # MCP server — one token type for both surfaces, per
+  # OPTIONS_SIM_ARCHITECTURE_PLAN.md §4a.
+
+  @doc "Generates and persists a new `ApiToken`. Returns `{:ok, {raw_token, token}}` — `raw_token` is shown to the caller exactly once."
+  @spec create_api_token(String.t(), [String.t()]) ::
+          {:ok, {String.t(), ApiToken.t()}} | {:error, Ecto.Changeset.t()}
+  def create_api_token(label, scopes) do
+    {raw, changeset} = ApiToken.generate(label, scopes)
+
+    case Repo.insert(changeset) do
+      {:ok, token} -> {:ok, {raw, token}}
+      {:error, changeset} -> {:error, changeset}
+    end
+  end
+
+  @doc "Verifies a raw Bearer token string and, if valid, bumps `last_used_at` and returns the `ApiToken`."
+  @spec verify_api_token(String.t()) :: {:ok, ApiToken.t()} | :error
+  def verify_api_token(raw_token) do
+    with {:ok, token} <- ApiToken.verify(raw_token) do
+      token
+      |> Ecto.Changeset.change(last_used_at: DateTime.utc_now() |> DateTime.truncate(:second))
+      |> Repo.update()
+    end
+  end
+
+  def revoke_api_token(%ApiToken{} = token) do
+    token
+    |> Ecto.Changeset.change(revoked_at: DateTime.utc_now() |> DateTime.truncate(:second))
+    |> Repo.update()
+  end
+
+  @doc "Lists every `ApiToken`, newest first. Includes revoked tokens (a management panel shows status, not just active ones)."
+  @spec list_api_tokens() :: [ApiToken.t()]
+  def list_api_tokens do
+    ApiToken
+    |> order_by([t], desc: t.inserted_at)
+    |> Repo.all()
+  end
+
+  def get_api_token!(id), do: Repo.get!(ApiToken, id)
+
+  # Puts `value` under whichever key type `attrs` already uses (string or
+  # atom) — `Ecto.Changeset.cast/3` raises on a map with BOTH string and
+  # atom keys, which a plain `Map.put(attrs, :some_atom_key, value)` would
+  # produce whenever the caller is a controller action (string-keyed
+  # request params), even though every caller in this module that builds
+  # attrs by hand (tests, fixtures) uses atom keys. Empty/all-numeric-key
+  # maps default to atom, matching every existing atom-keyed caller.
+  defp put_key(attrs, key, value) when is_map(attrs) do
+    if Enum.any?(Map.keys(attrs), &is_binary/1) do
+      Map.put(attrs, Atom.to_string(key), value)
+    else
+      Map.put(attrs, key, value)
+    end
   end
 end
