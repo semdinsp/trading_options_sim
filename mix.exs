@@ -75,7 +75,9 @@ defmodule TradingOptionsSim.MixProject do
       {:bandit, "~> 1.5"},
       {:app_status, git: "https://github.com/semdinsp/app_status.git", tag: "v0.1.4"},
       {:ib_portfolio, path: "../ib_portfolio"},
-      {:trading_core, path: "../trading_core"}
+      {:trading_core, path: "../trading_core"},
+      {:uuidv7, "~> 1.0"},
+      {:anubis_mcp, "~> 2.0"}
     ]
   end
 
