@@ -56,6 +56,29 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.all()
   end
 
+  @doc """
+  Every `StrategyVersion` across every strategy, most-recently-updated
+  first, optionally filtered to one `lifecycle_stage` — the Strategy
+  Versions page's data source (`StrategyVersion.lifecycle_stages/0`
+  covers "discovery"/"quarantine"/"test_portfolio"/"retired", so this
+  one function/page also serves as the retired-strategies view, per
+  `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §9's UI gaps). Preloads `:strategy`
+  and `:tags` since every real use of this list shows both.
+  """
+  @spec list_strategy_versions(String.t() | nil) :: [StrategyVersion.t()]
+  def list_strategy_versions(lifecycle_stage \\ nil) do
+    StrategyVersion
+    |> maybe_filter_lifecycle_stage(lifecycle_stage)
+    |> order_by([v], desc: v.updated_at)
+    |> preload([:strategy, :tags])
+    |> Repo.all()
+  end
+
+  defp maybe_filter_lifecycle_stage(query, nil), do: query
+
+  defp maybe_filter_lifecycle_stage(query, stage),
+    do: where(query, [v], v.lifecycle_stage == ^stage)
+
   def set_strategy_version_rating(%StrategyVersion{} = version, rating) do
     version
     |> StrategyVersion.rating_changeset(%{rating: rating})
@@ -493,6 +516,20 @@ defmodule TradingOptionsSim.Sim do
     Repo.all(Tag)
   end
 
+  @doc """
+  Deletes `tag` outright — removes it from every `StrategyVersion`/
+  `SimRun` it's currently applied to (both join tables cascade via
+  `on_delete: :delete_all`, per their own migrations) rather than
+  leaving it dangling on any of them. Settings' tag management screen
+  is the one real caller; this is a destructive, unrecoverable action
+  by design (re-creating a tag by the same name afterward is a new
+  row, with no memory of what it used to be applied to).
+  """
+  @spec delete_tag(Tag.t()) :: {:ok, Tag.t()} | {:error, Ecto.Changeset.t()}
+  def delete_tag(%Tag{} = tag) do
+    Repo.delete(tag)
+  end
+
   @doc "Replaces `version`'s full tag set with `tag_ids` — an empty list clears every tag."
   def put_strategy_version_tags(%StrategyVersion{} = version, tag_ids) do
     tags = Repo.all(from t in Tag, where: t.id in ^tag_ids)
@@ -514,6 +551,31 @@ defmodule TradingOptionsSim.Sim do
         {:ok, version}
       else
         put_strategy_version_tags(version, existing_ids ++ [tag.id])
+      end
+    end
+  end
+
+  @doc "Replaces `run`'s full tag set with `tag_ids` — an empty list clears every tag. Mirrors `put_strategy_version_tags/2`."
+  def put_run_tags(%SimRun{} = run, tag_ids) do
+    tags = Repo.all(from t in Tag, where: t.id in ^tag_ids)
+
+    run
+    |> Repo.preload(:tags)
+    |> Ecto.Changeset.change()
+    |> Ecto.Changeset.put_assoc(:tags, tags)
+    |> Repo.update()
+  end
+
+  @doc "Get-or-creates `tag_name` and unions it onto `run`'s existing tags — a no-op if already present. Mirrors `add_tag_to_strategy_version_by_name/2`."
+  def add_tag_to_run_by_name(%SimRun{} = run, tag_name) do
+    with {:ok, tag} <- get_or_create_tag(tag_name) do
+      run = Repo.preload(run, :tags)
+      existing_ids = Enum.map(run.tags, & &1.id)
+
+      if tag.id in existing_ids do
+        {:ok, run}
+      else
+        put_run_tags(run, existing_ids ++ [tag.id])
       end
     end
   end
@@ -571,14 +633,15 @@ defmodule TradingOptionsSim.Sim do
   the Runs page's data source. Preloads `strategy_version` (through to
   `strategy`) since every real use of this list needs to show which
   strategy/version a run belongs to, not just the run's own contract
-  fields.
+  fields — and `:tags`, since the Runs page also renders per-run tag
+  chips.
   """
   @spec list_sim_runs(String.t() | nil) :: [SimRun.t()]
   def list_sim_runs(status \\ nil) do
     SimRun
     |> maybe_filter_status(status)
     |> order_by([r], desc: r.inserted_at)
-    |> preload(strategy_version: :strategy)
+    |> preload([:tags, strategy_version: :strategy])
     |> Repo.all()
   end
 

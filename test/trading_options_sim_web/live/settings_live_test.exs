@@ -22,7 +22,7 @@ defmodule TradingOptionsSimWeb.SettingsLiveTest do
 
     html =
       view
-      |> form("form", %{
+      |> form("#api-token-form", %{
         "api_token" => %{"label" => "new-token", "scopes" => ["strategies:read"]}
       })
       |> render_submit()
@@ -38,7 +38,9 @@ defmodule TradingOptionsSimWeb.SettingsLiveTest do
 
     html =
       view
-      |> form("form", %{"api_token" => %{"label" => "", "scopes" => ["strategies:read"]}})
+      |> form("#api-token-form", %{
+        "api_token" => %{"label" => "", "scopes" => ["strategies:read"]}
+      })
       |> render_submit()
 
     assert html =~ "Give the token a label"
@@ -49,7 +51,7 @@ defmodule TradingOptionsSimWeb.SettingsLiveTest do
 
     html =
       view
-      |> form("form", %{"api_token" => %{"label" => "no-scopes", "scopes" => []}})
+      |> form("#api-token-form", %{"api_token" => %{"label" => "no-scopes", "scopes" => []}})
       |> render_submit()
 
     assert html =~ "Pick at least one scope"
@@ -66,5 +68,49 @@ defmodule TradingOptionsSimWeb.SettingsLiveTest do
       |> render_click()
 
     assert html =~ "revoked"
+  end
+
+  describe "tags" do
+    test "renders the tags section", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/settings")
+      assert html =~ "Tags"
+    end
+
+    test "creating a tag adds it to the list", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+
+      html =
+        view
+        |> form("form[phx-submit=create_tag]", %{"tag_name" => "needs-review"})
+        |> render_submit()
+
+      assert html =~ "needs-review"
+      assert Enum.any?(Sim.list_tags(), &(&1.name == "needs-review"))
+    end
+
+    test "blank tag name is a no-op", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+
+      view
+      |> form("form[phx-submit=create_tag]", %{"tag_name" => "   "})
+      |> render_submit()
+
+      assert Sim.list_tags() == []
+    end
+
+    test "deleting a tag removes it from the list", %{conn: conn} do
+      {:ok, tag} = Sim.get_or_create_tag("doomed")
+
+      {:ok, view, html} = live(conn, ~p"/settings")
+      assert html =~ "doomed"
+
+      html =
+        view
+        |> element("button[phx-click=delete_tag][phx-value-id='#{tag.id}']")
+        |> render_click()
+
+      refute html =~ "doomed"
+      assert Sim.list_tags() == []
+    end
   end
 end

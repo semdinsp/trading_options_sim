@@ -70,9 +70,7 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
             <h2 class="font-bold uppercase tracking-wide">
               {version.strategy.name} <span class="text-base-content/40">v{version.version}</span>
             </h2>
-            <span class="px-1.5 py-0.5 border border-base-content/20 text-base-content/60 text-[11px] uppercase tracking-wide font-data">
-              {version.lifecycle_stage}
-            </span>
+            <.lifecycle_badge stage={version.lifecycle_stage} />
             <span class="font-data text-xs text-base-content/40 ml-auto">
               {length(version.sim_runs)} open
             </span>
