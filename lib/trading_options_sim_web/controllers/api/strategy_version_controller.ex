@@ -10,7 +10,7 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "strategies:write"]
-       when action in [:promote, :downgrade, :promote_to_live_app]
+       when action in [:promote, :downgrade, :link_live_strategy, :unlink_live_strategy]
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "tags:write"] when action in [:put_tags, :add_tag]
@@ -39,15 +39,31 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
     end
   end
 
-  @doc "POST /api/v1/versions/:id/promote_to_live_app {\"live_app\": \"trading_live\", \"live_strategy_id\": \"...\"}"
-  def promote_to_live_app(conn, %{
+  @doc """
+  POST /api/v1/versions/:id/link_live_strategy {"live_strategy_app": "trading_live", "live_strategy_id": "..."}
+
+  Called by the pulling app (e.g. `trading_live`) after it has already
+  built its own local record for this version — see
+  `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §4. This app never calls out to the
+  live-execution app; it only records the link when asked.
+  """
+  def link_live_strategy(conn, %{
         "id" => id,
-        "live_app" => live_app,
+        "live_strategy_app" => live_strategy_app,
         "live_strategy_id" => live_strategy_id
       }) do
     version = Sim.get_strategy_version!(id)
 
-    with {:ok, version} <- Sim.promote_to_live_app(version, live_app, live_strategy_id) do
+    with {:ok, version} <- Sim.link_live_strategy(version, live_strategy_app, live_strategy_id) do
+      json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
+    end
+  end
+
+  @doc "POST /api/v1/versions/:id/unlink_live_strategy — called when the live-execution app kills/deletes/unpromotes the strategy."
+  def unlink_live_strategy(conn, %{"id" => id}) do
+    version = Sim.get_strategy_version!(id)
+
+    with {:ok, version} <- Sim.unlink_live_strategy(version) do
       json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
     end
   end
