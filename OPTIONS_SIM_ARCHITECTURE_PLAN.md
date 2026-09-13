@@ -690,7 +690,13 @@ avoid double-starting on a redundant activation call.
    per-contract simulation loop, using stubbed/manual pool members before
    promotion (step 6) exists — lets the monitor pattern get proven against
    hand-authored native versions first, consuming step 2's `PriceRelay`
-   feed and step 3's pricer.
+   feed and step 3's pricer. Needs `trading_core`'s
+   `PositionSizing`/`RiskControls`/`ExitStrategy` to be options/multiplier-
+   aware before real dollar sizing/risk math is correct here — see
+   `TRADING_CORE_OPTIONS_UPDATE_PROMPT.md` (this directory), the handoff
+   prompt for that `trading_core`-side work. A stub multiplier of 1 can
+   unblock this step's own monitor-pattern development in the meantime,
+   but must not be mistaken for correct options sizing.
 5. **`SimActivator`** (§6): wires lifecycle-active versions to running
    monitors, mirroring `StrategyActivator`.
 6. **API + MCP access, Settings page** (§4a, §4b): `ApiToken` schema,
