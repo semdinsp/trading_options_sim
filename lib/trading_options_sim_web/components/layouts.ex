@@ -35,40 +35,50 @@ defmodule TradingOptionsSimWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://phoenix.hexdocs.pm/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
-      </div>
-    </header>
+    <.trading_navbar />
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
+    <main class="px-4 py-8 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-6xl">
         {render_slot(@inner_block)}
       </div>
     </main>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  @doc """
+  Renders this app's only navbar (§ "Layout patterns", DESIGN.md).
+  This app currently has one real operator-facing screen (Settings —
+  token management); the nav is deliberately this small rather than
+  padded out with placeholder links, and should gain entries here as
+  real strategy/version/target-pool/run screens are built.
+  """
+  def trading_navbar(assigns) do
+    ~H"""
+    <header class="navbar bg-base-300 border-b border-primary/20 px-4 sm:px-6 lg:px-8 min-h-14 h-14">
+      <div class="navbar-start">
+        <a href="/" class="flex items-center gap-2 px-2">
+          <span class="w-2 h-2 bg-primary shrink-0"></span>
+          <span class="text-lg font-bold uppercase tracking-[0.08em] text-base-content">
+            Trading<span class="text-primary">://</span>OptionsSim
+          </span>
+        </a>
+      </div>
+
+      <div class="navbar-end">
+        <ul class="menu menu-horizontal px-1 gap-1 font-data text-xs uppercase tracking-wider">
+          <li>
+            <a
+              href="/settings"
+              class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+            >
+              <.icon name="hero-cog-6-tooth" class="h-4 w-4 mr-1" /> Settings
+            </a>
+          </li>
+        </ul>
+      </div>
+    </header>
     """
   end
 
@@ -117,43 +127,6 @@ defmodule TradingOptionsSimWeb.Layouts do
         {gettext("Attempting to reconnect")}
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
-    </div>
-    """
-  end
-
-  @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css.
-
-  See <head> in root.html.heex which applies the theme before page load.
-  """
-  def theme_toggle(assigns) do
-    ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-      >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
     </div>
     """
   end
