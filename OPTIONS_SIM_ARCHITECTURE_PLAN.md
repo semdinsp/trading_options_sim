@@ -965,13 +965,22 @@ consumes, and the real caveat (`trading_hub`'s own commit message: live
 greeks streaming is unverified against real TWS) that keeps
 `:ibkr_live` opt-in rather than the default.
 
+**Dark Pool theme and two operator screens are also now built** (merged
+2026-09-13): `app.css`/`root.html.heex`/`Layouts.trading_navbar` now
+implement this app's own `DESIGN.md` for real (ported from
+`trading_dashboard`'s canonical theme — `DESIGN.md` itself had been an
+unmodified copy inherited at scaffold time, describing screens from a
+different app entirely). `Oban` is now a dependency, backing
+`TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker` (a scoped-down
+v1 port of `trading_system`'s daily quarantine day-count/auto-promote/
+auto-retire job, with fixed thresholds — no `AppSettings`-style runtime
+config exists in this app yet). `RunsLive` (`/runs`) and
+`ActiveStrategiesLive` (`/active_strategies`, symbol chips per open
+contract, ported down from `trading_live`'s `StrategyMonitorLive` chip
+pattern) round out the operator-facing screens. 135 tests passing.
+
 Known remaining gaps, all real and none blocking current v1/v2 work:
 
-- `Layouts`/`root.html.heex` are still the plain `mix phx.new` generator
-  output — this app's own `DESIGN.md` "Dark Pool" theme (hardcoded dark
-  DaisyUI theme, `Oswald`/`JetBrains Mono`, custom navbar) was never
-  actually implemented. `SettingsLive` ships functional but unstyled
-  against it. Separate design pass, not started.
 - No `dev.exs` port assignment or entry in `trading_hub`'s
   `:cluster_app_ports` registry the way `trading_live` (4007) and
   `trading_system` (4004 UI / 4005 API) have — this app picked its own
@@ -981,9 +990,15 @@ Known remaining gaps, all real and none blocking current v1/v2 work:
   live 2026-09-13 that it *does* connect on this machine already (both
   nodes were already running under compatible names), so this gap may
   be narrower in practice than it looks — worth confirming before
-  treating it as blocking.
-- No `oban` dependency — needed once the automatic quarantine-eligibility
-  worker (§2, deferred to a later phase) is built; not needed for v1.
+  treating it as blocking. **This is the one item on this list that
+  needs a `trading_hub`-side change, not just more work here** — see
+  the note below.
+- No exchange-hours/session gating — `ContractMonitor` evaluates on
+  every tick regardless of market hours, unlike `trading_live`'s
+  `StrategyStockMonitor` (`after_hours_policy`, `EodCloser`,
+  `MarketCloseDeactivationWorker`/`MarketOpenReactivationWorker`). Likely
+  matters more for options than stocks (many contracts are illiquid or
+  wide-spread outside RTH) — real gap, not started.
 - **New, from building `:ibkr_live`**: nothing in this app resolves an
   option contract to its OCC-style subscribe symbol yet —
   `ContractMonitor`'s `:occ_symbol` option must be supplied by the
