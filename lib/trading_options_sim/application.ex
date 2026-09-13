@@ -14,6 +14,22 @@ defmodule TradingOptionsSim.Application do
         {DNSCluster,
          query: Application.get_env(:trading_options_sim, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: TradingOptionsSim.PubSub},
+        # Local same-named Phoenix.PubSub server for trading_hub's own
+        # PubSub instance — required for IbPortfolio.HubClient's
+        # Phoenix.PubSub.subscribe/2 call (inside hub_client_children/0
+        # below) against TradingHub.PubSub to receive anything at all.
+        # Phoenix.PubSub's default PG2 adapter propagates broadcasts
+        # between *same-named* PubSub servers on different
+        # distributed-Erlang nodes via :pg — but only once a same-named
+        # local server exists to join that group in the first place.
+        # Without this, every subscribe raises `ArgumentError: unknown
+        # registry: TradingHub.PubSub`, unconditionally, regardless of
+        # node connectivity (confirmed live 2026-09-13 running this app
+        # with `iex --name ... -S mix phx.server`) — trading_live's own
+        # application.ex has the identical child (with the identical
+        # comment/incident) for the exact same reason; see that file for
+        # the fuller "what actually happens without this" writeup.
+        Supervisor.child_spec({Phoenix.PubSub, name: TradingHub.PubSub}, id: :trading_hub_pubsub),
         # Per-contract monitor supervision (OPTIONS_SIM_ARCHITECTURE_PLAN.md
         # §5/§6) — Registry + DynamicSupervisor pair, mirroring trading_live's
         # MonitorRegistry/MonitorSupervisor.
