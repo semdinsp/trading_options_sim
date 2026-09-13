@@ -47,6 +47,12 @@ defmodule TradingOptionsSim.Application do
         {DynamicSupervisor, name: TradingOptionsSim.MonitorSupervisor, strategy: :one_for_one},
         TradingOptionsSim.PriceRelay,
         TradingOptionsSim.SignalConnection,
+        # Exchange-hours support (OPTIONS_SIM_ARCHITECTURE_PLAN.md §5c) —
+        # ExchangeSessionCache backs every ContractMonitor's session-open
+        # check, EodCloser force-closes open positions near session
+        # close. Ported near-verbatim from trading_live's identical pair.
+        TradingOptionsSim.ExchangeSessionCache,
+        TradingOptionsSim.EodCloser,
         # MCP write-tool rate-limit table — see CallGuard.TableOwner's own
         # moduledoc for why this must be a permanent supervised owner,
         # not a lazily-created ETS table inside a short-lived MCP

@@ -29,6 +29,39 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     {symbol, "20271231", Decimal.new("150.00"), "C"}
   end
 
+  # An always-open session (every day of the week, 00:00-23:59) so
+  # session_open?/1 never blocks a fill on wall-clock timing during a
+  # test run — every existing entry/exit test in this file predates
+  # exchange-hours gating and asserts on rule-triggered transitions
+  # firing immediately, which this fixture preserves. A test that
+  # specifically wants to exercise the closed-session path builds its
+  # own narrower session instead (see "exchange hours" describe block).
+  defp always_open_exchange_fixture do
+    exchange = "TEST_ALWAYS_OPEN_#{System.unique_integer([:positive])}"
+
+    {:ok, hours} =
+      %TradingOptionsSim.Sim.ExchangeTradingHours{}
+      |> TradingOptionsSim.Sim.ExchangeTradingHours.changeset(%{
+        name: exchange,
+        timezone: "Etc/UTC",
+        start_time: ~T[00:00:00],
+        end_time: ~T[23:59:59],
+        enabled: true,
+        days_of_week: [1, 2, 3, 4, 5, 6, 7]
+      })
+      |> TradingOptionsSim.Repo.insert()
+
+    {:ok, _session} =
+      %TradingOptionsSim.Sim.ExchangeSession{}
+      |> TradingOptionsSim.Sim.ExchangeSession.changeset(%{
+        exchange: exchange,
+        exchange_trading_hours_id: hours.id
+      })
+      |> TradingOptionsSim.Repo.insert()
+
+    exchange
+  end
+
   defp start_monitor(version, contract_key, opts \\ []) do
     {symbol, expiry, strike, right} = contract_key
 
@@ -49,7 +82,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
           contract_key: contract_key,
           strategy_version: version,
           direction: Keyword.get(opts, :direction, "long"),
-          quantity: 1
+          quantity: 1,
+          exchange: always_open_exchange_fixture()
         ],
         opts
       )
@@ -173,6 +207,135 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       fills = Sim.list_sim_fills(run)
       assert length(fills) == 1
       assert hd(fills).action == "sell"
+    end
+  end
+
+  describe "exchange hours" do
+    defp closed_exchange_fixture do
+      exchange = "TEST_ALWAYS_CLOSED_#{System.unique_integer([:positive])}"
+
+      {:ok, hours} =
+        %TradingOptionsSim.Sim.ExchangeTradingHours{}
+        |> TradingOptionsSim.Sim.ExchangeTradingHours.changeset(%{
+          name: exchange,
+          timezone: "Etc/UTC",
+          start_time: ~T[00:00:00],
+          end_time: ~T[23:59:59],
+          enabled: false,
+          days_of_week: [1, 2, 3, 4, 5, 6, 7]
+        })
+        |> TradingOptionsSim.Repo.insert()
+
+      {:ok, _session} =
+        %TradingOptionsSim.Sim.ExchangeSession{}
+        |> TradingOptionsSim.Sim.ExchangeSession.changeset(%{
+          exchange: exchange,
+          exchange_trading_hours_id: hours.id
+        })
+        |> TradingOptionsSim.Repo.insert()
+
+      exchange
+    end
+
+    test "does not record a fill when the exchange session is closed" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "HOURSTEST1"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key, exchange: closed_exchange_fixture())
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    test "still updates last_snapshot while the session is closed (observation always runs)" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "HOURSTEST2"
+      key = contract_key(symbol)
+      {pid, _run} = start_monitor(version, key, exchange: closed_exchange_fixture())
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      snapshot = ContractMonitor.snapshot(pid)
+      assert snapshot.position_open? == false
+      assert snapshot.last_snapshot["run_underlying_price"] == 150.0
+    end
+
+    test "records a fill once the session reopens" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "HOURSTEST3"
+      key = contract_key(symbol)
+      exchange = closed_exchange_fixture()
+      {pid, run} = start_monitor(version, key, exchange: exchange)
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == false
+
+      {:ok, hours} =
+        TradingOptionsSim.Sim.ExchangeSession
+        |> TradingOptionsSim.Repo.get_by!(exchange: exchange)
+        |> TradingOptionsSim.Repo.preload(:exchange_trading_hours)
+        |> Map.fetch!(:exchange_trading_hours)
+        |> TradingOptionsSim.Sim.ExchangeTradingHours.changeset(%{enabled: true})
+        |> TradingOptionsSim.Repo.update()
+
+      refute hours.enabled == false
+
+      broadcast_underlying_price(symbol, 151.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == true
+      assert length(Sim.list_sim_fills(run)) == 1
+    end
+
+    test "fails closed when :exchange is nil" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "HOURSTEST4"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key, exchange: nil)
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    test "fails closed when the exchange has no mapped session" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "HOURSTEST5"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key, exchange: "UNMAPPED_EXCHANGE")
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.list_sim_fills(run) == []
     end
   end
 

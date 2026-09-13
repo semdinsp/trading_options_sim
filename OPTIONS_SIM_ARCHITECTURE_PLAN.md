@@ -1083,6 +1083,32 @@ config exists in this app yet). `RunsLive` (`/runs`) and
 contract, ported down from `trading_live`'s `StrategyMonitorLive` chip
 pattern) round out the operator-facing screens. 135 tests passing.
 
+**Exchange-hours support is also now built** (§5c, merged 2026-09-13):
+`TradingOptionsSim.Sim.ExchangeTradingHours`/`ExchangeSession` (schemas)
++ `TradingOptionsSim.ExchangeSessionCache` (ETS-backed, periodic refresh)
+ported near-verbatim from `trading_live`'s identical pair, both
+delegating to the same shared, incident-hardened `TradingCore.MarketHours`
+time-math both `trading_system` and `trading_live` already use (no new
+shared-library extraction needed — that pure-compute layer was already
+shared before this session started). `ContractMonitor` resolves its
+`:exchange` (threaded through from `SimActivator`'s `TargetPoolMember`)
+and skips a triggered entry/exit transition when the session is closed
+— rule evaluation and `last_snapshot` still update regardless of hours,
+mapping `trading_live`'s "observation always runs, transmission is
+gated" split onto this app's own real action, a `SimFill`. A new
+`TradingOptionsSim.EodCloser` (60s-tick GenServer, not Oban — matches
+`trading_live`'s own near-tick-frequency cadence) force-closes open
+positions within `close_before_minutes` of their exchange's close.
+Scoped down from `trading_live`'s full feature set: no
+`after_hours_policy`/`entry_delay_minutes`/`overnight_hold`/
+`time_box_exit_et`/`close_after_hours` equivalents — none of those have
+a config surface in this app yet; add only when a concrete need shows
+up. Seeded with a single "US" session (`America/New_York`,
+09:30-16:00 ET) covering NYSE/NASDAQ/SMART/ARCA — this app has no
+non-US target pool members today. 173 tests passing. Verified live
+against a real running dev node: a real Sunday activation with an
+always-true entry signal correctly left the run unfilled.
+
 Known remaining gaps, all real and none blocking current v1/v2 work:
 
 - No `dev.exs` port assignment or entry in `trading_hub`'s
@@ -1097,12 +1123,6 @@ Known remaining gaps, all real and none blocking current v1/v2 work:
   treating it as blocking. **This is the one item on this list that
   needs a `trading_hub`-side change, not just more work here** — see
   the note below.
-- No exchange-hours/session gating — `ContractMonitor` evaluates on
-  every tick regardless of market hours, unlike `trading_live`'s
-  `StrategyStockMonitor` (`after_hours_policy`, `EodCloser`,
-  `MarketCloseDeactivationWorker`/`MarketOpenReactivationWorker`). Likely
-  matters more for options than stocks (many contracts are illiquid or
-  wide-spread outside RTH) — real gap, not started.
 - **New, from building `:ibkr_live`**: nothing in this app resolves an
   option contract to its OCC-style subscribe symbol yet —
   `ContractMonitor`'s `:occ_symbol` option must be supplied by the

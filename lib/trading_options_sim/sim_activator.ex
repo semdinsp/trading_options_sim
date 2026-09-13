@@ -79,7 +79,7 @@ defmodule TradingOptionsSim.SimActivator do
 
     case existing_run do
       %{id: run_id} ->
-        start_or_find_monitor(version, run_id, contract_key)
+        start_or_find_monitor(version, run_id, contract_key, member.exchange)
 
       nil ->
         start_new_run_and_monitor(version, member, contract_key)
@@ -96,7 +96,7 @@ defmodule TradingOptionsSim.SimActivator do
            direction: version.direction
          }) do
       {:ok, run} ->
-        start_or_find_monitor(version, run.id, {symbol, expiry, strike, right})
+        start_or_find_monitor(version, run.id, {symbol, expiry, strike, right}, member.exchange)
 
       {:error, reason} ->
         Logger.error(
@@ -107,7 +107,7 @@ defmodule TradingOptionsSim.SimActivator do
     end
   end
 
-  defp start_or_find_monitor(version, run_id, contract_key) do
+  defp start_or_find_monitor(version, run_id, contract_key, exchange) do
     case ContractMonitor.whereis(run_id, contract_key) do
       nil ->
         spec = %{
@@ -116,6 +116,7 @@ defmodule TradingOptionsSim.SimActivator do
             {ContractMonitor, :start_link,
              [
                [
+                 exchange: exchange,
                  sim_run_id: run_id,
                  contract_key: contract_key,
                  strategy_version: version,

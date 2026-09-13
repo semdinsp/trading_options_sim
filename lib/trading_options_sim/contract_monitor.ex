@@ -78,6 +78,24 @@ defmodule TradingOptionsSim.ContractMonitor do
   `StrategyStockMonitor` — `SignalConnection` broadcasts this on every
   (re)connect, covering both "monitor started before the connection
   existed" and "connection dropped and came back."
+
+  ## Exchange hours (plan §5c)
+
+  `:exchange` (threaded through from `SimActivator`'s `TargetPoolMember`)
+  resolves via `TradingOptionsSim.ExchangeSessionCache` to a
+  `TradingCore.MarketHours.Session` at evaluation time — a `nil` exchange
+  or an unmapped one fails closed (`session_open?/1`). Rule evaluation
+  and `last_snapshot` always update regardless of hours (same
+  "observation always runs" posture `StrategyStockMonitor`'s
+  `transmission_allowed?/1` uses for order transmission); only a
+  triggered entry/exit transition is skipped outside session hours —
+  mapped onto this app's own real action, a `SimFill`, rather than an
+  IBKR order. A skipped transition is simply re-evaluated on the next
+  tick, same as any other unmet rule condition — nothing is queued or
+  remembered across ticks. `force_close_expiry/3` (DTE-based) and
+  `TradingOptionsSim.EodCloser`'s force-close both call `submit_exit/3`
+  directly, bypassing this gate — a forced flatten must go through
+  regardless of hours, same as `trading_live`'s own EOD closer.
   """
 
   use GenServer
@@ -118,6 +136,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     :entry_rule,
     :exit_rule,
     :occ_symbol,
+    :exchange,
     pricing_backend: :black_scholes,
     position_open?: false,
     last_snapshot: %{},
@@ -215,6 +234,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       entry_rule: entry_rule,
       exit_rule: exit_rule,
       occ_symbol: occ_symbol,
+      exchange: Keyword.get(opts, :exchange),
       pricing_backend: pricing_backend,
       position_open?: Keyword.get(opts, :position_open?, false),
       signal_names: signal_names,
@@ -257,6 +277,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       strike: state.strike,
       right: state.right,
       direction: state.direction,
+      exchange: state.exchange,
       position_open?: state.position_open?,
       last_snapshot: state.last_snapshot
     }
@@ -304,6 +325,32 @@ defmodule TradingOptionsSim.ContractMonitor do
   def handle_info(:trading_signal_connected, state) do
     canonical_names = subscribe_to_signals(state.signal_names)
     {:noreply, %{state | canonical_names: Map.merge(state.canonical_names, canonical_names)}}
+  end
+
+  # Forced end-of-day close — sent by TradingOptionsSim.EodCloser once
+  # this contract's exchange is within its own configured window of
+  # closing. Skips maybe_transition/2 (and therefore session_open?/1)
+  # entirely — a forced close on a deadline, not a rule-triggered one,
+  # same posture force_close_expiry/3 already takes for DTE-based
+  # closes. Uses the monitor's own last_snapshot (the most recent priced
+  # tick) rather than re-pricing — EodCloser has no spot price of its
+  # own to hand back. A flat monitor (no open position, or no snapshot
+  # priced yet) is a no-op; `reason` is always `:eod_flatten`.
+  def handle_info({:force_close_eod, _reason}, %{position_open?: false} = state) do
+    {:noreply, state}
+  end
+
+  def handle_info({:force_close_eod, _reason}, %{last_snapshot: snapshot} = state)
+      when map_size(snapshot) == 0 do
+    Logger.warning(
+      "ContractMonitor: #{state.symbol} EOD force-close skipped — no priced snapshot yet"
+    )
+
+    {:noreply, state}
+  end
+
+  def handle_info({:force_close_eod, reason}, state) do
+    {:noreply, submit_exit(state, state.last_snapshot, to_string(reason))}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -454,7 +501,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp maybe_transition(%{position_open?: false} = state, snapshot) do
-    if RuleEngine.evaluate(state.entry_rule, snapshot) do
+    if RuleEngine.evaluate(state.entry_rule, snapshot) and session_open?(state) do
       submit_entry(state, snapshot)
     else
       state
@@ -462,10 +509,31 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp maybe_transition(%{position_open?: true} = state, snapshot) do
-    if RuleEngine.evaluate(state.exit_rule, snapshot) do
+    if RuleEngine.evaluate(state.exit_rule, snapshot) and session_open?(state) do
       submit_exit(state, snapshot, "rule_exit")
     else
       state
+    end
+  end
+
+  # "Observation always runs, the resulting action is what's gated" —
+  # same split TradingLive.StrategyStockMonitor's transmission_allowed?/1
+  # applies to order transmission, mapped onto this app's own real action
+  # (a SimFill, not an order). Rule evaluation above and last_snapshot
+  # both already ran unconditionally by the time this is checked; a rule
+  # match outside session hours is simply not acted on this tick — it's
+  # re-evaluated fresh on the next one, same as any other unmet
+  # condition. See OPTIONS_SIM_ARCHITECTURE_PLAN.md §5c.
+  #
+  # An unresolved exchange (nil, or no ExchangeSession row mapped for it)
+  # fails closed — never transmits — same convention every check in this
+  # module family already uses for missing data.
+  defp session_open?(%{exchange: nil}), do: false
+
+  defp session_open?(%{exchange: exchange}) do
+    case TradingOptionsSim.ExchangeSessionCache.fetch(exchange) do
+      nil -> false
+      session -> TradingCore.MarketHours.open?(session, DateTime.utc_now())
     end
   end
 
