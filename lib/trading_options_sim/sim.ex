@@ -7,7 +7,16 @@ defmodule TradingOptionsSim.Sim do
   import Ecto.Query
 
   alias TradingOptionsSim.Repo
-  alias TradingOptionsSim.Sim.{Strategy, StrategyVersion, Tag, TargetPool, TargetPoolMember}
+
+  alias TradingOptionsSim.Sim.{
+    SimFill,
+    SimRun,
+    Strategy,
+    StrategyVersion,
+    Tag,
+    TargetPool,
+    TargetPoolMember
+  }
 
   # --- Strategies -----------------------------------------------------------
 
@@ -258,5 +267,59 @@ defmodule TradingOptionsSim.Sim do
         put_strategy_version_tags(version, existing_ids ++ [tag.id])
       end
     end
+  end
+
+  # --- Sim runs / fills -----------------------------------------------------
+
+  @doc "Opens a new `SimRun` for `version` against the resolved contract in `attrs`."
+  def open_sim_run(%StrategyVersion{} = version, attrs) do
+    %SimRun{}
+    |> SimRun.changeset(Map.put(attrs, :strategy_version_id, version.id))
+    |> Repo.insert()
+  end
+
+  def get_sim_run!(id), do: Repo.get!(SimRun, id)
+
+  @doc "Records the entry fill: creates the `entry`-kind `SimFill` and stamps `SimRun`'s own entry fields together."
+  def record_entry_fill(%SimRun{} = run, fill_attrs, run_entry_attrs) do
+    Repo.transaction(fn ->
+      with {:ok, fill} <- create_sim_fill(run, Map.put(fill_attrs, :kind, "entry")),
+           {:ok, run} <- SimRun.entry_changeset(run, run_entry_attrs) |> Repo.update() do
+        {fill, run}
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
+  end
+
+  @doc "Records the exit fill: creates the `exit`-kind `SimFill` and closes the run."
+  def record_exit_fill(%SimRun{} = run, fill_attrs, run_exit_attrs) do
+    Repo.transaction(fn ->
+      with {:ok, fill} <- create_sim_fill(run, Map.put(fill_attrs, :kind, "exit")),
+           {:ok, run} <- SimRun.exit_changeset(run, run_exit_attrs) |> Repo.update() do
+        {fill, run}
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
+  end
+
+  defp create_sim_fill(%SimRun{} = run, attrs) do
+    %SimFill{}
+    |> SimFill.changeset(Map.put(attrs, :sim_run_id, run.id))
+    |> Repo.insert()
+  end
+
+  def list_open_sim_runs(%StrategyVersion{id: strategy_version_id}) do
+    SimRun
+    |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "open")
+    |> Repo.all()
+  end
+
+  def list_sim_fills(%SimRun{id: sim_run_id}) do
+    SimFill
+    |> where([f], f.sim_run_id == ^sim_run_id)
+    |> order_by([f], asc: f.filled_at)
+    |> Repo.all()
   end
 end
