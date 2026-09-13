@@ -22,6 +22,8 @@ defmodule TradingOptionsSimWeb.Router do
     # than leaving "/" on the unrelated Phoenix generator splash page.
     live "/", SettingsLive
     live "/settings", SettingsLive
+    live "/runs", RunsLive
+    live "/active_strategies", ActiveStrategiesLive
   end
 
   # Unauthenticated by design (scraper/uptime-check friendly) — see

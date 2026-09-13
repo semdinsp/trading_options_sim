@@ -1,0 +1,157 @@
+defmodule TradingOptionsSimWeb.RunsLive do
+  @moduledoc """
+  Lists every `SimRun` across every strategy version — open and closed,
+  filterable by status. The operator-facing surface for "what has this
+  app actually traded," complementing `ActiveStrategiesLive`'s
+  "what's running right now" view.
+
+  Polls on a timer rather than subscribing to a PubSub topic — no
+  per-run or run-list broadcast exists yet (`ContractMonitor` only
+  broadcasts on the underlying's own `"prices:SYMBOL"` topic it
+  subscribes to, never publishes its own entry/exit events), so a fixed
+  poll is the only way to catch a new fill without adding a new
+  broadcast this task didn't ask for.
+  """
+
+  use TradingOptionsSimWeb, :live_view
+
+  alias TradingOptionsSim.Sim
+
+  @refresh_ms :timer.seconds(5)
+
+  @impl true
+  def mount(_params, _session, socket) do
+    if connected?(socket), do: :timer.send_interval(@refresh_ms, self(), :refresh)
+
+    {:ok,
+     socket
+     |> assign(:page_title, "Runs")
+     |> assign(:status_filter, nil)
+     |> load_runs()}
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    status_filter =
+      case params["status"] do
+        s when s in ["open", "closed"] -> s
+        _ -> nil
+      end
+
+    {:noreply, socket |> assign(:status_filter, status_filter) |> load_runs()}
+  end
+
+  @impl true
+  def handle_info(:refresh, socket) do
+    {:noreply, load_runs(socket)}
+  end
+
+  defp load_runs(socket) do
+    assign(socket, :runs, Sim.list_sim_runs(socket.assigns.status_filter))
+  end
+
+  defp filter_link_class(current, target) do
+    base =
+      "px-2 py-1 border font-data text-xs uppercase tracking-wide hover:border-primary/40 hover:text-primary"
+
+    if current == target do
+      base <> " border-primary/40 text-primary bg-primary/10"
+    else
+      base <> " border-transparent text-base-content/60"
+    end
+  end
+
+  defp status_badge_class("open"), do: "border-info/40 text-info bg-info/10"
+  defp status_badge_class("closed"), do: "border-base-content/20 text-base-content/60"
+  defp status_badge_class(_), do: "border-base-content/20 text-base-content/60"
+
+  defp direction_class("long"), do: "text-long"
+  defp direction_class("short"), do: "text-short"
+
+  defp pnl_class(nil), do: "text-base-content/40"
+
+  defp pnl_class(pnl) do
+    case Decimal.compare(pnl, Decimal.new(0)) do
+      :lt -> "text-error"
+      _ -> "text-success"
+    end
+  end
+
+  defp contract_label(run) do
+    "#{run.symbol} #{format_expiry(run.expiry)} #{Decimal.to_string(run.strike)}#{run.right}"
+  end
+
+  defp format_expiry(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>) do
+    "#{y}-#{m}-#{d}"
+  end
+
+  defp format_expiry(other), do: other
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <Layouts.app flash={@flash}>
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold uppercase tracking-wide">Runs</h1>
+
+        <div class="flex gap-1">
+          <.link patch={~p"/runs"} class={filter_link_class(@status_filter, nil)}>All</.link>
+          <.link patch={~p"/runs?status=open"} class={filter_link_class(@status_filter, "open")}>
+            Open
+          </.link>
+          <.link patch={~p"/runs?status=closed"} class={filter_link_class(@status_filter, "closed")}>
+            Closed
+          </.link>
+        </div>
+      </div>
+
+      <div :if={@runs == []} class="border border-base-300 p-8 text-center">
+        <p class="font-data text-sm uppercase tracking-wide text-base-content/40">
+          No runs to show
+        </p>
+      </div>
+
+      <div :if={@runs != []} class="border border-base-300 overflow-x-auto">
+        <table class="table font-data text-xs">
+          <thead class="bg-base-300 uppercase tracking-wide text-[11px]">
+            <tr>
+              <th>Strategy</th>
+              <th>Contract</th>
+              <th>Direction</th>
+              <th>Status</th>
+              <th>Entry</th>
+              <th>Exit</th>
+              <th>Realized P&amp;L</th>
+              <th>Exit reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={run <- @runs} class="border-t border-base-300">
+              <td>
+                {run.strategy_version.strategy.name}
+                <span class="text-base-content/40">v{run.strategy_version.version}</span>
+              </td>
+              <td>{contract_label(run)}</td>
+              <td class={["uppercase", direction_class(run.direction)]}>{run.direction}</td>
+              <td>
+                <span class={[
+                  "inline-block px-1.5 py-0.5 border text-[11px] uppercase tracking-wide",
+                  status_badge_class(run.status)
+                ]}>
+                  {run.status}
+                </span>
+              </td>
+              <td>{run.entry_price || "—"}</td>
+              <td>{run.exit_price || "—"}</td>
+              <td class={pnl_class(run.realized_pnl)}>
+                {run.realized_pnl || "—"}
+              </td>
+              <td class="text-base-content/60">{run.exit_reason || "—"}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </Layouts.app>
+    """
+  end
+end
