@@ -13,6 +13,7 @@ defmodule TradingOptionsSim.Application do
         TradingOptionsSim.Repo,
         {DNSCluster,
          query: Application.get_env(:trading_options_sim, :dns_cluster_query) || :ignore},
+        {Oban, Application.fetch_env!(:trading_options_sim, Oban)},
         {Phoenix.PubSub, name: TradingOptionsSim.PubSub},
         # Local same-named Phoenix.PubSub server for trading_hub's own
         # PubSub instance — required for IbPortfolio.HubClient's

@@ -77,7 +77,8 @@ defmodule TradingOptionsSim.MixProject do
       {:ib_portfolio, path: "../ib_portfolio"},
       {:trading_core, path: "../trading_core"},
       {:uuidv7, "~> 1.0"},
-      {:anubis_mcp, "~> 2.0"}
+      {:anubis_mcp, "~> 2.0"},
+      {:oban, "~> 2.23"}
     ]
   end
 

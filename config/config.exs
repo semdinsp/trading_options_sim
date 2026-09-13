@@ -11,6 +11,27 @@ config :trading_options_sim,
   ecto_repos: [TradingOptionsSim.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
+# Single queue/worker for now (§2's QuarantineEligibilityWorker) — more
+# are added incrementally as needed, matching trading_system's own
+# config.exs comment for its (much larger) Oban setup.
+config :trading_options_sim, Oban,
+  repo: TradingOptionsSim.Repo,
+  queues: [daily_rollups: 1],
+  plugins: [
+    {Oban.Plugins.Cron,
+     crontab: [
+       # 07:00 UTC — after the US trading day has fully closed (~3am ET),
+       # so "yesterday" (this worker's default trading_date) is a
+       # complete, closed trading day by the time this runs. Same slot
+       # trading_system's own QuarantineEligibilityWorker uses, same
+       # reasoning (see that worker's moduledoc for the 2026-07-31
+       # incident this timing avoids: checking Date.utc_today() at
+       # 07:00 UTC finds a day that hasn't traded yet).
+       {"0 7 * * *", TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker}
+     ]},
+    {Oban.Plugins.Pruner, max_age: 8 * 24 * 60 * 60}
+  ]
+
 # app_status shared library — standard /status (JSON) and /status/metrics
 # (Prometheus) endpoints for this app, matching trading_hub/trading_live/
 # trading_system's own integration. See app_status's README for the full
