@@ -11,6 +11,16 @@ config :trading_options_sim,
   ecto_repos: [TradingOptionsSim.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
+# app_status shared library — standard /status (JSON) and /status/metrics
+# (Prometheus) endpoints for this app, matching trading_hub/trading_live/
+# trading_system's own integration. See app_status's README for the full
+# contract; TradingOptionsSim.StatusExtension supplies app-specific
+# health (DB pool, trading_hub connectivity — see that module's doc).
+config :app_status,
+  app_name: :trading_options_sim,
+  endpoint: TradingOptionsSimWeb.Endpoint,
+  extension: TradingOptionsSim.StatusExtension
+
 # Configure the endpoint
 config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
   url: [host: "localhost"],

@@ -482,6 +482,73 @@ move from hardcoded defaults to operator-configurable — see this plan's
 Open Questions), and (once built, §7) the pricing-model config for §5a's
 Black-Scholes pricer (flat IV assumption, slippage/spread bps).
 
+## 4c. `ib_portfolio` — the trading_hub connectivity primitive
+
+`../ib_portfolio` is a shared, zero-Phoenix-dependency library already
+extracted from `trading_dashboard`'s and `trading_risk`'s independently
+(and near-identically) written hub-connection GenServers — see its own
+`HubClient` moduledoc. Both apps depend on it as a sibling `path:` dep
+(`{:ib_portfolio, path: "../ib_portfolio"}`); `trading_options_sim` should
+do the same rather than hand-rolling its own connect/reconnect/erpc loop
+a third time, which is exactly the duplication this library exists to
+prevent. This **replaces** the placeholder `TradingOptionsSim.HubMonitor`
+name used elsewhere in this doc (§4a's `hub_connected?` sketch,
+§9's original gap list) — that process is `IbPortfolio.HubClient` itself,
+started under this app's own supervision tree, not a new module to write
+from scratch.
+
+**What it provides, and how this app uses each piece:**
+
+- **`IbPortfolio.HubClient`** — one GenServer, started per this app with
+  its own name/topics, e.g.:
+
+  ```elixir
+  {IbPortfolio.HubClient,
+   name: TradingOptionsSim.HubClient,
+   hub_node: Application.get_env(:trading_options_sim, :hub_node),
+   topics: ["prices:*"],
+   forward_to: TradingOptionsSim.PriceRelay}
+  ```
+
+  Handles the connect/reconnect-with-backoff loop against `trading_hub`'s
+  distributed `Phoenix.PubSub`, subscribes to the underlying-price fan-out
+  topic (`"prices:all"`, via the `"prices:*"` wildcard expansion — see
+  `expand_wildcard_topic/1`), and forwards every received message plus
+  `{:hub_connection_status, boolean}` transitions to `forward_to`.
+  `TradingOptionsSim.PriceRelay` (a new, small GenServer this app does
+  need to write) is the `forward_to` recipient: it re-broadcasts each
+  underlying tick onto this app's own **local** `TradingOptionsSim.PubSub`
+  as `"prices:" <> underlying_symbol`, which is what `ContractMonitor`
+  (§5) actually subscribes to — mirroring how `trading_live`'s own
+  monitors read from the hub relayed onto a local bus rather than every
+  monitor independently managing hub connectivity. One `HubClient` for
+  the whole app, not one per contract.
+
+- **`IbPortfolio.Message.to_topic/1`/`is_message?/1`** — used inside
+  `PriceRelay` to recognize `%TradingHub.Message{type: :price}` structs
+  arriving from `HubClient` and derive/confirm the topic, instead of
+  re-deriving that logic locally (a third independent copy of what
+  `trading_dashboard`/`trading_risk` already extracted this to prevent).
+
+- **`IbPortfolio.OrderParams`** — **not used in v1.** This app places no
+  real orders (§7); `OrderParams.build/1`/`from_form/4` exist to
+  normalize a caller's params for `TradingHub.Orders.Manager.submit_order/1`,
+  which only this app's own eventual "promote to live app" boundary (§2)
+  would ever call, and only if that boundary target turns out to be a
+  `trading_hub`-backed execution app rather than something else (open
+  question in §2). Worth knowing this module exists and already solves
+  the action/order_type/quantity type-coercion bugs `trading_live`/
+  `trading_dashboard` each hit independently, in case that day comes —
+  no reason to use it before there's a real order to place.
+
+**Status extension update**: `TradingOptionsSim.StatusExtension.hub_connected?/0`
+(§4b's Settings-adjacent health reporting) should check
+`IbPortfolio.HubClient.connection_status(TradingOptionsSim.HubClient).connected`,
+guarded by the same `Process.whereis/1` check `trading_live`'s own
+`StatusExtension.hub_connected?/0` uses — not a bespoke `GenServer.call(pid,
+:connected?)` against a from-scratch process, since `HubClient` already
+exposes `connection_status/1` for exactly this.
+
 ## 5. Per-contract monitor (the "monitors" pattern)
 
 Mirrors `TradingLive.StrategyStockMonitor` structurally, renamed for the
@@ -504,7 +571,7 @@ TradingOptionsSim.ContractMonitor
 | | `trading_live` `StrategyStockMonitor` | `trading_options_sim` `ContractMonitor` |
 |---|---|---|
 | Identity | `{live_strategy_id, symbol}` | `{run_id, contract_key}` (underlying+expiry+strike+right) |
-| Price feed | subscribes `"prices:" <> symbol` on `TradingHub.PubSub` (real IBKR ticks) | subscribes to underlying's `"prices:" <> underlying_symbol` for the underlying tick, and a **local options-pricing process** (§5a) for the derived option quote — no live options tick feed is assumed present |
+| Price feed | subscribes `"prices:" <> symbol` on `TradingHub.PubSub` directly (real IBKR ticks) | subscribes to `"prices:" <> underlying_symbol` on this app's own **local** `TradingOptionsSim.PubSub` (relayed from `trading_hub` by `PriceRelay`/`IbPortfolio.HubClient` — see §4c, not a direct cross-node subscription per monitor), plus a **local options-pricing process** (§5a) for the derived option quote — no live options tick feed is assumed present |
 | Order execution | `IBKR.Client.place_order/1` — real order, real fill broadcast | simulated fill: on a rule transition, computes a fill price from the current option pricing model (§5a) plus configurable slippage/spread assumptions, records a `SimFill` synchronously — no pending-order/timeout/stuck-order machinery needed since there's no real broker round-trip to wait on |
 | Greeks | n/a | reads current delta/gamma/theta/vega from §5a's pricer, exposed in the rule-evaluation snapshot the same way `regime_trend_ordinal` is injected in `trading_live` (a computed pseudo-signal, not a subscribed catalog signal) |
 | Expiry | n/a | must additionally watch for **contract expiry/DTE crossing zero** — a new lifecycle event stock monitors don't have (see §5b) |
@@ -518,9 +585,9 @@ real IBKR option ticks are needed:
 
 - **v1 (recommended to start): Black-Scholes-derived paper pricing.**
   `ContractMonitor` computes its own theoretical price/greeks from the
-  underlying's real tick (already flowing via `trading_hub`), a
-  configurable implied-vol input (flat, or a simple vol-surface stub), and
-  time-to-expiry — entirely local, no dependency on `tws_api`'s
+  underlying's real tick (flowing in via `PriceRelay`/`ib_portfolio`,
+  §4c), a configurable implied-vol input (flat, or a simple vol-surface
+  stub), and time-to-expiry — entirely local, no dependency on `tws_api`'s
   unfinished option market-data work. Good enough to validate strategy
   logic (entry/exit rules, position sizing, lifecycle) well before real
   option quotes are available.
@@ -610,31 +677,40 @@ avoid double-starting on a redundant activation call.
    `TargetPool`/`TargetPoolMember`/`Tag`, porting `trading_system`'s
    lifecycle-transition and tagging logic and tests nearly verbatim. No
    external dependency — buildable and testable in isolation first.
-2. **Options pricing v1** (§5a): Black-Scholes pricer as a standalone
+2. **`ib_portfolio` + `PriceRelay`** (§4c): add the sibling `path:`
+   dependency, start `IbPortfolio.HubClient` under this app's
+   supervision tree, write `PriceRelay` (subscribes via `HubClient`,
+   re-broadcasts onto local `TradingOptionsSim.PubSub`). No schema
+   dependency — buildable and manually verifiable (confirm a real
+   underlying tick arrives locally) independently of steps 1/3/4.
+3. **Options pricing v1** (§5a): Black-Scholes pricer as a standalone
    module, unit-testable against known option-pricing examples before any
    GenServer wraps it.
-3. **`ContractMonitor` + `MonitorSupervisor`/`Registry`** (§5, §6): the
+4. **`ContractMonitor` + `MonitorSupervisor`/`Registry`** (§5, §6): the
    per-contract simulation loop, using stubbed/manual pool members before
-   promotion (step 5) exists — lets the monitor pattern get proven against
-   hand-authored native versions first.
-4. **`SimActivator`** (§6): wires lifecycle-active versions to running
+   promotion (step 6) exists — lets the monitor pattern get proven against
+   hand-authored native versions first, consuming step 2's `PriceRelay`
+   feed and step 3's pricer.
+5. **`SimActivator`** (§6): wires lifecycle-active versions to running
    monitors, mirroring `StrategyActivator`.
-5. **API + MCP access, Settings page** (§4a, §4b): `ApiToken` schema,
+6. **API + MCP access, Settings page** (§4a, §4b): `ApiToken` schema,
    `/api/v1` routes and auth plug, `TradingOptionsSim.MCP.Server` +
    `CallGuard` (with `TableOwner` from day one — no reason to reintroduce
    the bug §4a documents), and the `/settings` LiveView with token
    management. Buildable once §1-3a's schema exists, independent of §4's
    actual cross-app client — this is what the client (and any operator
    or agent) will call against.
-6. **`TradingSystem.Client` + promotion flow** (§4): needs the
+7. **`TradingSystem.Client` + promotion flow** (§4): needs the
    `link_trading_options_sim`/`unlink_trading_options_sim` endpoints added
-   to `trading_system` first — hand off that prompt once steps 1-4 have
+   to `trading_system` first — hand off that prompt once steps 1-5 have
    validated the local shape enough to know exactly what promotion needs
-   to populate. Also needs step 5's Settings page to exist (where the
+   to populate. Also needs step 6's Settings page to exist (where the
    operator configures the outbound token/base URL).
-7. **Real IBKR option pricing swap-in** (§5a v2) — once `tws_api`'s
-   `ContractDetails`/`TickOptionComputation` work
-   (`../OPTIONS_LEAPS_PLAN.md` steps 1-3) lands.
+8. **Real IBKR option pricing swap-in** (§5a v2) — once `tws_api`'s
+   `ContractDetails`/`TickOptionComputation` work lands. See
+   `TWS_API_OPTIONS_UPDATE_PROMPT.md` (this directory) — the handoff
+   prompt for that `tws_api`-side work, per this workspace's cross-app
+   boundary rule.
 
 ## 9. Current skeleton gaps (as of this writing)
 
@@ -643,14 +719,23 @@ unmodified `mix phx.new` generator output. Concretely missing, all
 addressed by the sequencing above:
 
 - No `Registry`/`DynamicSupervisor` in `Application.start/2` yet (§6).
+- `{:app_status, git: ...}` and its `/status`/`/status/metrics`
+  wiring, `TradingOptionsSim.StatusExtension` — **done** (added this
+  session; see git history). `hub_connected?/0` currently reports `false`
+  unconditionally pending §4c's `ib_portfolio`/`HubClient` integration —
+  update it once that lands, per §4c's own note.
+- `{:ib_portfolio, path: "../ib_portfolio"}` (§4c) — not yet added.
+  Needed before `PriceRelay`/`ContractMonitor` (§5) can receive real
+  underlying ticks from `trading_hub`.
 - No `dev.exs` port assignment or entry in `trading_hub`'s
   `:cluster_app_ports` registry the way `trading_live` (4007) and
   `trading_system` (4004 UI / 4005 API) already have — needed before this
-  app can participate in the same cross-node PubSub mesh it needs for
-  underlying tick data (§5). Since this touches `trading_hub`'s own
-  config, adding the registry entry is a small hand-off prompt for that
-  app's session, not a direct edit here; picking this app's own unused
-  dev port is a local, unilateral choice.
+  app's `IbPortfolio.HubClient` can actually reach `trading_hub`'s node
+  (Erlang distribution needs both sides configured, not just this app's
+  own `hub_node` setting). Since this touches `trading_hub`'s own config,
+  adding the registry entry is a small hand-off prompt for that app's
+  session, not a direct edit here; picking this app's own unused dev port
+  is a local, unilateral choice.
 - `req` is already a dependency (used for the `trading_system` promotion
   client, §4) — no new HTTP-client dependency needed.
 - No `oban` dependency — needed once the automatic quarantine-eligibility

@@ -72,7 +72,9 @@ defmodule TradingOptionsSim.MixProject do
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      {:app_status, git: "https://github.com/semdinsp/app_status.git", tag: "v0.1.4"},
+      {:ib_portfolio, path: "../ib_portfolio"}
     ]
   end
 

@@ -20,6 +20,12 @@ defmodule TradingOptionsSimWeb.Router do
     get "/", PageController, :home
   end
 
+  # Unauthenticated by design (scraper/uptime-check friendly) — see
+  # app_status's own README "Security" section for the production
+  # hardening options (network restriction, shared-secret header, basic
+  # auth) before exposing this publicly.
+  forward "/status", AppStatus.Plug
+
   # Other scopes may use custom stacks.
   # scope "/api", TradingOptionsSimWeb do
   #   pipe_through :api
