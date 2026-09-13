@@ -565,6 +565,54 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.all()
   end
 
+  @doc """
+  Every `SimRun` across every strategy version, most-recently-opened
+  first, optionally filtered to one `status` (`"open"` or `"closed"`) —
+  the Runs page's data source. Preloads `strategy_version` (through to
+  `strategy`) since every real use of this list needs to show which
+  strategy/version a run belongs to, not just the run's own contract
+  fields.
+  """
+  @spec list_sim_runs(String.t() | nil) :: [SimRun.t()]
+  def list_sim_runs(status \\ nil) do
+    SimRun
+    |> maybe_filter_status(status)
+    |> order_by([r], desc: r.inserted_at)
+    |> preload(strategy_version: :strategy)
+    |> Repo.all()
+  end
+
+  defp maybe_filter_status(query, nil), do: query
+  defp maybe_filter_status(query, status), do: where(query, [r], r.status == ^status)
+
+  @doc """
+  Every `StrategyVersion` with at least one currently-open `SimRun`,
+  preloaded with `:strategy` and its own open runs (via the
+  `:sim_runs` association, `:where`-scoped in the preload query rather
+  than a second `list_open_sim_runs/1` round trip per version) — the
+  Active Strategies page's data source. A version's open runs are
+  exactly the contracts with a live `ContractMonitor` running
+  (`SimActivator.start_or_find_monitor/3` never opens a run without
+  also starting, or finding already running, its monitor) — so this
+  list doubles as "which strategies currently have a running monitor,"
+  without touching the process `Registry` directly (a DB-backed view
+  stays correct even mid-monitor-restart, where a Registry lookup
+  could show a brief gap).
+  """
+  @spec list_active_strategy_versions() :: [StrategyVersion.t()]
+  def list_active_strategy_versions do
+    open_run_version_ids =
+      SimRun
+      |> where([r], r.status == "open")
+      |> select([r], r.strategy_version_id)
+      |> distinct(true)
+
+    StrategyVersion
+    |> where([v], v.id in subquery(open_run_version_ids))
+    |> preload([:strategy, sim_runs: ^from(r in SimRun, where: r.status == "open")])
+    |> Repo.all()
+  end
+
   def list_sim_fills(%SimRun{id: sim_run_id}) do
     SimFill
     |> where([f], f.sim_run_id == ^sim_run_id)

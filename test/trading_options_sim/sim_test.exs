@@ -224,4 +224,119 @@ defmodule TradingOptionsSim.SimTest do
       assert version.tags == []
     end
   end
+
+  describe "list_sim_runs/1" do
+    defp run_fixture(version, symbol, attrs \\ %{}) do
+      {:ok, run} =
+        Sim.open_sim_run(
+          version,
+          Map.merge(
+            %{
+              symbol: symbol,
+              expiry: "20271231",
+              strike: Decimal.new("150.00"),
+              right: "C",
+              multiplier: 100,
+              direction: "long"
+            },
+            attrs
+          )
+        )
+
+      run
+    end
+
+    defp close_run(run) do
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, run}} =
+        Sim.record_exit_fill(
+          run,
+          %{action: "sell", quantity: 1, fill_price: Decimal.new("6.00"), filled_at: now},
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "rule_exit",
+            realized_pnl: Decimal.new("1.00")
+          }
+        )
+
+      run
+    end
+
+    test "returns every run across every version when status is nil" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      run_fixture(version, "AAPL")
+      close_run(run_fixture(version, "MSFT"))
+
+      symbols = Sim.list_sim_runs() |> Enum.map(& &1.symbol)
+      assert Enum.sort(symbols) == ["AAPL", "MSFT"]
+    end
+
+    test "filters to only open runs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      run_fixture(version, "AAPL")
+      close_run(run_fixture(version, "MSFT"))
+
+      assert Sim.list_sim_runs("open") |> Enum.map(& &1.symbol) == ["AAPL"]
+    end
+
+    test "filters to only closed runs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      run_fixture(version, "AAPL")
+      close_run(run_fixture(version, "MSFT"))
+
+      assert Sim.list_sim_runs("closed") |> Enum.map(& &1.symbol) == ["MSFT"]
+    end
+
+    test "preloads strategy_version and its strategy" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      run_fixture(version, "AAPL")
+
+      [run] = Sim.list_sim_runs()
+      assert run.strategy_version.id == version.id
+      assert run.strategy_version.strategy.id == strategy.id
+    end
+  end
+
+  describe "list_active_strategy_versions/0" do
+    test "returns only versions with at least one open run" do
+      strategy = strategy_fixture()
+      version_with_open_run = version_fixture(strategy, %{version: 1})
+      version_with_no_runs = version_fixture(strategy, %{version: 2})
+      version_all_closed = version_fixture(strategy, %{version: 3})
+
+      run_fixture(version_with_open_run, "AAPL")
+      close_run(run_fixture(version_all_closed, "MSFT"))
+
+      active_ids = Sim.list_active_strategy_versions() |> Enum.map(& &1.id)
+
+      assert version_with_open_run.id in active_ids
+      refute version_with_no_runs.id in active_ids
+      refute version_all_closed.id in active_ids
+    end
+
+    test "preloads :strategy and only the open sim_runs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      run_fixture(version, "AAPL")
+      close_run(run_fixture(version, "MSFT"))
+
+      [active] = Sim.list_active_strategy_versions()
+
+      assert active.strategy.id == strategy.id
+      assert Enum.map(active.sim_runs, & &1.symbol) == ["AAPL"]
+    end
+  end
 end

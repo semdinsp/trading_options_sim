@@ -87,6 +87,12 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       join_through: TradingOptionsSim.Sim.StrategyVersionTag,
       on_replace: :delete
 
+    # Preload-only association for Sim.list_active_strategy_versions/0's
+    # "which contracts does this version currently have a monitor
+    # running for" view — not used for casting/changesets, only ever
+    # queried through with a :where-scoped preload.
+    has_many :sim_runs, TradingOptionsSim.Sim.SimRun
+
     timestamps(type: :utc_datetime)
   end
 
