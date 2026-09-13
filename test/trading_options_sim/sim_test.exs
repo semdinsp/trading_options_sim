@@ -140,7 +140,7 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
-  describe "promote_to_live_app/3" do
+  describe "link_live_strategy/3" do
     test "succeeds from test_portfolio, keeps lifecycle_stage unchanged" do
       strategy = strategy_fixture()
       pool = target_pool_fixture()
@@ -150,13 +150,14 @@ defmodule TradingOptionsSim.SimTest do
 
       live_strategy_id = Ecto.UUID.generate()
 
-      assert {:ok, promoted} =
-               Sim.promote_to_live_app(version, "trading_live", live_strategy_id)
+      assert {:ok, linked} =
+               Sim.link_live_strategy(version, "trading_live", live_strategy_id)
 
-      assert promoted.lifecycle_stage == "test_portfolio"
-      assert promoted.promoted_to_live_app == "trading_live"
-      assert promoted.promoted_to_live_strategy_id == live_strategy_id
-      refute is_nil(promoted.promoted_to_live_at)
+      assert linked.lifecycle_stage == "test_portfolio"
+      assert linked.live_strategy_app == "trading_live"
+      assert linked.live_strategy_id == live_strategy_id
+      assert linked.live_strategy_active == true
+      refute is_nil(linked.live_linked_at)
     end
 
     test "fails from discovery" do
@@ -164,7 +165,32 @@ defmodule TradingOptionsSim.SimTest do
       version = version_fixture(strategy)
 
       assert {:error, :invalid_transition} =
-               Sim.promote_to_live_app(version, "trading_live", "id")
+               Sim.link_live_strategy(version, "trading_live", "id")
+    end
+  end
+
+  describe "unlink_live_strategy/1" do
+    test "succeeds when currently linked" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      {:ok, version} = Sim.promote_strategy_version(version, "test_portfolio")
+      {:ok, version} = Sim.link_live_strategy(version, "trading_live", Ecto.UUID.generate())
+
+      assert {:ok, unlinked} = Sim.unlink_live_strategy(version)
+      assert unlinked.live_strategy_active == false
+      refute is_nil(unlinked.live_unlinked_at)
+      # History is preserved, not erased:
+      assert unlinked.live_strategy_app == "trading_live"
+      refute is_nil(unlinked.live_linked_at)
+    end
+
+    test "fails when not currently linked" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert {:error, :not_linked} = Sim.unlink_live_strategy(version)
     end
   end
 

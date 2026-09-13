@@ -12,11 +12,23 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   `discovery -> quarantine -> test_portfolio`, plus terminal `retired`.
   No `live` stage — this app never places a real order (see plan §7).
   `test_portfolio` is this app's terminal "proven, ready to hand off"
-  stage; going live is an outbound promotion marker
-  (`promoted_to_live_app`/`promoted_to_live_strategy_id`/
-  `promoted_to_live_at`) to `trading_live` or an options-capable
-  equivalent, not a stage advance — mirrors how `trading_system` treats
-  "promoted to live" as a marker rather than a `lifecycle_stage` change.
+  stage; going live is a link to `trading_live` (or an options-capable
+  equivalent), not a stage advance — mirrors how `trading_system` treats
+  a `trading_live` link as a marker rather than a `lifecycle_stage`
+  change.
+
+  **Link direction, corrected 2026-09-13** (see
+  `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §4): the link is written by the
+  *pulling* app (`trading_live`) calling this app's own
+  `link_live_strategy`/`unlink_live_strategy` API, the same way
+  `trading_live` itself calls `trading_system`'s `link_trading_live`/
+  `unlink_trading_live` after building its own local record —
+  mirroring `TradingSystem.Trading.StrategyVersion`'s own
+  `trading_live_active`/`trading_live_strategy_id`/
+  `trading_live_linked_at`/`trading_live_unlinked_at` fields exactly.
+  `live_strategy_active` is a comparison-visibility label only — it
+  never gates whether this app's own lifecycle logic picks a version
+  up, same as `trading_system`'s `trading_live_active`.
   """
 
   use Ecto.Schema
@@ -50,9 +62,11 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     field :quarantine_last_counted_date, :date
     field :retired_reason, :string
 
-    field :promoted_to_live_app, :string
-    field :promoted_to_live_strategy_id, :binary_id
-    field :promoted_to_live_at, :utc_datetime_usec
+    field :live_strategy_app, :string
+    field :live_strategy_id, :binary_id
+    field :live_strategy_active, :boolean, default: false
+    field :live_linked_at, :utc_datetime_usec
+    field :live_unlinked_at, :utc_datetime
 
     field :generation, :integer, default: 0
 
@@ -163,17 +177,33 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   end
 
   @doc """
-  Sets the outbound promote-to-live-app marker — `lifecycle_stage` stays
-  `test_portfolio`, same "marker, not a stage advance" pattern
-  `trading_system.promote_strategy_version(version, "live")` uses for
-  `promoted_to_live_at`. See plan §2.
+  Records a link to a `live_strategy_app`'s own strategy record —
+  `lifecycle_stage` stays `test_portfolio`, same "marker, not a stage
+  advance" pattern `trading_system.promote_strategy_version(version,
+  "live")` uses for `trading_live_linked_at`. Called by
+  `Sim.link_live_strategy/3`, which the pulling app's own promotion flow
+  invokes after it has already built its local record — see plan §4.
   """
-  def promote_to_live_app_changeset(strategy_version, attrs) do
+  def link_live_strategy_changeset(strategy_version, attrs) do
     cast(strategy_version, attrs, [
-      :promoted_to_live_app,
-      :promoted_to_live_strategy_id,
-      :promoted_to_live_at
+      :live_strategy_app,
+      :live_strategy_id,
+      :live_strategy_active,
+      :live_linked_at
     ])
+  end
+
+  @doc """
+  Unlinks from `live_strategy_app` — called when that app kills/deletes/
+  unpromotes the strategy it was linked to. Sets `live_strategy_active:
+  false` and `live_unlinked_at`; **deliberately leaves
+  `live_strategy_app`/`live_strategy_id`/`live_linked_at` alone** so the
+  version's link history stays visible, mirroring
+  `TradingSystem.Trading.StrategyVersion.trading_live_link_changeset/2`'s
+  own doc for why unlinking never erases history.
+  """
+  def unlink_live_strategy_changeset(strategy_version, attrs) do
+    cast(strategy_version, attrs, [:live_strategy_active, :live_unlinked_at])
   end
 
   defp validate_option_leg_config(changeset) do

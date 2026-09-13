@@ -91,8 +91,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
     end
   end
 
-  describe "POST /api/v1/versions/:id/promote_to_live_app" do
-    test "stamps the outbound promotion marker from test_portfolio", %{conn: conn} do
+  describe "POST /api/v1/versions/:id/link_live_strategy" do
+    test "links a test_portfolio version to a live_strategy_app", %{conn: conn} do
       {:ok, pool} = Sim.create_target_pool(%{name: "Pool"})
       version = version_fixture(%{target_pool_id: pool.id})
       {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
@@ -103,14 +103,44 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       conn =
         conn
         |> token_conn(["strategies:write"])
-        |> post(~p"/api/v1/versions/#{version.id}/promote_to_live_app", %{
-          "live_app" => "trading_live",
+        |> post(~p"/api/v1/versions/#{version.id}/link_live_strategy", %{
+          "live_strategy_app" => "trading_live",
           "live_strategy_id" => live_strategy_id
         })
 
       body = json_response(conn, 200)
-      assert body["strategy_version"]["promoted_to_live_app"] == "trading_live"
+      assert body["strategy_version"]["live_strategy_app"] == "trading_live"
+      assert body["strategy_version"]["live_strategy_active"] == true
       assert body["strategy_version"]["lifecycle_stage"] == "test_portfolio"
+    end
+  end
+
+  describe "POST /api/v1/versions/:id/unlink_live_strategy" do
+    test "unlinks a currently-linked version", %{conn: conn} do
+      {:ok, pool} = Sim.create_target_pool(%{name: "Pool"})
+      version = version_fixture(%{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      {:ok, version} = Sim.promote_strategy_version(version, "test_portfolio")
+      {:ok, version} = Sim.link_live_strategy(version, "trading_live", Ecto.UUID.generate())
+
+      conn =
+        conn
+        |> token_conn(["strategies:write"])
+        |> post(~p"/api/v1/versions/#{version.id}/unlink_live_strategy")
+
+      body = json_response(conn, 200)
+      assert body["strategy_version"]["live_strategy_active"] == false
+    end
+
+    test "422s when not currently linked", %{conn: conn} do
+      version = version_fixture()
+
+      conn =
+        conn
+        |> token_conn(["strategies:write"])
+        |> post(~p"/api/v1/versions/#{version.id}/unlink_live_strategy")
+
+      assert json_response(conn, 422)
     end
   end
 

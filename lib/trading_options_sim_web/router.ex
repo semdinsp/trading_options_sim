@@ -17,7 +17,10 @@ defmodule TradingOptionsSimWeb.Router do
   scope "/", TradingOptionsSimWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    # No dashboard/home page exists yet — Settings is the only real
+    # operator-facing screen this app has, so route both here rather
+    # than leaving "/" on the unrelated Phoenix generator splash page.
+    live "/", SettingsLive
     live "/settings", SettingsLive
   end
 
@@ -38,7 +41,8 @@ defmodule TradingOptionsSimWeb.Router do
     get "/versions/:id", StrategyVersionController, :show
     post "/versions/:id/promote", StrategyVersionController, :promote
     post "/versions/:id/downgrade", StrategyVersionController, :downgrade
-    post "/versions/:id/promote_to_live_app", StrategyVersionController, :promote_to_live_app
+    post "/versions/:id/link_live_strategy", StrategyVersionController, :link_live_strategy
+    post "/versions/:id/unlink_live_strategy", StrategyVersionController, :unlink_live_strategy
     put "/versions/:id/tags", StrategyVersionController, :put_tags
     post "/versions/:id/tags", StrategyVersionController, :add_tag
 

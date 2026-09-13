@@ -172,30 +172,58 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
-  Stamps the outbound promote-to-live-app marker on a `test_portfolio`-
-  stage version — `lifecycle_stage` stays `test_portfolio`. See
-  `StrategyVersion.promote_to_live_app_changeset/2`'s own doc.
+  Records a link to `live_strategy_app`'s own strategy record on a
+  `test_portfolio`-stage version — `lifecycle_stage` stays
+  `test_portfolio`. Called by the pulling app's own promotion flow
+  (e.g. `trading_live`) after it has already built its local record —
+  see `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §4 for the corrected pull
+  direction (this app never calls out to `trading_live`; `trading_live`
+  calls in here).
   """
-  @spec promote_to_live_app(StrategyVersion.t(), String.t(), String.t()) ::
+  @spec link_live_strategy(StrategyVersion.t(), String.t(), String.t()) ::
           {:ok, StrategyVersion.t()}
           | {:error, :invalid_transition}
           | {:error, Ecto.Changeset.t()}
-  def promote_to_live_app(
+  def link_live_strategy(
         %StrategyVersion{lifecycle_stage: "test_portfolio"} = version,
-        live_app,
+        live_strategy_app,
         live_strategy_id
       ) do
     version
-    |> StrategyVersion.promote_to_live_app_changeset(%{
-      "promoted_to_live_app" => live_app,
-      "promoted_to_live_strategy_id" => live_strategy_id,
-      "promoted_to_live_at" => DateTime.utc_now()
+    |> StrategyVersion.link_live_strategy_changeset(%{
+      "live_strategy_app" => live_strategy_app,
+      "live_strategy_id" => live_strategy_id,
+      "live_strategy_active" => true,
+      "live_linked_at" => DateTime.utc_now()
     })
     |> Repo.update()
   end
 
-  def promote_to_live_app(%StrategyVersion{}, _live_app, _live_strategy_id) do
+  def link_live_strategy(%StrategyVersion{}, _live_strategy_app, _live_strategy_id) do
     {:error, :invalid_transition}
+  end
+
+  @doc """
+  Unlinks `version` from whichever `live_strategy_app` it was linked to
+  — called when that app kills/deletes/unpromotes the strategy it was
+  linked to. `{:error, :not_linked}` if `live_strategy_active` is
+  already `false`. Leaves `live_strategy_app`/`live_strategy_id`/
+  `live_linked_at` in place as history — see
+  `StrategyVersion.unlink_live_strategy_changeset/2`'s own doc.
+  """
+  @spec unlink_live_strategy(StrategyVersion.t()) ::
+          {:ok, StrategyVersion.t()} | {:error, :not_linked} | {:error, Ecto.Changeset.t()}
+  def unlink_live_strategy(%StrategyVersion{live_strategy_active: false}) do
+    {:error, :not_linked}
+  end
+
+  def unlink_live_strategy(%StrategyVersion{} = version) do
+    version
+    |> StrategyVersion.unlink_live_strategy_changeset(%{
+      "live_strategy_active" => false,
+      "live_unlinked_at" => DateTime.utc_now()
+    })
+    |> Repo.update()
   end
 
   # --- Target pools -------------------------------------------------------
