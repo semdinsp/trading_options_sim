@@ -33,17 +33,24 @@ support across tws_api and trading_hub, verified against this codebase on
 trading_hub-side slice (item 4) is a separate handoff for that app's own
 session once this is done.
 
-Before writing any code, resolve the plan's own "Reference-material gap"
-section: confirm whether a current IBKR TWS API bundle
-(twsapi_macunix.*.zip from https://interactivebrokers.github.io) is
-available on this machine, or download it. Do not implement any new
-wire-format field from memory or from IBKR's Doxygen-style property docs
-alone — this codebase has already shipped two real field-order bugs
-(a placeOrder field-shift, and a missing manualOrderTime) from doing
-that. See this repo's own tws_api/CLAUDE.md "Reference material" section
-for the full reading procedure (which EClient method to read, how to
-cross-reference MIN_SERVER_VER_* gates against this library's negotiated
-server_version).
+The plan's own "Reference-material gap" section is now resolved — a
+current IBKR TWS API bundle (twsapi_macunix.1045.01.zip,
+server_versions.py through v223) is unzipped at
+`ibkrpubsub/ib_src/IBJts/source/pythonclient/ibapi/`; confirm it's still
+there and still the source you're reading from before starting. Do not
+implement any new wire-format field from memory or from IBKR's
+Doxygen-style property docs alone — this codebase has already shipped
+real field-order/field-presence bugs from doing that (a placeOrder
+field-shift, a missing manualOrderTime, and — this week — OpenOrder and
+ExecDetails decoders that read as unconditional in source but were
+blank-and-stripped on the real wire for certain shapes, only caught by
+comparing against an actual captured frame). See this repo's own
+tws_api/CLAUDE.md "Reference material" section for the full reading
+procedure (which EClient method to read, how to cross-reference
+MIN_SERVER_VER_* gates against this library's negotiated server_version)
+— treat clean source-reading as necessary but not sufficient; verify
+against real captured frames wherever practical, not just this bundle's
+code.
 
 Implement, in this suggested order (matching OPTIONS_LEAPS_PLAN.md's own
 "Suggested sequencing"):
@@ -58,8 +65,16 @@ Implement, in this suggested order (matching OPTIONS_LEAPS_PLAN.md's own
    replies per request (an underspecified query can match more than one
    contract) with careful request-id correlation.
 
+   Even though the reference source shows this message's fields as
+   unconditionally present, verify the resulting decode against a real
+   captured ContractDetails frame before trusting it — the same
+   discipline already forced on OpenOrder and ExecDetails this week
+   after each was shipped from source-reading alone and later found
+   wrong on real data.
+
    Optionally also add req_sec_def_opt_params/2 (id 78) + decode
-   SecurityDefinitionOptionParameter (id 76) — lets a caller ask "what
+   SecurityDefinitionOptionParameter (id 75) and its terminator
+   SecurityDefinitionOptionParameterEnd (id 76) — lets a caller ask "what
    expiries/strikes exist for this symbol" instead of already knowing
    them. Nice-to-have, not required for the rest of this work.
 
@@ -92,9 +107,9 @@ When done:
   plumbing, item 4 of that plan) from this session — hand that off as
   its own prompt for trading_hub's session once this lands, per this
   workspace's cross-app boundary rule.
-- Report back: what shipped, what's still open, and whether the
-  reference-material gap (stale pip ibapi vs. a real downloaded bundle)
-  was actually resolved or worked around.
+- Report back: what shipped, what's still open, and which decoded fields
+  (if any) were verified against a real captured frame vs. source-reading
+  alone.
 ```
 
 ## After this lands
