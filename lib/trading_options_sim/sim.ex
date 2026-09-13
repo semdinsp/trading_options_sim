@@ -226,6 +226,226 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.update()
   end
 
+  # --- Quarantine eligibility (§2, "Difference from trading_system") --------
+
+  # v1 fixed thresholds — no AppSettings-style runtime-configurable
+  # schema exists in this app yet (trading_system's own version of these
+  # is operator-tunable; not needed until there's real closed-run
+  # history to tune against, per §2's own deferral note). Intentionally
+  # much simpler than trading_system's real gates (no regime buckets, no
+  # target-pool exclusion list, no expectancy_r-normalized check) — this
+  # is a proportionate v1 for an app with no live-money consequence of
+  # its own; trading_live's own gates are the real backstop before
+  # capital follows a linked version.
+  @quarantine_min_closed_runs 20
+  @quarantine_min_realized_pnl Decimal.new(0)
+  @quarantine_max_trading_days 20
+  @quarantine_max_loss_ratio Decimal.new("2.0")
+
+  @doc """
+  Job 1 of the daily quarantine-eligibility check
+  (`TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker`):
+  increments `quarantine_trading_days` for every `quarantine`-stage
+  version with at least one run that closed on `trading_date`, and
+  stamps `quarantine_last_counted_date` on every quarantine version
+  regardless (so a version with no run that day still records it was
+  checked). `quarantine_last_counted_date != trading_date` guards
+  against double-counting on an Oban retry — ported from
+  `TradingSystem.Trading.update_quarantine_trading_days/1`'s identical
+  idempotency guard.
+  """
+  @spec update_quarantine_trading_days(Date.t()) :: :ok
+  def update_quarantine_trading_days(trading_date) do
+    quarantine_versions =
+      StrategyVersion
+      |> where([v], v.lifecycle_stage == "quarantine")
+      |> where(
+        [v],
+        is_nil(v.quarantine_last_counted_date) or v.quarantine_last_counted_date != ^trading_date
+      )
+      |> Repo.all()
+
+    if quarantine_versions != [] do
+      version_ids = Enum.map(quarantine_versions, & &1.id)
+
+      versions_with_close_today =
+        SimRun
+        |> where([r], r.strategy_version_id in ^version_ids)
+        |> where([r], r.status == "closed")
+        |> where([r], fragment("?::date", r.exit_at) == ^trading_date)
+        |> select([r], r.strategy_version_id)
+        |> distinct(true)
+        |> Repo.all()
+        |> MapSet.new()
+
+      Enum.each(quarantine_versions, fn version ->
+        attrs =
+          if MapSet.member?(versions_with_close_today, version.id) do
+            %{
+              "quarantine_trading_days" => version.quarantine_trading_days + 1,
+              "quarantine_last_counted_date" => trading_date
+            }
+          else
+            %{"quarantine_last_counted_date" => trading_date}
+          end
+
+        version
+        |> StrategyVersion.lifecycle_stage_changeset(attrs)
+        |> Repo.update!()
+      end)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Job 2: auto-promotes every `discovery`-stage version with a
+  `target_pool_id` set, at least `#{@quarantine_min_closed_runs}` closed
+  runs, and non-negative total `realized_pnl` (strictly `>= 0`, matching
+  `@quarantine_min_realized_pnl`) into `quarantine`. A version with no
+  `target_pool_id` is skipped (stays in `discovery`, eligible again next
+  run) — same gap `trading_system`'s own job closes for a version that
+  slipped in before a pool was required; nothing here promotes an
+  unscoped version into a stage where `lifecycle_stage_changeset/2`'s
+  own "frozen while quarantined" rule would make fixing it require a
+  fork.
+  """
+  @spec auto_promote_eligible_discovery_versions() :: {:ok, [StrategyVersion.t()]}
+  def auto_promote_eligible_discovery_versions do
+    discovery_version_ids =
+      StrategyVersion
+      |> where([v], v.lifecycle_stage == "discovery")
+      |> where([v], not is_nil(v.target_pool_id))
+      |> select([v], v.id)
+      |> Repo.all()
+
+    eligible_ids =
+      discovery_version_ids
+      |> Enum.filter(fn version_id ->
+        stats = closed_run_stats(version_id)
+
+        stats.closed_count >= @quarantine_min_closed_runs and
+          Decimal.compare(stats.total_realized_pnl, @quarantine_min_realized_pnl) != :lt
+      end)
+
+    promoted =
+      Enum.map(eligible_ids, fn version_id ->
+        version = get_strategy_version!(version_id)
+        {:ok, promoted_version} = promote_strategy_version(version, "quarantine")
+        promoted_version
+      end)
+
+    {:ok, promoted}
+  end
+
+  @doc """
+  Job 3: auto-retires (`reason: "failed_quarantine"`) every
+  `quarantine`-stage version that has run at least
+  `#{@quarantine_max_trading_days}` trading days AND whose losses
+  outweigh its wins by more than `#{@quarantine_max_loss_ratio}}`x
+  (`total_loss / total_win > #{@quarantine_max_loss_ratio}`, skipped —
+  not retired — when `total_win` is zero, since a ratio against zero
+  wins is undefined rather than infinitely bad: a version with zero
+  wins and zero losses so far has nothing to judge yet, and one with
+  losses but literally no wins is a `total_win: 0` edge case this
+  simple v1 gate deliberately leaves for a human to look at rather than
+  auto-retiring on a division by zero). Both conditions must hold —
+  tenure alone (a version still net-positive after 20 days) is not a
+  failure; magnitude alone (one bad early day) is not either. Ordered
+  after jobs 1/2 in `run_quarantine_eligibility_check/1` for the same
+  reason `trading_system`'s own worker runs its 3 jobs in sequence:
+  job 1 must land today's day-count before this job judges tenure
+  against it.
+  """
+  @spec auto_retire_failing_quarantine_versions() :: {:ok, [StrategyVersion.t()]}
+  def auto_retire_failing_quarantine_versions do
+    quarantine_version_ids =
+      StrategyVersion
+      |> where([v], v.lifecycle_stage == "quarantine")
+      |> where([v], v.quarantine_trading_days >= @quarantine_max_trading_days)
+      |> select([v], v.id)
+      |> Repo.all()
+
+    failing_ids =
+      Enum.filter(quarantine_version_ids, fn version_id ->
+        stats = closed_run_stats(version_id)
+
+        Decimal.compare(stats.total_win, Decimal.new(0)) == :gt and
+          Decimal.compare(
+            Decimal.div(stats.total_loss, stats.total_win),
+            @quarantine_max_loss_ratio
+          ) == :gt
+      end)
+
+    retired =
+      Enum.map(failing_ids, fn version_id ->
+        version = get_strategy_version!(version_id)
+
+        {:ok, retired_version} =
+          downgrade_strategy_version(version, "retired", "failed_quarantine")
+
+        retired_version
+      end)
+
+    {:ok, retired}
+  end
+
+  @doc """
+  Runs jobs 1-3 in order for `trading_date` (defaults to yesterday, UTC
+  — same default `trading_system`'s own
+  `run_quarantine_eligibility_check/1` uses, and for the identical
+  reason: a version's `quarantine_trading_days` should only ever
+  advance for a fully-closed trading day, and this check runs early
+  enough in the UTC day — see the `Oban.Plugins.Cron` entry in
+  `config.exs` — that "today" (UTC) has not traded yet). Job 1's
+  day-count update must land before job 3's tenure check reads it —
+  see that job's own doc.
+  """
+  @spec run_quarantine_eligibility_check(Date.t()) :: :ok
+  def run_quarantine_eligibility_check(trading_date \\ Date.add(Date.utc_today(), -1)) do
+    update_quarantine_trading_days(trading_date)
+    auto_promote_eligible_discovery_versions()
+    auto_retire_failing_quarantine_versions()
+    :ok
+  end
+
+  # Closed-run realized_pnl breakdown for one version — total (win +
+  # loss combined, can be negative), and win/loss split as separate
+  # non-negative totals (win: sum of positive realized_pnl; loss: sum
+  # of |negative realized_pnl|) so callers can compute a loss ratio
+  # without re-deriving the split themselves.
+  defp closed_run_stats(version_id) do
+    closed_runs =
+      SimRun
+      |> where([r], r.strategy_version_id == ^version_id)
+      |> where([r], r.status == "closed")
+      |> select([r], r.realized_pnl)
+      |> Repo.all()
+
+    Enum.reduce(
+      closed_runs,
+      %{
+        closed_count: 0,
+        total_realized_pnl: Decimal.new(0),
+        total_win: Decimal.new(0),
+        total_loss: Decimal.new(0)
+      },
+      fn pnl, acc ->
+        pnl = pnl || Decimal.new(0)
+
+        acc
+        |> Map.update!(:closed_count, &(&1 + 1))
+        |> Map.update!(:total_realized_pnl, &Decimal.add(&1, pnl))
+        |> then(fn acc ->
+          case Decimal.compare(pnl, Decimal.new(0)) do
+            :lt -> Map.update!(acc, :total_loss, &Decimal.add(&1, Decimal.abs(pnl)))
+            _ -> Map.update!(acc, :total_win, &Decimal.add(&1, pnl))
+          end
+        end)
+      end
+    )
+  end
+
   # --- Target pools -------------------------------------------------------
 
   def create_target_pool(attrs) do

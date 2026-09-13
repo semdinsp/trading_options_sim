@@ -38,6 +38,12 @@ config :trading_options_sim, :mcp_force_start, true
 # own config/test.exs uses for TradingLive.SignalBus.
 config :trading_options_sim, :signal_bus_adapter, TradingOptionsSim.SignalBus.Test
 
+# :manual — jobs are only ever run explicitly via Oban.Testing's
+# perform_job/2 in a test, never by a real queue/cron plugin picking them
+# up in the background. Same convention trading_system's own
+# config/test.exs uses.
+config :trading_options_sim, Oban, testing: :manual
+
 # In test we don't send emails
 config :trading_options_sim, TradingOptionsSim.Mailer, adapter: Swoosh.Adapters.Test
 
