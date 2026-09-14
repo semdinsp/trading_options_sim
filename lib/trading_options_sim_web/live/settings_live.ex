@@ -2,15 +2,25 @@ defmodule TradingOptionsSimWeb.SettingsLive do
   @moduledoc """
   Operator settings page — token management for `/api/v1` and this
   app's MCP server (one token type backs both, per
-  `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §4a/§4b), plus tag pool management
+  `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §4a/§4b), tag pool management
   (§3a) — creating a tag here is optional (both
   `add_tag_to_strategy_version_by_name/2` and `add_tag_to_run_by_name/2`
   get-or-create on the fly), but deleting one is only ever safe/visible
   as a deliberate, explicit action, so it lives here rather than being
-  reachable from a tag chip on `StrategyVersionsLive`/`RunsLive`.
+  reachable from a tag chip on `StrategyVersionsLive`/`RunsLive` — a
+  Database Backup panel (a manual "Back up database now" button
+  wrapping `TradingOptionsSim.DbBackup.dump/2`, a config-swappable
+  adapter over the sibling `trading_core` library's
+  `TradingCore.DbBackup.dump/3` — ported from `trading_system`'s
+  identical panel) — and a dev-only link into Phoenix.LiveDashboard
+  (`/dev/dashboard`, already mounted in the router, just never linked
+  from anywhere), same `dev_routes`-gated pattern `trading_system`'s
+  own Settings page uses.
   """
 
   use TradingOptionsSimWeb, :live_view
+
+  require Logger
 
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.ApiToken
@@ -19,6 +29,8 @@ defmodule TradingOptionsSimWeb.SettingsLive do
   # LiveView hides it again — same "shown once, then hidden" posture
   # trading_system's own SettingsLive uses for its rolled tokens.
   @rolled_token_display_ms :timer.seconds(60)
+
+  @backup_reminder_after_days 30
 
   @impl true
   def mount(_params, _session, socket) do
@@ -31,7 +43,12 @@ defmodule TradingOptionsSimWeb.SettingsLive do
      |> assign(:rolled_token, nil)
      |> assign(:rolled_token_ref, nil)
      |> assign(:tags, Sim.list_tags())
-     |> assign(:new_tag_name, "")}
+     |> assign(:new_tag_name, "")
+     |> assign(:backup_running?, false)
+     |> assign(:backup_result, nil)
+     |> assign(:latest_backup, latest_backup(backup_dir()))
+     |> assign(:backup_reminder_dismissed?, false)
+     |> assign(:dev_routes?, Application.get_env(:trading_options_sim, :dev_routes, false))}
   end
 
   @impl true
@@ -112,6 +129,52 @@ defmodule TradingOptionsSimWeb.SettingsLive do
      |> assign(:tags, Sim.list_tags())}
   end
 
+  # start_async/3, not a bare Task.async — a real pg_dump can take
+  # anywhere from seconds to several minutes
+  # (TradingCore.DbBackup.dump/3's own default 300_000ms timeout) and
+  # must never block this LiveView process or the page it's rendering.
+  def handle_event("run_backup", _params, socket) do
+    dir = backup_dir()
+
+    {:noreply,
+     socket
+     |> assign(:backup_running?, true)
+     |> assign(:backup_result, nil)
+     |> start_async(:db_backup, fn ->
+       TradingOptionsSim.DbBackup.dump(TradingOptionsSim.Repo.config(), dir)
+     end)}
+  end
+
+  def handle_event("dismiss_backup_reminder", _params, socket) do
+    {:noreply, assign(socket, :backup_reminder_dismissed?, true)}
+  end
+
+  @impl true
+  def handle_async(:db_backup, {:ok, {:ok, _path} = result}, socket) do
+    {:noreply,
+     socket
+     |> assign(:backup_running?, false)
+     |> assign(:backup_result, result)
+     |> assign(:latest_backup, latest_backup(backup_dir()))
+     |> assign(:backup_reminder_dismissed?, false)}
+  end
+
+  def handle_async(:db_backup, {:ok, {:error, _reason} = result}, socket) do
+    {:noreply,
+     socket
+     |> assign(:backup_running?, false)
+     |> assign(:backup_result, result)}
+  end
+
+  def handle_async(:db_backup, {:exit, reason}, socket) do
+    Logger.error("SettingsLive: TradingOptionsSim.DbBackup.dump/2 crashed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:backup_running?, false)
+     |> assign(:backup_result, {:error, {:crashed, reason}})}
+  end
+
   @impl true
   def handle_info({:hide_rolled_token, ref}, socket) do
     if socket.assigns.rolled_token_ref == ref do
@@ -134,6 +197,105 @@ defmodule TradingOptionsSimWeb.SettingsLive do
 
   defp token_status(%{revoked_at: revoked_at}) when not is_nil(revoked_at), do: "revoked"
   defp token_status(_token), do: "active"
+
+  # Overridable via TRADING_OPTIONS_SIM_BACKUP_DIR (config/runtime.exs)
+  # — no existing app-wide "writable data directory" convention to
+  # reuse, so this picks the same priv_dir-relative default a fresh
+  # checkout with no env override would already have write access to.
+  # Same convention trading_system's identical panel uses.
+  defp backup_dir do
+    Application.get_env(
+      :trading_options_sim,
+      :backup_dir,
+      Path.join(:code.priv_dir(:trading_options_sim), "backups")
+    )
+  end
+
+  # Newest .pgdump file for THIS app's own database name — a shared
+  # backup_dir could plausibly hold dumps from other apps/environments,
+  # and DbBackup.dump/3's own "<database>-<timestamp>.pgdump" naming
+  # makes filtering on that cheap and unambiguous. Filename sorts
+  # chronologically by construction, so lexicographic Enum.max/1 on the
+  # matching names is enough — no need to stat every file's mtime just
+  # to find the newest.
+  defp latest_backup(dir) do
+    database = Keyword.fetch!(TradingOptionsSim.Repo.config(), :database)
+    prefix = database <> "-"
+
+    case File.ls(dir) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&(String.starts_with?(&1, prefix) and String.ends_with?(&1, ".pgdump")))
+        |> Enum.max(&>=/2, fn -> nil end)
+        |> case do
+          nil -> nil
+          filename -> stat_backup(Path.join(dir, filename))
+        end
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  defp stat_backup(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{size: size, mtime: mtime_posix}} ->
+        %{path: path, size: size, mtime: DateTime.from_unix!(mtime_posix)}
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  defp backup_stale?(%{mtime: mtime}, dismissed?) do
+    not dismissed? and
+      DateTime.diff(DateTime.utc_now(), mtime, :day) >= @backup_reminder_after_days
+  end
+
+  defp backup_age_label(%{mtime: mtime}) do
+    days = DateTime.diff(DateTime.utc_now(), mtime, :day)
+    "#{days} day#{if days == 1, do: "", else: "s"} ago"
+  end
+
+  defp backup_result_label({:ok, path}) do
+    "Backup complete: #{Path.basename(path)}"
+  end
+
+  defp backup_result_label({:error, {:pg_dump_not_found, path}}) do
+    "Backup failed: pg_dump not found (looked for #{path}). Is it installed and on PATH?"
+  end
+
+  defp backup_result_label({:error, {:pg_dump_failed, exit_status, output}}) do
+    "Backup failed: pg_dump exited #{exit_status}. #{String.slice(output, 0, 300)}"
+  end
+
+  defp backup_result_label({:error, {:pg_dump_timeout, timeout}}) do
+    "Backup failed: pg_dump did not finish within #{div(timeout, 1000)}s."
+  end
+
+  defp backup_result_label({:error, {:crashed, reason}}) do
+    "Backup failed unexpectedly: #{inspect(reason)}"
+  end
+
+  defp backup_result_label({:error, reason}) do
+    "Backup failed: #{inspect(reason)}"
+  end
+
+  defp format_datetime(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+
+  defp format_bytes(bytes) when bytes >= 1_000_000_000 do
+    "#{Float.round(bytes / 1_000_000_000, 2)} GB"
+  end
+
+  defp format_bytes(bytes) when bytes >= 1_000_000 do
+    "#{Float.round(bytes / 1_000_000, 2)} MB"
+  end
+
+  defp format_bytes(bytes) when bytes >= 1_000 do
+    "#{Float.round(bytes / 1_000, 1)} KB"
+  end
+
+  defp format_bytes(bytes), do: "#{bytes} B"
 
   @impl true
   def render(assigns) do
@@ -234,7 +396,7 @@ defmodule TradingOptionsSimWeb.SettingsLive do
         </table>
       </section>
 
-      <section>
+      <section class="mb-8">
         <h2 class="font-bold uppercase tracking-wide mb-2">Tags</h2>
         <p class="text-sm text-base-content/60 mb-4">
           Shared tag pool applied to strategy versions and runs. Creating a tag here is
@@ -277,6 +439,94 @@ defmodule TradingOptionsSimWeb.SettingsLive do
             </button>
           </span>
         </div>
+      </section>
+
+      <section class="mb-8">
+        <h2 class="font-bold uppercase tracking-wide mb-2">Database Backup</h2>
+
+        <div
+          :if={@latest_backup && backup_stale?(@latest_backup, @backup_reminder_dismissed?)}
+          id="backup-reminder-banner"
+          class="border border-warning/40 bg-warning/10 text-warning px-3 py-2 mb-3 flex items-center justify-between gap-2 text-sm"
+        >
+          <span>
+            It's been over a month since your last database backup ({backup_age_label(@latest_backup)}) — back up now.
+          </span>
+          <button
+            type="button"
+            phx-click="dismiss_backup_reminder"
+            class="shrink-0 hover:text-error"
+            title="Dismiss for this session"
+          >
+            <.icon name="hero-x-mark" class="h-4 w-4" />
+          </button>
+        </div>
+        <div
+          :if={!@latest_backup}
+          id="backup-reminder-banner-no-backup"
+          class="border border-warning/40 bg-warning/10 text-warning px-3 py-2 mb-3 text-sm"
+        >
+          No backup found yet — back up now to establish a baseline.
+        </div>
+
+        <p class="text-sm text-base-content/60 mb-4">
+          Runs <span class="font-data">pg_dump</span>
+          (custom format, restorable with <span class="font-data">pg_restore</span>)
+          against this app's own database and writes the result to <span class="font-data">{backup_dir()}</span>. Can take a while on a large database —
+          runs in the background, this page stays usable while it's in progress.
+        </p>
+
+        <div class="space-y-2">
+          <div :if={@latest_backup} class="text-xs font-data space-y-1 text-base-content/70">
+            <div>Last backup: {format_datetime(@latest_backup.mtime)} UTC</div>
+            <div>Size: {format_bytes(@latest_backup.size)}</div>
+            <div>File: {Path.basename(@latest_backup.path)}</div>
+          </div>
+
+          <div
+            :if={@backup_result}
+            class={[
+              "border px-3 py-2 text-sm",
+              if(match?({:ok, _}, @backup_result),
+                do: "border-success/40 bg-success/10 text-success",
+                else: "border-error/40 bg-error/10 text-error"
+              )
+            ]}
+          >
+            {backup_result_label(@backup_result)}
+          </div>
+
+          <button
+            type="button"
+            phx-click="run_backup"
+            disabled={@backup_running?}
+            class="btn btn-primary rounded-none"
+          >
+            <.icon
+              :if={@backup_running?}
+              name="hero-arrow-path"
+              class="h-4 w-4 motion-safe:animate-spin"
+            />
+            {if @backup_running?, do: "Backing up…", else: "Back up database now"}
+          </button>
+        </div>
+      </section>
+
+      <section :if={@dev_routes?}>
+        <h2 class="font-bold uppercase tracking-wide mb-2">LiveDashboard</h2>
+        <p class="text-sm text-base-content/60 mb-2">
+          Development tool — real-time BEAM/Ecto/Phoenix metrics, process inspector, and request
+          logging. Not present in a production build (gated on
+          <span class="font-data">dev_routes</span>
+          at compile time, same as the route itself).
+        </p>
+        <a
+          href="/dev/dashboard"
+          target="_blank"
+          class="inline-flex items-center gap-1 px-3 py-1.5 border border-primary/40 text-primary bg-primary/10 text-xs uppercase tracking-wide hover:bg-primary/20"
+        >
+          <.icon name="hero-arrow-top-right-on-square" class="h-4 w-4" /> Open LiveDashboard
+        </a>
       </section>
     </Layouts.app>
     """

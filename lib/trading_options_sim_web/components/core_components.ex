@@ -453,6 +453,35 @@ defmodule TradingOptionsSimWeb.CoreComponents do
   end
 
   @doc """
+  A single labeled stat in a `gap-px bg-base-300` grid (DESIGN.md's
+  "seam" pattern) — one title line, one bold data-font value line,
+  optional colored `class` override on the value and an optional
+  sub-label line. Ported from `trading_system`'s identical component;
+  used by `SystemPerformanceLive`'s panels.
+
+  ## Examples
+
+      <.stat_card title="Uptime" value="2h 14m" />
+      <.stat_card title="Database" value="UP" class="text-success" />
+  """
+  attr :title, :string, required: true
+  attr :value, :string, required: true
+  attr :class, :string, default: ""
+  attr :sublabel, :string, default: nil
+
+  def stat_card(assigns) do
+    ~H"""
+    <div class="bg-base-200 px-4 py-2 h-full flex flex-col justify-center text-center lg:text-right min-w-[8rem]">
+      <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50">{@title}</div>
+      <div class={["font-data text-lg font-bold tabular-nums", @class]}>{@value}</div>
+      <div :if={@sublabel} class="font-data text-[10px] tabular-nums text-base-content/50">
+        {@sublabel}
+      </div>
+    </div>
+    """
+  end
+
+  @doc """
   A `StrategyVersion.lifecycle_stage` badge — bordered rectangle, per
   DESIGN.md's badge convention, colored per stage rather than one flat
   gray for all four: `discovery` (neutral, nothing proven yet),

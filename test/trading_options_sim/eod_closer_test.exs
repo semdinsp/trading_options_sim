@@ -198,4 +198,25 @@ defmodule TradingOptionsSim.EodCloserTest do
     assert ContractMonitor.snapshot(pid).position_open? == true
     assert Sim.get_sim_run!(run.id).status == "open"
   end
+
+  # TradingOptionsSim.MonitorRegistry is shared with
+  # TradingOptionsSim.Pricing.IBKRLive, whose own keys ({:ibkr_live,
+  # occ_symbol}) are also 2-tuples — a real bug had running_monitors/0's
+  # Registry.select match spec catch those too and call :snapshot on
+  # them, crashing every running IBKRLive listener on each tick (it has
+  # no matching handle_call clause). Confirmed live via a full test-suite
+  # run before this test existed: real "no function clause matching in
+  # TradingOptionsSim.Pricing.IBKRLive.handle_call/3" crashes appeared in
+  # the log whenever an IBKRLive-backed ContractMonitorTest ran
+  # concurrently with an EodCloser scan.
+  test "does not crash a co-registered IBKRLive listener" do
+    occ_symbol = "EOD-IBKR-SNAPSHOT-TEST"
+    pid = start_supervised!({TradingOptionsSim.Pricing.IBKRLive, occ_symbol: occ_symbol})
+
+    :ok = EodCloser.run_once()
+    Process.sleep(50)
+
+    assert Process.alive?(pid)
+    assert TradingOptionsSim.Pricing.IBKRLive.whereis(occ_symbol) == pid
+  end
 end

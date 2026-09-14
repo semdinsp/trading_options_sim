@@ -84,12 +84,19 @@ defmodule TradingOptionsSim.EodCloser do
       Logger.error("EodCloser: scan pass failed: #{inspect(error)}")
   end
 
-  # MonitorRegistry keys are {sim_run_id, contract_key_string} (see
-  # ContractMonitor.registry_key/2) — only sim_run_id (for logging) and
-  # the pid are needed here, contract_key_string is unused.
+  # MonitorRegistry is shared with TradingOptionsSim.Pricing.IBKRLive,
+  # whose own keys are {:ibkr_live, occ_symbol} — also a 2-tuple, so a
+  # plain {:"$1", :_} pattern here matched those too and crashed every
+  # running IBKRLive listener on each tick (it has no handle_call(:snapshot,
+  # ...) clause; confirmed live via mix test — the process gets restarted
+  # by its :transient child spec, but the crash itself is real and pointless).
+  # ContractMonitor's own sim_run_id is always a binary (UUIDv7 string,
+  # see registry_key/2); IBKRLive's own first element is always the atom
+  # :ibkr_live — the is_binary/1 guard is what actually discriminates the
+  # two key shapes sharing this registry, not the tuple arity.
   defp running_monitors do
     Registry.select(TradingOptionsSim.MonitorRegistry, [
-      {{{:"$1", :_}, :"$2", :_}, [], [{{:"$1", :"$2"}}]}
+      {{{:"$1", :_}, :"$2", :_}, [{:is_binary, :"$1"}], [{{:"$1", :"$2"}}]}
     ])
   end
 
