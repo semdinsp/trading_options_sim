@@ -224,6 +224,28 @@ defmodule TradingOptionsSim.SimTest do
       assert version.tags == []
     end
 
+    test "remove_tag_from_strategy_version/2 removes only the given tag" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.add_tag_to_strategy_version_by_name(version, "keep")
+      {:ok, version} = Sim.add_tag_to_strategy_version_by_name(version, "remove me")
+      tag_to_remove = Enum.find(version.tags, &(&1.name == "remove me"))
+
+      {:ok, version} = Sim.remove_tag_from_strategy_version(version, tag_to_remove.id)
+
+      assert Enum.map(version.tags, & &1.name) == ["keep"]
+    end
+
+    test "remove_tag_from_strategy_version/2 is a no-op if the tag isn't applied" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.add_tag_to_strategy_version_by_name(version, "keep")
+
+      {:ok, version} = Sim.remove_tag_from_strategy_version(version, Ecto.UUID.generate())
+
+      assert Enum.map(version.tags, & &1.name) == ["keep"]
+    end
+
     test "delete_tag/1 removes it from every strategy version and run it was applied to" do
       strategy = strategy_fixture()
       version = version_fixture(strategy)
@@ -420,6 +442,33 @@ defmodule TradingOptionsSim.SimTest do
       [run] = Sim.list_sim_runs()
       assert run.strategy_version.id == version.id
       assert run.strategy_version.strategy.id == strategy.id
+    end
+  end
+
+  describe "last_closed_sim_run/2" do
+    test "returns nil when no closed run exists for the symbol" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      run_fixture(version, "AAPL")
+
+      assert Sim.last_closed_sim_run(version, "AAPL") == nil
+    end
+
+    test "returns the most recently closed run for that symbol" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      close_run(run_fixture(version, "AAPL"))
+      newer = close_run(run_fixture(version, "AAPL"))
+
+      assert Sim.last_closed_sim_run(version, "AAPL").id == newer.id
+    end
+
+    test "ignores closed runs for a different symbol" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      close_run(run_fixture(version, "MSFT"))
+
+      assert Sim.last_closed_sim_run(version, "AAPL") == nil
     end
   end
 
