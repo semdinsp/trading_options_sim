@@ -9,6 +9,8 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
 
   defp occ_symbol, do: "SYM# #{System.unique_integer([:positive])}"
 
+  defp contract, do: %{sec_type: "OPT", expiry: "20271231", strike: 150.0, right: "C"}
+
   defp broadcast_greeks(occ_symbol, data) do
     message =
       %{type: :price, symbol: occ_symbol, source: :ibkr, data: data}
@@ -24,14 +26,14 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
 
     test "returns {:error, :no_data} before any tick arrives" do
       symbol = occ_symbol()
-      start_supervised!({IBKRLive, occ_symbol: symbol})
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
 
       assert {:error, :no_data} = IBKRLive.latest(symbol)
     end
 
     test "returns the last-received greeks tick" do
       symbol = occ_symbol()
-      start_supervised!({IBKRLive, occ_symbol: symbol})
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
 
       broadcast_greeks(symbol, %{
         implied_vol: 0.35,
@@ -58,7 +60,7 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
 
     test "a later tick replaces the earlier one" do
       symbol = occ_symbol()
-      start_supervised!({IBKRLive, occ_symbol: symbol})
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
 
       broadcast_greeks(symbol, %{delta: 0.50, opt_price: 5.0})
       Process.sleep(30)
@@ -72,7 +74,7 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
 
     test "ignores a broadcast on the same topic with no greeks keys" do
       symbol = occ_symbol()
-      start_supervised!({IBKRLive, occ_symbol: symbol})
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
 
       # A plain stock-shaped tick (bid/ask/last) — shouldn't happen if the
       # OCC-symbol convention is respected, but confirms this module
@@ -85,7 +87,7 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
 
     test "treats an absent key as nil, never fabricated" do
       symbol = occ_symbol()
-      start_supervised!({IBKRLive, occ_symbol: symbol})
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
 
       broadcast_greeks(symbol, %{delta: 0.5})
       Process.sleep(30)
@@ -100,7 +102,7 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
   describe "whereis/1" do
     test "finds a running listener by occ_symbol" do
       symbol = occ_symbol()
-      {:ok, pid} = start_supervised({IBKRLive, occ_symbol: symbol})
+      {:ok, pid} = start_supervised({IBKRLive, occ_symbol: symbol, contract: contract()})
 
       assert IBKRLive.whereis(symbol) == pid
     end

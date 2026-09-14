@@ -64,7 +64,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
           option_leg_config: fixed_leg_config()
         })
 
-      assert {:ok, pids} = SimActivator.activate(version)
+      assert {:ok, pids, []} = SimActivator.activate(version)
       assert length(pids) == 2
       assert Enum.all?(pids, &Process.alive?/1)
 
@@ -82,8 +82,8 @@ defmodule TradingOptionsSim.SimActivatorTest do
           option_leg_config: fixed_leg_config()
         })
 
-      {:ok, [pid1]} = SimActivator.activate(version)
-      {:ok, [pid2]} = SimActivator.activate(version)
+      {:ok, [pid1], []} = SimActivator.activate(version)
+      {:ok, [pid2], []} = SimActivator.activate(version)
 
       assert pid1 == pid2
       assert length(Sim.list_open_sim_runs(version)) == 1
@@ -98,7 +98,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
           option_leg_config: fixed_leg_config()
         })
 
-      {:ok, [pid]} = SimActivator.activate(version)
+      {:ok, [pid], []} = SimActivator.activate(version)
 
       [run] = Sim.list_open_sim_runs(version)
       contract_key = {run.symbol, run.expiry, run.strike, run.right}
@@ -117,7 +117,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
           option_leg_config: fixed_leg_config()
         })
 
-      {:ok, pids} = SimActivator.activate(version)
+      {:ok, pids, []} = SimActivator.activate(version)
       assert Enum.all?(pids, &Process.alive?/1)
 
       assert {:ok, 2} = SimActivator.deactivate(version)
@@ -136,7 +136,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
           rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 1}}
         })
 
-      {:ok, [pid]} = SimActivator.activate(version)
+      {:ok, [pid], []} = SimActivator.activate(version)
       [run] = Sim.list_open_sim_runs(version)
 
       message =
@@ -164,7 +164,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
           option_leg_config: fixed_leg_config()
         })
 
-      {:ok, [pid]} = SimActivator.activate(version)
+      {:ok, [pid], []} = SimActivator.activate(version)
       [run] = Sim.list_open_sim_runs(version)
       refute ContractMonitor.snapshot(pid).position_open?
 
@@ -188,7 +188,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
           option_leg_config: fixed_leg_config()
         })
 
-      {:ok, _pids} = SimActivator.activate(version)
+      {:ok, _pids, []} = SimActivator.activate(version)
       assert {:ok, 1} = SimActivator.deactivate(version)
 
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "discovery"
@@ -208,7 +208,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
           option_leg_config: fixed_leg_config()
         })
 
-      {:ok, [pid]} = SimActivator.activate(version)
+      {:ok, [pid], []} = SimActivator.activate(version)
 
       # :normal exit — the monitor's own :transient restart strategy only
       # restarts on an ABNORMAL exit (confirmed live: a :kill exit here

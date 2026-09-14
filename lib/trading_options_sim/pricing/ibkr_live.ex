@@ -40,11 +40,38 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   once (here, per-monitor, to the resolved contract's own OCC symbol
   topic) and cache the latest tick, rather than polling — same
   event-driven mandate as `ContractMonitor` itself (plan §5's own note).
+
+  ## Real `trading_hub` subscription lifecycle (per-contract, refcounted by depend count)
+
+  On `init/1`, subscribes for real via
+  `TradingHub.MarketData.Manager.subscribe_symbol/3` (over
+  `IbPortfolio.HubClient.call_hub/5`), using `occ_symbol` itself as the
+  `caller` tag — this is what makes this shared-per-contract listener
+  safe even when trading_hub's own subscription refcounting is keyed by
+  `{symbol, caller}` and not per-`ContractMonitor`: every
+  `ContractMonitor` for the same contract shares this one process (see
+  `whereis/1`'s own doc), so there is exactly one caller tag per real
+  subscription regardless of how many monitors depend on it — the same
+  bug shape `trading_live`'s own `StrategyStockMonitor` hit and fixed by
+  scoping its caller tag per-`live_strategy_id` (confirmed by reading
+  that code directly) simply cannot arise here, since this module IS
+  the single owner trading_hub's tag identifies.
+
+  `attach/1`/`detach/1` track how many `ContractMonitor`s currently
+  depend on this listener (a plain integer, incremented on `attach/1`,
+  decremented on `detach/1`) — when it reaches zero, this process
+  unsubscribes from `trading_hub` for real and stops itself, rather
+  than living forever after every monitor using it has deactivated
+  (which would silently leak a real TWS subscription — see
+  `TradingOptionsSim.SimActivator.deactivate/1`'s own moduledoc on the
+  "Cleanup discipline" note this mirrors from the sibling `trading_hub`
+  session's handoff on this exact risk).
   """
 
   use GenServer
+  require Logger
 
-  defstruct [:occ_symbol, last_tick: nil]
+  defstruct [:occ_symbol, :contract, depend_count: 0, subscribed?: false, last_tick: nil]
 
   @type occ_symbol :: String.t()
 
@@ -53,6 +80,8 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   (the string `trading_hub`'s `Subscriptions.subscribe/2` was called
   with for this contract — NOT the plain underlying ticker; see this
   module's own moduledoc on why identity is symbol-string-only today).
+  `contract` is the plain map `TradingHub.MarketData.Manager.subscribe_symbol/3`
+  expects (`%{sec_type: "OPT", expiry:, strike:, right:}`).
   """
   def start_link(opts) do
     occ_symbol = Keyword.fetch!(opts, :occ_symbol)
@@ -73,6 +102,37 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   end
 
   @doc """
+  Registers one more `ContractMonitor` as depending on this listener —
+  call once, from `ContractMonitor.init/1`, right after the listener is
+  started/found. Returns whether the real `trading_hub` subscription
+  this listener depends on is actually live (`subscribed?: true`) or
+  merely running-but-blind because the subscribe RPC failed
+  (`subscribed?: false` — see `init/1`'s own doc for why that's logged,
+  not fatal) — the caller, not this module, decides whether/how to
+  surface that to an operator (`SimActivator.activate/1` threads it
+  into its own return value for exactly this reason). See `detach/1`'s
+  own doc for the matching call.
+  """
+  @spec attach(pid()) :: {:ok, subscribed?: boolean()}
+  def attach(pid), do: GenServer.call(pid, :attach)
+
+  @doc """
+  Releases one `ContractMonitor`'s dependency on this listener — call
+  once, from `ContractMonitor.terminate/2`. When the depend count
+  reaches zero, this process unsubscribes from `trading_hub` for real
+  and stops itself (`:normal`, not left running with nothing left
+  depending on it). Safe to call on an already-stopped pid (a
+  `ContractMonitor` terminating after this listener already reached
+  zero some other way) — treated as already-detached, not an error.
+  """
+  @spec detach(pid()) :: :ok
+  def detach(pid) do
+    GenServer.call(pid, :detach)
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   The last-received tick for `occ_symbol`, or `{:error, :no_data}` if
   none has arrived yet (either no listener is running, or one is running
   but `trading_hub` hasn't broadcast anything for it) — never fabricates
@@ -89,14 +149,53 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     :exit, _ -> {:error, :no_data}
   end
 
+  # A failed real subscribe (unreachable trading_hub, test env with no
+  # HubClient started, a contract trading_hub itself rejects) is logged
+  # (inside subscribe_to_hub/2) but never fatal — matches trading_live's
+  # own StrategyStockMonitor precedent for its identical
+  # subscribe_symbol/3 call (confirmed by reading that code directly):
+  # a monitor that can't establish the real data source still starts
+  # and evaluates rules, it just never receives a real tick, and
+  # latest/1's own existing {:error, :no_data} fail-closed behavior
+  # already means a `ContractMonitor` using this listener simply never
+  # fills — the same outcome a hard stop would produce, without also
+  # taking down the whole monitor (and, transitively, every OTHER
+  # ContractMonitor sharing this same listener) over one bad RPC.
   @impl true
   def init(opts) do
     occ_symbol = Keyword.fetch!(opts, :occ_symbol)
+    contract = Keyword.fetch!(opts, :contract)
+
+    subscribed? =
+      case subscribe_to_hub(occ_symbol, contract) do
+        :ok -> true
+        {:error, _reason} -> false
+      end
+
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{occ_symbol}")
-    {:ok, %__MODULE__{occ_symbol: occ_symbol}}
+
+    {:ok, %__MODULE__{occ_symbol: occ_symbol, contract: contract, subscribed?: subscribed?}}
   end
 
   @impl true
+  def handle_call(:attach, _from, state) do
+    {:reply, {:ok, subscribed?: state.subscribed?},
+     %{state | depend_count: state.depend_count + 1}}
+  end
+
+  def handle_call(:detach, _from, %{depend_count: count} = state) when count <= 1 do
+    # The real unsubscribe happens in terminate/2, not here — GenServer
+    # guarantees terminate/2 runs before this process actually exits on
+    # a {:stop, :normal, ...} reply, so there's exactly one unsubscribe
+    # call regardless of whether this process stops via a clean detach
+    # (this clause) or an abnormal exit (terminate/2's own doc).
+    {:stop, :normal, :ok, %{state | depend_count: 0}}
+  end
+
+  def handle_call(:detach, _from, state) do
+    {:reply, :ok, %{state | depend_count: state.depend_count - 1}}
+  end
+
   def handle_call(:latest, _from, %{last_tick: nil} = state) do
     {:reply, {:error, :no_data}, state}
   end
@@ -123,6 +222,103 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # The single place this process ever unsubscribes from trading_hub —
+  # GenServer guarantees this runs before the process actually exits,
+  # whether that exit is the clean {:stop, :normal, ...} reply
+  # handle_call(:detach, ...) sends on reaching depend_count 0, or an
+  # abnormal exit (a supervisor kill, an unhandled crash) while
+  # depend_count was still > 0. Without this, the abnormal-exit case
+  # would leak the real trading_hub subscription forever — the exact
+  # "Cleanup discipline" risk SimActivator.deactivate/1's own moduledoc
+  # already documents inheriting from the sibling trading_hub session's
+  # handoff. Skipped entirely when the initial subscribe itself never
+  # succeeded (subscribed?: false, see init/1) — nothing real to
+  # release, and calling unsubscribe_symbol/2 for a caller tag that was
+  # never actually registered would just be a wasted RPC (still
+  # harmless, trading_hub documents it idempotent, but there's no
+  # reason to make it either).
+  @impl true
+  def terminate(_reason, %{subscribed?: true} = state) do
+    unsubscribe_from_hub(state.occ_symbol)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  @doc false
+  def caller_tag(occ_symbol), do: occ_symbol
+
+  defp subscribe_to_hub(occ_symbol, contract) do
+    case IbPortfolio.HubClient.call_hub(
+           TradingOptionsSim.HubClient,
+           TradingHub.MarketData.Manager,
+           :subscribe_symbol,
+           [occ_symbol, contract, caller_tag(occ_symbol)],
+           5_000
+         ) do
+      {:ok, :ok} ->
+        :ok
+
+      {:ok, {:error, reason}} ->
+        Logger.error(
+          "IBKRLive: subscribe_symbol(#{occ_symbol}) rejected by trading_hub: #{inspect(reason)}"
+        )
+
+        {:error, reason}
+
+      {:error, reason} ->
+        Logger.error("IBKRLive: subscribe_symbol(#{occ_symbol}) RPC failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  catch
+    # HubClient isn't started in test env (config :start_hub_client, false)
+    # and GenServer.call/2 against an unregistered name exits (:noproc)
+    # rather than returning — caught here so an unreachable/absent
+    # HubClient degrades the same as any other subscribe failure (logged,
+    # non-fatal) instead of crashing this listener's init/1.
+    :exit, reason ->
+      Logger.error(
+        "IBKRLive: subscribe_symbol(#{occ_symbol}) HubClient unreachable: #{inspect(reason)}"
+      )
+
+      {:error, reason}
+  end
+
+  # Best-effort — see terminate/2's own comment on why a failed real
+  # unsubscribe here still lets this process stop (retrying against an
+  # unreachable trading_hub isn't something this process can act on
+  # differently; a leaked subscription from a genuinely dropped node is
+  # an accepted, already-documented risk, not one this call can fully
+  # close on its own).
+  defp unsubscribe_from_hub(occ_symbol) do
+    case IbPortfolio.HubClient.call_hub(
+           TradingOptionsSim.HubClient,
+           TradingHub.MarketData.Manager,
+           :unsubscribe_symbol,
+           [occ_symbol, caller_tag(occ_symbol)],
+           5_000
+         ) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "IBKRLive: unsubscribe_symbol(#{occ_symbol}) RPC failed: #{inspect(reason)} — stopping anyway"
+        )
+
+        :ok
+    end
+  catch
+    # See subscribe_to_hub/2's own catch clause — same unreachable-HubClient
+    # risk, same "stop anyway" posture terminate/2 already documents.
+    :exit, reason ->
+      Logger.warning(
+        "IBKRLive: unsubscribe_symbol(#{occ_symbol}) HubClient unreachable: #{inspect(reason)} — stopping anyway"
+      )
+
+      :ok
+  end
 
   @greeks_keys [:implied_vol, :delta, :opt_price, :gamma, :vega, :theta, :und_price]
 
