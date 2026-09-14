@@ -51,6 +51,11 @@ config :trading_options_sim, Oban, testing: :manual
 # trading_live's own config/test.exs uses for its identical cache.
 config :trading_options_sim, :exchange_session_cache_enabled, false
 
+# SettingsLive's "Database Backup" panel tests stub via
+# TradingOptionsSim.DbBackup.Test rather than shelling out to a real
+# pg_dump. Same convention trading_system's own config/test.exs uses.
+config :trading_options_sim, :db_backup_adapter, TradingOptionsSim.DbBackup.Test
+
 # In test we don't send emails
 config :trading_options_sim, TradingOptionsSim.Mailer, adapter: Swoosh.Adapters.Test
 

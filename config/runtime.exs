@@ -20,6 +20,15 @@ if System.get_env("PHX_SERVER") do
   config :trading_options_sim, TradingOptionsSimWeb.Endpoint, server: true
 end
 
+# Where SettingsLive's "Database Backup" panel writes pg_dump output.
+# Same convention trading_system's identical panel uses — a real deploy
+# can also override it locally without a release; no env var means the
+# LiveView falls back to Path.join(:code.priv_dir(:trading_options_sim),
+# "backups") itself, this only needs to be set here when overriding.
+if backup_dir = System.get_env("TRADING_OPTIONS_SIM_BACKUP_DIR") do
+  config :trading_options_sim, :backup_dir, backup_dir
+end
+
 config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 

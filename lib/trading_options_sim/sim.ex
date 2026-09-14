@@ -753,6 +753,78 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.one()
   end
 
+  # --- Cron/Oban health (System Performance page) ---------------------------
+
+  @cron_workers [
+    TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker
+  ]
+
+  # Jobs sitting in one of these states are pending/stuck work, not
+  # historical record — same list `trading_system`'s own
+  # `oban_pending_job_count/0` uses.
+  @stuck_job_states ~w(available scheduled retryable executing)
+
+  @doc """
+  One row per cron-scheduled worker (`config.exs`'s `Oban.Plugins.Cron`
+  crontab — currently just `QuarantineEligibilityWorker`), each with its
+  most recent `Oban.Job` (any state) and, separately, its most recent
+  two successfully-`completed` jobs — so a caller can tell "ran recently
+  but keeps failing" apart from "hasn't run at all," and can see the gap
+  between the last two runs (a worker whose `last_success` looks recent
+  can still be broken if `second_last_success` reveals the prior run was
+  much earlier than the schedule implies). Ported from
+  `TradingSystem.Trading.cron_worker_health/0` — same shape, same
+  `Oban.Worker.to_string/1` requirement (not `Kernel.to_string/1`: Oban
+  strips the `"Elixir."` prefix before writing `oban_jobs.worker`, so a
+  bare `to_string/1` here would silently match nothing).
+  """
+  @spec cron_worker_health() :: [
+          %{
+            worker: module(),
+            last_job: Oban.Job.t() | nil,
+            last_success: Oban.Job.t() | nil,
+            second_last_success: Oban.Job.t() | nil
+          }
+        ]
+  def cron_worker_health do
+    Enum.map(@cron_workers, fn worker ->
+      worker_name = Oban.Worker.to_string(worker)
+
+      last_job =
+        Oban.Job
+        |> where([j], j.worker == ^worker_name)
+        |> order_by([j], desc: j.inserted_at)
+        |> limit(1)
+        |> Repo.one()
+
+      [last_success, second_last_success] =
+        case Oban.Job
+             |> where([j], j.worker == ^worker_name and j.state == "completed")
+             |> order_by([j], desc: j.completed_at)
+             |> limit(2)
+             |> Repo.all() do
+          [first, second] -> [first, second]
+          [first] -> [first, nil]
+          [] -> [nil, nil]
+        end
+
+      %{
+        worker: worker,
+        last_job: last_job,
+        last_success: last_success,
+        second_last_success: second_last_success
+      }
+    end)
+  end
+
+  @doc "Count of Oban jobs currently available/scheduled/retryable/executing, across all queues."
+  @spec oban_pending_job_count() :: non_neg_integer()
+  def oban_pending_job_count do
+    Oban.Job
+    |> where([j], j.state in ^@stuck_job_states)
+    |> Repo.aggregate(:count)
+  end
+
   # Puts `value` under whichever key type `attrs` already uses (string or
   # atom) — `Ecto.Changeset.cast/3` raises on a map with BOTH string and
   # atom keys, which a plain `Map.put(attrs, :some_atom_key, value)` would
