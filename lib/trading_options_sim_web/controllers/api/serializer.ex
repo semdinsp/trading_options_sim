@@ -61,8 +61,7 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "symbol" => member.symbol,
       "exchange" => member.exchange,
       "currency" => member.currency,
-      "ib_conid" => member.ib_conid,
-      "contract_selection" => member.contract_selection
+      "ib_conid" => member.ib_conid
     }
   end
 
