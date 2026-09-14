@@ -105,4 +105,21 @@ defmodule TradingOptionsSim.Sim.SimRun do
     |> put_change(:status, "closed")
     |> validate_required([:exit_at, :exit_price, :exit_reason, :realized_pnl])
   end
+
+  @doc """
+  Closes a run that never received an entry fill — its own monitor was
+  deactivated (or otherwise stopped) while still flat, watching for an
+  entry that never triggered. Unlike `exit_changeset/2`, there is no
+  `entry_price`/`exit_price`/`realized_pnl` to record (nothing was ever
+  filled): only `exit_at`/`exit_reason` are required, and `entry_price`/
+  `exit_price`/`realized_pnl` stay `nil` — a real, distinct run outcome
+  ("activated, never triggered, then stopped"), not a trade with zero
+  P&L. See `Sim.close_run_without_entry/2`'s own doc for the caller.
+  """
+  def close_without_entry_changeset(sim_run, attrs) do
+    sim_run
+    |> cast(attrs, [:exit_at, :exit_reason])
+    |> put_change(:status, "closed")
+    |> validate_required([:exit_at, :exit_reason])
+  end
 end

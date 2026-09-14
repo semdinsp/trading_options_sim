@@ -622,6 +622,26 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.insert()
   end
 
+  @doc """
+  Closes `run` with no entry ever having been filled — no `SimFill` row
+  is created (there's nothing to record a fill for), just
+  `SimRun.close_without_entry_changeset/2` flipping `status`/`exit_at`/
+  `exit_reason`. The one real caller is
+  `SimActivator.deactivate/1`'s handling of a monitor that was still
+  flat when it was stopped — see that function's own doc for why
+  `trading_live` has no equivalent case to mirror here.
+  """
+  @spec close_run_without_entry(SimRun.t(), String.t()) ::
+          {:ok, SimRun.t()} | {:error, Ecto.Changeset.t()}
+  def close_run_without_entry(%SimRun{} = run, exit_reason) do
+    run
+    |> SimRun.close_without_entry_changeset(%{
+      exit_at: DateTime.utc_now(),
+      exit_reason: exit_reason
+    })
+    |> Repo.update()
+  end
+
   def list_open_sim_runs(%StrategyVersion{id: strategy_version_id}) do
     SimRun
     |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "open")
@@ -675,6 +695,24 @@ defmodule TradingOptionsSim.Sim do
     |> where([v], v.id in subquery(open_run_version_ids))
     |> preload([:strategy, sim_runs: ^from(r in SimRun, where: r.status == "open")])
     |> Repo.all()
+  end
+
+  @doc """
+  A `MapSet` of every `StrategyVersion.id` with at least one currently
+  open `SimRun` — the cheap, single-query membership check
+  `StrategyVersionsLive`'s activate/deactivate button needs per row
+  (whether a version currently has running monitors), without paying
+  `list_active_strategy_versions/0`'s own full preload cost when only a
+  yes/no per row is needed.
+  """
+  @spec active_strategy_version_ids() :: MapSet.t(String.t())
+  def active_strategy_version_ids do
+    SimRun
+    |> where([r], r.status == "open")
+    |> select([r], r.strategy_version_id)
+    |> distinct(true)
+    |> Repo.all()
+    |> MapSet.new()
   end
 
   def list_sim_fills(%SimRun{id: sim_run_id}) do

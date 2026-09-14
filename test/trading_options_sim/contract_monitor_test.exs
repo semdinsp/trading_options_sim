@@ -560,4 +560,70 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert SignalBusTest.requested_names() == ["vix_last"]
     end
   end
+
+  describe "force_close/2" do
+    test "flattens an open position and returns :ok" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "FORCECLOSE1"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key)
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      assert :ok = ContractMonitor.force_close(pid, :manual)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      closed_run = Sim.get_sim_run!(run.id)
+      assert closed_run.status == "closed"
+      assert closed_run.exit_reason == "manual"
+    end
+
+    test "is a no-op on a flat monitor" do
+      version = version_fixture(%{})
+      key = contract_key("FORCECLOSE2")
+      {pid, run} = start_monitor(version, key)
+
+      assert :ok = ContractMonitor.force_close(pid, :manual)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.get_sim_run!(run.id).status == "open"
+    end
+
+    test "is a no-op when no snapshot has been priced yet, even with position_open?: true" do
+      version = version_fixture(%{})
+      key = contract_key("FORCECLOSE3")
+
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: "FORCECLOSE3",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, pid} =
+        start_supervised(
+          {ContractMonitor,
+           sim_run_id: run.id,
+           contract_key: key,
+           strategy_version: version,
+           direction: "long",
+           quantity: 1,
+           position_open?: true,
+           exchange: always_open_exchange_fixture()}
+        )
+
+      assert :ok = ContractMonitor.force_close(pid, :manual)
+
+      assert Sim.get_sim_run!(run.id).status == "open"
+    end
+  end
 end

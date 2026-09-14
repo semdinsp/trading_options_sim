@@ -5,12 +5,22 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
   retired-strategies view (a `?stage=retired` filter, not a separate
   screen — `Sim.list_strategy_versions/1` already covers every stage
   through one query). Each row shows its tag chips and an inline
-  add/remove tag control, per `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §3a.
+  add/remove tag control, per `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §3a —
+  and an Activate/Deactivate button (`SimActivator.activate/1` /
+  `.deactivate/1`), independent of `lifecycle_stage`: "activated" means
+  "has running monitors," not a stage transition, so a version can be
+  (de)activated at any stage, including `retired` (deactivating a
+  version nobody got around to before retiring it is still a real,
+  useful action; re-activating a retired one is intentionally still
+  allowed here even though `Sim.promote_strategy_version/2` wouldn't
+  let a retired version move to any other *stage* without first
+  un-retiring it back to `discovery`).
   """
 
   use TradingOptionsSimWeb, :live_view
 
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.SimActivator
 
   @impl true
   def mount(_params, _session, socket) do
@@ -57,8 +67,42 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
     {:noreply, load_versions(socket)}
   end
 
+  def handle_event("activate", %{"id" => id}, socket) do
+    version = Sim.get_strategy_version!(id)
+
+    socket =
+      case SimActivator.activate(version) do
+        {:ok, pids} ->
+          put_flash(socket, :info, "Activated — #{length(pids)} monitor(s) running")
+
+        {:error, :no_target_pool} ->
+          put_flash(socket, :error, "Can't activate — this version has no target pool set")
+
+        {:error, :unsupported_leg_config} ->
+          put_flash(
+            socket,
+            :error,
+            "Can't activate — option_leg_config isn't a supported fixed_strike/fixed selection"
+          )
+      end
+
+    {:noreply, load_versions(socket)}
+  end
+
+  def handle_event("deactivate", %{"id" => id}, socket) do
+    version = Sim.get_strategy_version!(id)
+    {:ok, count} = SimActivator.deactivate(version)
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Deactivated — #{count} monitor(s) stopped")
+     |> load_versions()}
+  end
+
   defp load_versions(socket) do
-    assign(socket, :versions, Sim.list_strategy_versions(socket.assigns.stage_filter))
+    socket
+    |> assign(:versions, Sim.list_strategy_versions(socket.assigns.stage_filter))
+    |> assign(:active_version_ids, Sim.active_strategy_version_ids())
   end
 
   defp filter_link_class(current, target) do
@@ -123,6 +167,33 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
               {version.strategy.name} <span class="text-base-content/40">v{version.version}</span>
             </h2>
             <.lifecycle_badge stage={version.lifecycle_stage} />
+            <span
+              :if={MapSet.member?(@active_version_ids, version.id)}
+              class="inline-flex items-center gap-1 px-1.5 py-0.5 border border-success/40 text-success bg-success/10 text-[11px] uppercase tracking-wide font-data"
+            >
+              <span class="signal-dot relative w-1.5 h-1.5 rounded-full bg-success"></span> Active
+            </span>
+
+            <button
+              :if={MapSet.member?(@active_version_ids, version.id)}
+              type="button"
+              phx-click="deactivate"
+              phx-value-id={version.id}
+              data-confirm="Deactivate this version? Any open position will be flattened and every running monitor stopped."
+              class="px-1.5 py-0.5 border border-error/40 text-error bg-error/10 text-[11px] uppercase tracking-wide hover:bg-error/20"
+            >
+              Deactivate
+            </button>
+            <button
+              :if={!MapSet.member?(@active_version_ids, version.id)}
+              type="button"
+              phx-click="activate"
+              phx-value-id={version.id}
+              class="px-1.5 py-0.5 border border-success/40 text-success bg-success/10 text-[11px] uppercase tracking-wide hover:bg-success/20"
+            >
+              Activate
+            </button>
+
             <button
               type="button"
               phx-click="toggle_tag_control"
