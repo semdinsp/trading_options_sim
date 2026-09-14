@@ -304,7 +304,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert length(Sim.list_sim_fills(run)) == 1
     end
 
-    test "fails closed when :exchange is nil" do
+    test "fails open when :exchange is nil — hours gating is opt-in, not a trap for a member that predates it" do
       version =
         version_fixture(%{
           "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
@@ -317,8 +317,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       broadcast_underlying_price(symbol, 150.0)
       Process.sleep(50)
 
-      assert ContractMonitor.snapshot(pid).position_open? == false
-      assert Sim.list_sim_fills(run) == []
+      assert ContractMonitor.snapshot(pid).position_open? == true
+      assert length(Sim.list_sim_fills(run)) == 1
     end
 
     test "fails closed when the exchange has no mapped session" do

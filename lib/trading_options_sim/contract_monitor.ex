@@ -83,8 +83,13 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   `:exchange` (threaded through from `SimActivator`'s `TargetPoolMember`)
   resolves via `TradingOptionsSim.ExchangeSessionCache` to a
-  `TradingCore.MarketHours.Session` at evaluation time — a `nil` exchange
-  or an unmapped one fails closed (`session_open?/1`). Rule evaluation
+  `TradingCore.MarketHours.Session` at evaluation time (`session_open?/1`).
+  `:exchange` is optional and predates this gate, so a `nil` exchange
+  fails *open* — hours gating is additive, opt-in behavior for a member
+  that specifies a real exchange, never a silent trap for one that
+  doesn't. An exchange that IS set but doesn't resolve to any seeded
+  session still fails closed — that's a real config mistake, not a
+  member opting out. Rule evaluation
   and `last_snapshot` always update regardless of hours (same
   "observation always runs" posture `StrategyStockMonitor`'s
   `transmission_allowed?/1` uses for order transmission); only a
@@ -525,10 +530,24 @@ defmodule TradingOptionsSim.ContractMonitor do
   # re-evaluated fresh on the next one, same as any other unmet
   # condition. See OPTIONS_SIM_ARCHITECTURE_PLAN.md §5c.
   #
-  # An unresolved exchange (nil, or no ExchangeSession row mapped for it)
-  # fails closed — never transmits — same convention every check in this
-  # module family already uses for missing data.
-  defp session_open?(%{exchange: nil}), do: false
+  # `:exchange` is an optional TargetPoolMember field that predates this
+  # gate — every member that existed before exchange-hours support (and
+  # any created since through the REST/MCP surface, which still doesn't
+  # require it) has `exchange: nil`. Treating that as fail-closed would
+  # silently stop every such member from ever filling again, with no
+  # error and no way to tell "no signal yet" apart from "gate broken."
+  # nil therefore fails OPEN — exchange-hours gating is opt-in, additive
+  # behavior for a member that specifies a real exchange, never a
+  # silent trap for one that doesn't.
+  #
+  # An exchange that IS set but doesn't resolve to any seeded
+  # ExchangeSession (a real config mistake — e.g. a typo'd exchange
+  # code, or one this app genuinely doesn't have hours data for yet)
+  # still fails closed: unlike the nil case, this is a member that
+  # explicitly opted into hours gating, so silently ignoring the
+  # mismatch and filling anyway would hide a real configuration bug
+  # rather than surface it.
+  defp session_open?(%{exchange: nil}), do: true
 
   defp session_open?(%{exchange: exchange}) do
     case TradingOptionsSim.ExchangeSessionCache.fetch(exchange) do
