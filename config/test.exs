@@ -44,6 +44,13 @@ config :trading_options_sim, :signal_bus_adapter, TradingOptionsSim.SignalBus.Te
 # config/test.exs uses.
 config :trading_options_sim, Oban, testing: :manual
 
+# Every test seeds its own ExchangeSession/ExchangeTradingHours fixtures
+# inside its own sandboxed transaction and expects ContractMonitor's
+# session-open check to see them immediately — a singleton ETS cache
+# populated once at application boot never would. Same bypass
+# trading_live's own config/test.exs uses for its identical cache.
+config :trading_options_sim, :exchange_session_cache_enabled, false
+
 # In test we don't send emails
 config :trading_options_sim, TradingOptionsSim.Mailer, adapter: Swoosh.Adapters.Test
 

@@ -431,4 +431,36 @@ defmodule TradingOptionsSim.SimTest do
       assert Enum.map(active.sim_runs, & &1.symbol) == ["AAPL"]
     end
   end
+
+  describe "get_close_before_minutes/1" do
+    test "returns the mapped session's close_before_minutes" do
+      exchange = "TEST_EX_#{System.unique_integer([:positive])}"
+
+      {:ok, hours} =
+        %TradingOptionsSim.Sim.ExchangeTradingHours{}
+        |> TradingOptionsSim.Sim.ExchangeTradingHours.changeset(%{
+          name: exchange,
+          timezone: "Etc/UTC",
+          start_time: ~T[00:00:00],
+          end_time: ~T[23:59:59],
+          days_of_week: [1, 2, 3, 4, 5],
+          close_before_minutes: 15
+        })
+        |> Repo.insert()
+
+      {:ok, _session} =
+        %TradingOptionsSim.Sim.ExchangeSession{}
+        |> TradingOptionsSim.Sim.ExchangeSession.changeset(%{
+          exchange: exchange,
+          exchange_trading_hours_id: hours.id
+        })
+        |> Repo.insert()
+
+      assert Sim.get_close_before_minutes(exchange) == 15
+    end
+
+    test "returns nil for an unmapped exchange" do
+      assert Sim.get_close_before_minutes("NEVER_MAPPED") == nil
+    end
+  end
 end

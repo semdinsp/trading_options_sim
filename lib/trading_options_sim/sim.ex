@@ -10,6 +10,7 @@ defmodule TradingOptionsSim.Sim do
 
   alias TradingOptionsSim.Sim.{
     ApiToken,
+    ExchangeSession,
     SimFill,
     SimRun,
     Strategy,
@@ -726,6 +727,31 @@ defmodule TradingOptionsSim.Sim do
   end
 
   def get_api_token!(id), do: Repo.get!(ApiToken, id)
+
+  # --- Exchange hours (§5c) ---------------------------------------------
+
+  @doc """
+  `ExchangeTradingHours.close_before_minutes` for whichever session
+  `exchange` maps to, or `nil` if unmapped. Deliberately NOT cached
+  (unlike session-open checks, which go through
+  `TradingOptionsSim.ExchangeSessionCache`) — mirrors
+  `TradingLive.LiveTrading.get_close_before_minutes/1`'s identical
+  uncached query, so an operator edit to this field takes effect on
+  `TradingOptionsSim.EodCloser`'s very next tick, not after the cache's
+  next periodic refresh. Called once per monitor per `EodCloser` tick,
+  not on the hot evaluation path every `ContractMonitor` runs, so the
+  extra query cost here is negligible next to the DB-pool-exhaustion
+  risk session-open checks would carry if left uncached at tick
+  frequency.
+  """
+  @spec get_close_before_minutes(String.t()) :: integer() | nil
+  def get_close_before_minutes(exchange) do
+    ExchangeSession
+    |> where([es], es.exchange == ^exchange)
+    |> join(:inner, [es], eth in assoc(es, :exchange_trading_hours))
+    |> select([_es, eth], eth.close_before_minutes)
+    |> Repo.one()
+  end
 
   # Puts `value` under whichever key type `attrs` already uses (string or
   # atom) — `Ecto.Changeset.cast/3` raises on a map with BOTH string and
