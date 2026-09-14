@@ -143,6 +143,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     :occ_symbol,
     :exchange,
     pricing_backend: :black_scholes,
+    ibkr_live_subscribed?: true,
     position_open?: false,
     last_snapshot: %{},
     signal_names: [],
@@ -227,7 +228,9 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
 
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{symbol}")
-    maybe_start_ibkr_live(pricing_backend, occ_symbol)
+
+    ibkr_live_subscribed? =
+      maybe_start_ibkr_live(pricing_backend, occ_symbol, expiry, strike, right)
 
     rules = strategy_version.rules || %{}
     entry_rule = Map.get(rules, "entry")
@@ -259,6 +262,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       occ_symbol: occ_symbol,
       exchange: Keyword.get(opts, :exchange),
       pricing_backend: pricing_backend,
+      ibkr_live_subscribed?: ibkr_live_subscribed?,
       position_open?: Keyword.get(opts, :position_open?, false),
       signal_names: signal_names,
       canonical_names: canonical_names
@@ -267,29 +271,58 @@ defmodule TradingOptionsSim.ContractMonitor do
     {:ok, state}
   end
 
-  # Starts (or finds an already-running) IBKRLive listener for this
-  # contract's OCC symbol when :ibkr_live is selected — a no-op in
-  # :black_scholes mode. Multiple ContractMonitors for the same contract
-  # would share one listener (Registry-keyed by occ_symbol, not by this
-  # monitor's own {sim_run_id, contract_key}), matching how
-  # IbPortfolio.HubClient is one shared connection for the whole app
-  # rather than one per monitor.
-  defp maybe_start_ibkr_live(:black_scholes, _occ_symbol), do: :ok
-
-  defp maybe_start_ibkr_live(:ibkr_live, occ_symbol) do
+  @impl true
+  def terminate(_reason, %{pricing_backend: :ibkr_live, occ_symbol: occ_symbol}) do
     case IBKRLive.whereis(occ_symbol) do
-      nil ->
-        case DynamicSupervisor.start_child(
-               TradingOptionsSim.MonitorSupervisor,
-               {IBKRLive, occ_symbol: occ_symbol}
-             ) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-        end
-
-      _pid ->
-        :ok
+      nil -> :ok
+      pid -> IBKRLive.detach(pid)
     end
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  # Starts (or finds an already-running) IBKRLive listener for this
+  # contract's OCC symbol when :ibkr_live is selected (a no-op in
+  # :black_scholes mode, returns true — "subscribed" is meaningless
+  # off this backend), and registers this monitor as depending on it
+  # via IBKRLive.attach/1 — see that module's own moduledoc for the
+  # real-trading_hub-subscription lifecycle this attach/detach pairing
+  # drives. Multiple ContractMonitors for the same contract share one
+  # listener (Registry-keyed by occ_symbol, not by this monitor's own
+  # {sim_run_id, contract_key}) — each one attach/1es on its own init/1
+  # and detach/1es on its own terminate/2, so the listener's real
+  # trading_hub subscription only ever drops once every monitor sharing
+  # it has gone.
+  #
+  # Never fatal — a failed real subscribe RPC (see IBKRLive's own
+  # moduledoc for why: matches trading_live's StrategyStockMonitor
+  # precedent) means this returns false rather than stopping
+  # ContractMonitor.init/1; the caller (this module's own :snapshot
+  # handler, ultimately SimActivator.activate/1 and the UI) is
+  # responsible for surfacing that to an operator rather than leaving
+  # it a silent log line.
+  defp maybe_start_ibkr_live(:black_scholes, _occ_symbol, _expiry, _strike, _right), do: true
+
+  defp maybe_start_ibkr_live(:ibkr_live, occ_symbol, expiry, strike, right) do
+    contract = %{sec_type: "OPT", expiry: expiry, strike: Decimal.to_float(strike), right: right}
+
+    pid =
+      case IBKRLive.whereis(occ_symbol) do
+        nil ->
+          case DynamicSupervisor.start_child(
+                 TradingOptionsSim.MonitorSupervisor,
+                 {IBKRLive, occ_symbol: occ_symbol, contract: contract}
+               ) do
+            {:ok, pid} -> pid
+            {:error, {:already_started, pid}} -> pid
+          end
+
+        pid ->
+          pid
+      end
+
+    {:ok, subscribed?: subscribed?} = IBKRLive.attach(pid)
+    subscribed?
   end
 
   @impl true
@@ -302,6 +335,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       direction: state.direction,
       exchange: state.exchange,
       position_open?: state.position_open?,
+      ibkr_live_subscribed?: state.ibkr_live_subscribed?,
       last_snapshot: state.last_snapshot
     }
 

@@ -32,12 +32,33 @@ defmodule TradingOptionsSim.SimActivator do
   no-op if one is already running for that `{sim_run_id, contract_key}`
   — mirrors `StrategyActivator`'s own `whereis/2`-before-start guard).
 
-  Returns `{:ok, [pid]}` for the monitors started/already running, or
-  `{:error, reason}` if the version has no target pool or an
+  Returns `{:error, reason}` if the version has no target pool or an
   unsupported `option_leg_config`.
+
+  A monitor on the `:ibkr_live` pricing backend never fails to start
+  over a failed real `trading_hub` subscribe RPC — see
+  `TradingOptionsSim.Pricing.IBKRLive`'s moduledoc for why (matches
+  `trading_live`'s own precedent: log and continue rather than fail
+  closed). That means such a failure is otherwise invisible to an
+  operator, so `activate/1` inspects every monitor it started via
+  `ContractMonitor.snapshot/1` and returns
+  `{:ok, pids, unsubscribed_symbols}` instead of plain `{:ok, pids}`
+  whenever one or more came up without a live subscription —
+  `unsubscribed_symbols` is `[]` in the common case.
+
+  Note: `start_for_member/3` doesn't pass `pricing_backend`/`occ_symbol`
+  yet — every monitor `activate/1` itself starts today runs
+  `:black_scholes`, so `unsubscribed_symbols` is always `[]` in practice
+  until this module is wired to select `:ibkr_live` (a separate,
+  not-yet-scoped task; OCC symbol resolution already exists via
+  `TradingOptionsSim.OccSymbol.build/4`). The plumbing here is in place
+  ahead of that so switching the backend doesn't also require touching
+  this return shape or its callers.
   """
   @spec activate(StrategyVersion.t()) ::
-          {:ok, [pid()]} | {:error, :no_target_pool} | {:error, :unsupported_leg_config}
+          {:ok, [pid()], [String.t()]}
+          | {:error, :no_target_pool}
+          | {:error, :unsupported_leg_config}
   def activate(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
 
   def activate(%StrategyVersion{} = version) do
@@ -49,9 +70,16 @@ defmodule TradingOptionsSim.SimActivator do
         |> Enum.map(&start_for_member(version, &1, contract_template))
         |> Enum.reject(&is_nil/1)
 
-      {:ok, pids}
+      unsubscribed_symbols =
+        pids |> Enum.reject(&ibkr_live_subscribed?/1) |> Enum.map(&monitor_symbol/1)
+
+      {:ok, pids, unsubscribed_symbols}
     end
   end
+
+  defp ibkr_live_subscribed?(pid), do: ContractMonitor.snapshot(pid).ibkr_live_subscribed?
+
+  defp monitor_symbol(pid), do: ContractMonitor.snapshot(pid).symbol
 
   @doc """
   Deactivates `version`: for every currently-open `SimRun` belonging to

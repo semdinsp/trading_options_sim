@@ -462,6 +462,25 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Decimal.equal?(hd(fills).fill_price, Decimal.new("6.25"))
     end
 
+    test "snapshot reports ibkr_live_subscribed?: false when the real subscribe RPC fails, without crashing the monitor" do
+      # HubClient isn't started in test env (config :start_hub_client,
+      # false), so the real trading_hub subscribe_symbol/3 RPC always
+      # fails here — this asserts the "log and continue" precedent (see
+      # IBKRLive's own moduledoc) surfaces as a readable status rather
+      # than either crashing this monitor or silently claiming a live
+      # subscription that doesn't exist.
+      version = version_fixture(%{})
+      symbol = "IBKRLIVE4"
+      occ_symbol = "IBKRLIVE4_OCC"
+      key = contract_key(symbol)
+
+      {pid, _run} =
+        start_monitor(version, key, pricing_backend: :ibkr_live, occ_symbol: occ_symbol)
+
+      assert Process.alive?(pid)
+      assert ContractMonitor.snapshot(pid).ibkr_live_subscribed? == false
+    end
+
     test "raises if :occ_symbol is missing for :ibkr_live" do
       version = version_fixture(%{})
       key = contract_key("IBKRLIVE3")

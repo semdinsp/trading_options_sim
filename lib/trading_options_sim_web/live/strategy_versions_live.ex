@@ -72,8 +72,15 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
 
     socket =
       case SimActivator.activate(version) do
-        {:ok, pids} ->
+        {:ok, pids, []} ->
           put_flash(socket, :info, "Activated — #{length(pids)} monitor(s) running")
+
+        {:ok, pids, unsubscribed_symbols} ->
+          put_flash(
+            socket,
+            :error,
+            "Activated — #{length(pids)} monitor(s) running, but live data subscription failed for #{Enum.join(unsubscribed_symbols, ", ")} — check trading_hub connectivity"
+          )
 
         {:error, :no_target_pool} ->
           put_flash(socket, :error, "Can't activate — this version has no target pool set")

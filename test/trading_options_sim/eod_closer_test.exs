@@ -211,7 +211,12 @@ defmodule TradingOptionsSim.EodCloserTest do
   # concurrently with an EodCloser scan.
   test "does not crash a co-registered IBKRLive listener" do
     occ_symbol = "EOD-IBKR-SNAPSHOT-TEST"
-    pid = start_supervised!({TradingOptionsSim.Pricing.IBKRLive, occ_symbol: occ_symbol})
+    contract = %{sec_type: "OPT", expiry: "20271231", strike: 150.0, right: "C"}
+
+    pid =
+      start_supervised!(
+        {TradingOptionsSim.Pricing.IBKRLive, occ_symbol: occ_symbol, contract: contract}
+      )
 
     :ok = EodCloser.run_once()
     Process.sleep(50)

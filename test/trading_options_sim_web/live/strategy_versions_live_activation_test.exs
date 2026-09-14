@@ -67,7 +67,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveActivationTest do
     pool = pool_fixture("ACTLIVE2")
     version = version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
 
-    {:ok, pids} = TradingOptionsSim.SimActivator.activate(version)
+    {:ok, pids, []} = TradingOptionsSim.SimActivator.activate(version)
     assert Enum.all?(pids, &Process.alive?/1)
 
     {:ok, view, _html} = live(conn, ~p"/strategy_versions")
