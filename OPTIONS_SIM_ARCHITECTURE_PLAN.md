@@ -227,12 +227,15 @@ TradingOptionsSim.Sim.TargetPoolMember
     option contract — no prefix is needed to disambiguate that within
     this schema)
   - ib_conid (nil until resolved — see §5)
-  - contract_selection: same shape as StrategyVersion.option_leg_config's
-    expiry/strike selection fields, OR nil to inherit the version's own
-    option_leg_config unchanged. Exists for the case where two versions
-    share a pool of underlyings but want different strike/expiry rules
-    per version — nil (inherit) is expected to be the common case.
 ```
+
+(A `contract_selection` field — a per-member override of a version's
+`option_leg_config` — existed here briefly but was removed 2026-09-14:
+`SimActivator.activate/1` never actually read it, and every member in a
+pool has always gotten the version's own `option_leg_config`
+unconditionally, same as the paragraph below already describes. Matches
+`trading_live`'s own `TargetPoolMember`, which has no such field either
+— a pool is just a list of underlyings.)
 
 A pool member identifies the **underlying** (AAPL, not a specific option
 contract) — the specific `contract_key` (§1) is resolved per-monitor at

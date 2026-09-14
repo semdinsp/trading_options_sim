@@ -7,8 +7,15 @@ defmodule TradingOptionsSim.Sim.TargetPoolMember do
   `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §1's naming note. This row's
   `symbol` is always an equity underlying, never itself an option
   contract — the specific option `contract_key` is resolved per-monitor
-  at activation time by combining this member's `symbol` with the active
-  `StrategyVersion.option_leg_config` (see plan §3).
+  at activation time by combining this member's `symbol` with the
+  active `StrategyVersion.option_leg_config` (see plan §3), applied
+  identically to every member in the pool. Matches `trading_live`'s own
+  `TargetPoolMember` (a pool is just a list of underlyings; the
+  strategy-level config is what's applied uniformly) — this schema
+  used to also carry a `contract_selection` field meant as a per-member
+  override of that config, but `SimActivator.activate/1` never actually
+  read it; removed 2026-09-14 rather than leave a dead field that looks
+  functional.
   """
 
   use Ecto.Schema
@@ -25,11 +32,6 @@ defmodule TradingOptionsSim.Sim.TargetPoolMember do
     field :currency, :string
     field :ib_conid, :integer
 
-    # Same shape as StrategyVersion.option_leg_config's expiry/strike
-    # selection fields, or nil to inherit the version's own config —
-    # nil is expected to be the common case.
-    field :contract_selection, :map
-
     timestamps(type: :utc_datetime)
   end
 
@@ -40,8 +42,7 @@ defmodule TradingOptionsSim.Sim.TargetPoolMember do
       :symbol,
       :exchange,
       :currency,
-      :ib_conid,
-      :contract_selection
+      :ib_conid
     ])
     |> validate_required([:target_pool_id, :symbol])
     |> foreign_key_constraint(:target_pool_id)
