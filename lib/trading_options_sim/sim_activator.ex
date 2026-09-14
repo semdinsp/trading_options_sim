@@ -53,6 +53,98 @@ defmodule TradingOptionsSim.SimActivator do
     end
   end
 
+  @doc """
+  Deactivates `version`: for every currently-open `SimRun` belonging to
+  it, finds the running `ContractMonitor` (if any — a run with no
+  running monitor is skipped, not an error, since that's already the
+  effectively-deactivated state), flattens any open position via
+  `ContractMonitor.force_close/2` (`reason: :manual` — matches
+  `trading_live`'s own established convention: any operator-triggered
+  close, via `StrategyStockMonitor.force_close_eod(pid, :manual)`, uses
+  this exact reason regardless of whether it came from deactivate, kill,
+  or kill_all; confirmed by reading that code directly rather than
+  inventing a `trading_options_sim`-only name), and only once that
+  synchronous call returns does it terminate the monitor's own
+  `DynamicSupervisor` child — mirrors `trading_live`'s own
+  `StrategyActivator.deactivate/1` sequencing (flatten, confirmed, *then*
+  kill the process; never the reverse, which could kill a monitor
+  mid-fill and leave a `SimRun` open with the DB never told).
+
+  A run whose monitor never actually entered a position (still flat,
+  watching) has no fill for `force_close/2` to flatten — `trading_live`
+  has no equivalent case to port here (its own fill/order records only
+  come into existence at the moment of a real fill, so a flat kill is a
+  true no-op there with nothing to record; `SimRun` is architecturally
+  different, pre-created at activation time before any entry). Left
+  `"open"` forever, such a run's `SimRun.status` would keep claiming a
+  monitor is running long after this function killed it — this is
+  `deactivate/1`'s own decision, not a port: such a run is explicitly
+  closed via `SimRun.close_without_entry_changeset/2` with
+  `exit_reason: "manual_no_entry"` (never `"manual"` — that value is
+  reserved for a real position that got flattened, per the fill-based
+  reasons already in use: `"rule_exit"`, `"expiry"`, `"eod_flatten"`).
+
+  Unlike `activate/1`, this never touches `lifecycle_stage` — a
+  deactivated version stays at whatever stage it was (discovery,
+  quarantine, test_portfolio); "activated" here means "has running
+  monitors," a separate, orthogonal concept from lifecycle stage. Every
+  `SimRun` reachable at all is closed either way (already-closed runs
+  are `list_open_sim_runs/1`-filtered out), so re-`activate/1`ing later
+  opens fresh runs rather than resuming stale ones.
+
+  Returns `{:ok, terminated_count}` — always succeeds; there is no
+  failure mode analogous to `activate/1`'s `:no_target_pool`/
+  `:unsupported_leg_config`, since deactivating never needs to resolve
+  a contract, only stop what's already running.
+  """
+  @spec deactivate(StrategyVersion.t()) :: {:ok, non_neg_integer()}
+  def deactivate(%StrategyVersion{} = version) do
+    open_runs = Sim.list_open_sim_runs(version)
+
+    terminated_count =
+      open_runs
+      |> Enum.map(&stop_monitor_for_run/1)
+      |> Enum.count(& &1)
+
+    {:ok, terminated_count}
+  end
+
+  defp stop_monitor_for_run(run) do
+    contract_key = {run.symbol, run.expiry, run.strike, run.right}
+
+    case ContractMonitor.whereis(run.id, contract_key) do
+      nil ->
+        false
+
+      pid ->
+        flatten_and_close(pid, run)
+
+        case DynamicSupervisor.terminate_child(TradingOptionsSim.MonitorSupervisor, pid) do
+          :ok -> true
+          {:error, :not_found} -> false
+        end
+    end
+  end
+
+  # snapshot/1 read BEFORE force_close/2 — force_close/2 flips
+  # position_open? to false as a side effect of flattening, so checking
+  # position_open? only after it ran could never distinguish "had a
+  # position, now flattened" from "was always flat."
+  defp flatten_and_close(pid, run) do
+    position_was_open? = ContractMonitor.snapshot(pid).position_open?
+    :ok = ContractMonitor.force_close(pid, :manual)
+
+    unless position_was_open? do
+      Sim.close_run_without_entry(run, "manual_no_entry")
+    end
+  catch
+    # The monitor exited on its own between whereis/2 and this call (e.g.
+    # it force-closed itself for DTE/EOD reasons at the same moment) —
+    # nothing left to flatten or close; terminate_child/2's own caller
+    # handles an already-gone pid via its {:error, :not_found} branch.
+    :exit, _reason -> :ok
+  end
+
   defp resolve_contract_template(%{
          "expiry_selection" => expiry_selection,
          "fixed_expiry" => expiry,

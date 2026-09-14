@@ -193,6 +193,24 @@ defmodule TradingOptionsSim.ContractMonitor do
     GenServer.call(pid, :snapshot)
   end
 
+  @doc """
+  Synchronously flattens any open position (same fail-safe behavior as
+  the async `{:force_close_eod, reason}` message `EodCloser` sends — a
+  no-op if flat, or if no snapshot has been priced yet) and only then
+  returns. `SimActivator.deactivate/1` calls this before terminating
+  the monitor's own supervisor child, so a deliberate deactivation can
+  never race "the process gets killed before its exit fill is
+  recorded" the way sending `{:force_close_eod, reason}` and
+  immediately calling `DynamicSupervisor.terminate_child/2` could.
+  `reason` is stored as `SimRun.exit_reason` via `to_string/1` — pass
+  an atom (`:manual`, matching `trading_live`'s own established
+  operator-triggered-close convention) or a string.
+  """
+  @spec force_close(pid(), atom() | String.t()) :: :ok
+  def force_close(pid, reason) do
+    GenServer.call(pid, {:force_close, reason})
+  end
+
   @impl true
   def init(opts) do
     sim_run_id = Keyword.fetch!(opts, :sim_run_id)
@@ -290,6 +308,17 @@ defmodule TradingOptionsSim.ContractMonitor do
     {:reply, reply, state}
   end
 
+  # Synchronous counterpart of the {:force_close_eod, reason} message
+  # `EodCloser` sends, for a caller (`Sim.deactivate_strategy_version/1`)
+  # that must know the flatten attempt has actually completed before it
+  # goes on to terminate this process's own supervisor child — see
+  # `force_close/2`'s own doc for why that ordering matters. Same
+  # fail-safe logic (`do_force_close/2`), just awaited via
+  # `GenServer.call/2` instead of fired via `send/2`.
+  def handle_call({:force_close, reason}, _from, state) do
+    {:reply, :ok, do_force_close(state, reason)}
+  end
+
   # A %TradingHub.Message{type: :price} broadcast from PriceRelay — the
   # underlying's own tick, always subscribed (see init/1). In
   # :black_scholes mode this alone drives evaluation, since the pricer
@@ -341,24 +370,26 @@ defmodule TradingOptionsSim.ContractMonitor do
   # tick) rather than re-pricing — EodCloser has no spot price of its
   # own to hand back. A flat monitor (no open position, or no snapshot
   # priced yet) is a no-op; `reason` is always `:eod_flatten`.
-  def handle_info({:force_close_eod, _reason}, %{position_open?: false} = state) do
-    {:noreply, state}
-  end
-
-  def handle_info({:force_close_eod, _reason}, %{last_snapshot: snapshot} = state)
-      when map_size(snapshot) == 0 do
-    Logger.warning(
-      "ContractMonitor: #{state.symbol} EOD force-close skipped — no priced snapshot yet"
-    )
-
-    {:noreply, state}
-  end
-
   def handle_info({:force_close_eod, reason}, state) do
-    {:noreply, submit_exit(state, state.last_snapshot, to_string(reason))}
+    {:noreply, do_force_close(state, reason)}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  defp do_force_close(%{position_open?: false} = state, _reason), do: state
+
+  defp do_force_close(%{last_snapshot: snapshot} = state, _reason)
+       when map_size(snapshot) == 0 do
+    Logger.warning(
+      "ContractMonitor: #{state.symbol} force-close skipped — no priced snapshot yet"
+    )
+
+    state
+  end
+
+  defp do_force_close(state, reason) do
+    submit_exit(state, state.last_snapshot, to_string(reason))
+  end
 
   # See StrategyStockMonitor.subscribe_to_signals/1's identical
   # implementation/comment for why both the SignalBus.request/1 call and
