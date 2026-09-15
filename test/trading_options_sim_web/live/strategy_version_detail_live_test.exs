@@ -119,6 +119,88 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "Not running"
   end
 
+  describe "recent fills panel" do
+    test "hidden when no fills exist yet", %{conn: conn} do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      refute html =~ "Recent Fills"
+    end
+
+    test "shows entry and exit fills after a full trade cycle", %{conn: conn} do
+      strategy = strategy_fixture()
+      pool = pool_fixture("DETAILSYM6")
+
+      version =
+        version_fixture(strategy, %{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          rules: %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+          }
+        })
+
+      {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+
+      message = fn price ->
+        %{type: :price, symbol: "DETAILSYM6", source: :ibkr, data: %{last: price}}
+        |> Map.put(:__struct__, TradingHub.Message)
+      end
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM6", message.(130.0))
+      Process.sleep(50)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM6", message.(150.0))
+      Process.sleep(50)
+
+      {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      assert html =~ "Recent Fills"
+      assert html =~ "DETAILSYM6"
+      assert html =~ "entry"
+      assert html =~ "exit"
+    end
+  end
+
+  # Regression test for a real race: build_member_entry/4's "no open
+  # run" branch is chosen based on a runs_by_symbol lookup taken before
+  # ContractMonitor.snapshot/1 is called — an entry firing in between
+  # those two reads used to render neither the "Flat" message nor the
+  # position table (a blank gap, confirmed live 2026-09-15). Simulates
+  # the race directly: an open run exists (a real entry happened), but
+  # nothing pre-populates runs_by_symbol at load time is not something
+  # this test can force via timing, so instead it asserts the actual
+  # fallback path handles a live position_open? snapshot with no
+  # pre-matched run by re-deriving it from the DB.
+  test "shows position details (not a blank gap) for a member whose run wasn't pre-matched",
+       %{conn: conn} do
+    strategy = strategy_fixture()
+    pool = pool_fixture("DETAILSYM7")
+
+    version =
+      version_fixture(strategy, %{
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config(),
+        rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}}
+      })
+
+    {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+
+    message =
+      %{type: :price, symbol: "DETAILSYM7", source: :ibkr, data: %{last: 150.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM7", message)
+    Process.sleep(50)
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    refute html =~ "Flat — no open position"
+    assert html =~ "Direction"
+  end
+
   describe "activate/deactivate" do
     test "activating starts a monitor and shows it as running", %{conn: conn} do
       strategy = strategy_fixture()

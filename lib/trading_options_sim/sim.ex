@@ -832,6 +832,27 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.all()
   end
 
+  @doc """
+  The `limit` most recent `SimFill`s across every `SimRun` belonging to
+  `version`, most-recent-first, preloaded with `:sim_run` — a "recent
+  fills" panel's data source (`StrategyVersionDetailLive`), showing
+  every entry/exit fill for the version regardless of which target-pool
+  member/contract it belongs to, not just whichever one the operator
+  happens to be looking at. `SimFill` has no direct
+  `strategy_version_id` of its own (it belongs to a `SimRun`, which
+  belongs to the version), hence the join rather than a plain `where`.
+  """
+  @spec list_recent_fills_for_version(StrategyVersion.t(), pos_integer()) :: [SimFill.t()]
+  def list_recent_fills_for_version(%StrategyVersion{id: strategy_version_id}, limit \\ 20) do
+    SimFill
+    |> join(:inner, [f], r in SimRun, on: f.sim_run_id == r.id)
+    |> where([f, r], r.strategy_version_id == ^strategy_version_id)
+    |> order_by([f], desc: f.filled_at)
+    |> limit(^limit)
+    |> preload([f, r], sim_run: r)
+    |> Repo.all()
+  end
+
   # --- API tokens -----------------------------------------------------------
   #
   # Backs both /api/v1 (TradingOptionsSimWeb.ApiAuthPlug) and this app's

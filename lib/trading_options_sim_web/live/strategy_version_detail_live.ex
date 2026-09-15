@@ -175,6 +175,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     |> assign(:version, version)
     |> assign(:members, members)
     |> assign(:is_active?, is_active?)
+    |> assign(:recent_fills, Sim.list_recent_fills_for_version(version))
   end
 
   # No open run for this member — never activated, activated then
@@ -200,12 +201,29 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
     snapshot = pid && fetch_monitor_snapshot(pid)
 
+    # Snapshot.position_open? can be true here despite the caller's own
+    # runs_by_symbol lookup finding nothing — a real race, not a bug in
+    # that lookup: it reads Sim.list_open_sim_runs/1 and this reads
+    # ContractMonitor.snapshot/1 as two separate calls, so an entry that
+    # fires in between sees this branch (no run was open when the first
+    # read happened) with a snapshot that now says otherwise. Re-reads
+    # list_open_sim_runs/1 right here rather than rendering "position
+    # open" with no run to describe it (was rendering neither the
+    # "Flat" message nor the position table — a blank gap — confirmed
+    # live 2026-09-15).
+    run =
+      if snapshot && snapshot.position_open? do
+        version |> Sim.list_open_sim_runs() |> Enum.find(&(&1.symbol == member.symbol))
+      end
+
+    entry_fill = if run && snapshot.position_open?, do: entry_fill(run)
+
     %{
       member: member,
-      run: nil,
+      run: run,
       running?: not is_nil(snapshot),
       snapshot: snapshot,
-      entry_fill: nil,
+      entry_fill: entry_fill,
       last_closed_run: if(is_nil(snapshot), do: Sim.last_closed_sim_run(version, member.symbol))
     }
   end
@@ -481,9 +499,60 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
           </p>
         </div>
 
+        <.recent_fills_panel fills={@recent_fills} />
+
         <.member_card :for={entry <- @members} entry={entry} />
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :fills, :list, required: true
+
+  # Every entry/exit fill across every target-pool member's contract,
+  # most-recent-first — a direct answer to "did a position actually
+  # open/close, and what did it fill at," independent of whichever
+  # member card the operator happens to be looking at (a fill for a
+  # symbol whose card has since gone quiet is still visible here).
+  # Hidden entirely when empty rather than showing an empty panel on
+  # every version that's never had a fill yet.
+  defp recent_fills_panel(assigns) do
+    ~H"""
+    <div :if={@fills != []} class="border border-warning/40 bg-base-100 p-3">
+      <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50 mb-2">
+        Recent Fills
+      </div>
+      <div class="overflow-x-auto">
+        <table class="font-data text-[11px] w-full">
+          <thead>
+            <tr class="text-base-content/40 uppercase tracking-wide text-left">
+              <th class="pr-3 py-0.5">Symbol</th>
+              <th class="pr-3 py-0.5">Contract</th>
+              <th class="pr-3 py-0.5">Kind</th>
+              <th class="pr-3 py-0.5">Action</th>
+              <th class="pr-3 py-0.5 text-right">Qty</th>
+              <th class="pr-3 py-0.5 text-right">Price</th>
+              <th class="pr-3 py-0.5">Filled</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={fill <- @fills} class="text-base-content/80 border-t border-base-300/50">
+              <td class="pr-3 py-0.5 font-bold">{fill.sim_run.symbol}</td>
+              <td class="pr-3 py-0.5 text-base-content/60">
+                {format_expiry(fill.sim_run.expiry)} {Decimal.to_string(fill.sim_run.strike)}{fill.sim_run.right}
+              </td>
+              <td class="pr-3 py-0.5 uppercase">{fill.kind}</td>
+              <td class="pr-3 py-0.5 uppercase">{fill.action}</td>
+              <td class="pr-3 py-0.5 text-right tabular-nums">{fill.quantity}</td>
+              <td class="pr-3 py-0.5 text-right tabular-nums">
+                ${Decimal.round(fill.fill_price, 2)}
+              </td>
+              <td class="pr-3 py-0.5 text-base-content/50">{fill.filled_at}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
     """
   end
 
@@ -584,6 +653,13 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
               </tr>
             </tbody>
           </table>
+
+          <div
+            :if={@entry.snapshot.position_open? and is_nil(@entry.run)}
+            class="text-base-content/40 text-sm"
+          >
+            Position open — details refreshing…
+          </div>
 
           <div
             :if={not @entry.snapshot.position_open? and @entry.last_closed_run}
