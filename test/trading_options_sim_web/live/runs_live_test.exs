@@ -43,6 +43,61 @@ defmodule TradingOptionsSimWeb.RunsLiveTest do
     assert html =~ "AAPL"
   end
 
+  test "shows the estimated commission column for a run with recorded fills", %{conn: conn} do
+    strategy = strategy_fixture()
+    version = version_fixture(strategy)
+    run = run_fixture(version)
+    now = DateTime.utc_now()
+
+    {:ok, {_fill, run}} =
+      Sim.record_entry_fill(
+        run,
+        %{
+          action: "buy",
+          quantity: 1,
+          fill_price: Decimal.new("5.00"),
+          filled_at: now,
+          commission: Decimal.new("1.68")
+        },
+        %{entry_at: now, entry_price: Decimal.new("5.00")}
+      )
+
+    {:ok, {_fill, _run}} =
+      Sim.record_exit_fill(
+        run,
+        %{
+          action: "sell",
+          quantity: 1,
+          fill_price: Decimal.new("6.00"),
+          filled_at: now,
+          commission: Decimal.new("1.68")
+        },
+        %{
+          exit_at: now,
+          exit_price: Decimal.new("6.00"),
+          exit_reason: "target_hit",
+          realized_pnl: Decimal.new("100.00"),
+          realized_pnl_net: Decimal.new("96.64")
+        }
+      )
+
+    {:ok, _view, html} = live(conn, ~p"/runs")
+
+    assert html =~ "Est. Commission"
+    assert html =~ "$3.36"
+  end
+
+  test "shows a dash for the estimated commission when a run has no fills yet", %{conn: conn} do
+    strategy = strategy_fixture()
+    version = version_fixture(strategy)
+    run_fixture(version)
+
+    {:ok, _view, html} = live(conn, ~p"/runs")
+
+    assert html =~ "Est. Commission"
+    assert html =~ "—"
+  end
+
   describe "filters" do
     test "filters to open runs", %{conn: conn} do
       strategy = strategy_fixture()

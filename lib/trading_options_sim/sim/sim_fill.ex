@@ -5,6 +5,15 @@ defmodule TradingOptionsSim.Sim.SimFill do
   pricer's own inputs/greeks at fill time (implied vol assumption,
   slippage applied, delta/gamma) for later review — this is a simulator,
   so "what was the fill actually based on" is worth keeping.
+
+  `commission` is an estimate from `TradingCore.Costs.IBKR.option_cost/5`
+  (IBKR's published options schedule, Fixed plan — see that module's own
+  moduledoc for its unverified-against-real-fills caveats), computed once
+  at fill time by `ContractMonitor.submit_entry/2`/`submit_exit/3` and
+  stored here rather than recomputed on read — mirrors
+  `trading_system`'s own `Order.commission` field (confirmed by reading
+  that schema directly). `nil` is a real, distinct state (not yet
+  estimated), never coerced to zero.
   """
 
   use Ecto.Schema
@@ -25,6 +34,7 @@ defmodule TradingOptionsSim.Sim.SimFill do
     field :fill_price, :decimal
     field :filled_at, :utc_datetime_usec
     field :pricing_snapshot, :map, default: %{}
+    field :commission, :decimal
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -41,7 +51,8 @@ defmodule TradingOptionsSim.Sim.SimFill do
       :quantity,
       :fill_price,
       :filled_at,
-      :pricing_snapshot
+      :pricing_snapshot,
+      :commission
     ])
     |> validate_required([:sim_run_id, :kind, :action, :quantity, :fill_price, :filled_at])
     |> validate_inclusion(:kind, @kinds)

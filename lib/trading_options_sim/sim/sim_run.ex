@@ -46,6 +46,7 @@ defmodule TradingOptionsSim.Sim.SimRun do
     field :exit_reason, :string
 
     field :realized_pnl, :decimal
+    field :realized_pnl_net, :decimal
 
     field :entry_snapshot, :map, default: %{}
     field :exit_snapshot, :map, default: %{}
@@ -92,7 +93,14 @@ defmodule TradingOptionsSim.Sim.SimRun do
     ])
   end
 
-  @doc "Closes the run — sets exit_at/exit_price/exit_reason/realized_pnl, flips status to closed."
+  @doc """
+  Closes the run — sets exit_at/exit_price/exit_reason/realized_pnl,
+  flips status to closed. `realized_pnl_net` (realized_pnl minus the
+  entry+exit fills' summed commission — see `Sim.total_run_commission/1`)
+  is optional here and left `nil`, never coerced to zero, whenever either
+  leg's commission hasn't been estimated — mirrors `trading_system`'s own
+  `realized_pnl_net` (confirmed by reading its `close_run/3`).
+  """
   def exit_changeset(sim_run, attrs) do
     sim_run
     |> cast(attrs, [
@@ -100,6 +108,7 @@ defmodule TradingOptionsSim.Sim.SimRun do
       :exit_price,
       :exit_reason,
       :realized_pnl,
+      :realized_pnl_net,
       :exit_snapshot
     ])
     |> put_change(:status, "closed")
