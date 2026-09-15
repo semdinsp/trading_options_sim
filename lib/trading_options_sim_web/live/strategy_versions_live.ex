@@ -61,7 +61,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
   end
 
   def handle_event("remove_tag", %{"id" => id, "tag_id" => tag_id}, socket) do
-    version = Sim.get_strategy_version!(id) |> TradingOptionsSim.Repo.preload(:tags)
+    version = Sim.get_strategy_version!(id)
     remaining_ids = version.tags |> Enum.reject(&(&1.id == tag_id)) |> Enum.map(& &1.id)
     {:ok, _version} = Sim.put_strategy_version_tags(version, remaining_ids)
     {:noreply, load_versions(socket)}

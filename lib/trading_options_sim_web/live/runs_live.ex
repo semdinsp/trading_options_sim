@@ -66,7 +66,7 @@ defmodule TradingOptionsSimWeb.RunsLive do
   end
 
   def handle_event("remove_tag", %{"id" => id, "tag_id" => tag_id}, socket) do
-    run = Sim.get_sim_run!(id) |> TradingOptionsSim.Repo.preload(:tags)
+    run = Sim.get_sim_run!(id)
     remaining_ids = run.tags |> Enum.reject(&(&1.id == tag_id)) |> Enum.map(& &1.id)
     {:ok, _run} = Sim.put_run_tags(run, remaining_ids)
     {:noreply, load_runs(socket)}

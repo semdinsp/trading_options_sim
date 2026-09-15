@@ -630,4 +630,132 @@ defmodule TradingOptionsSim.SimTest do
       assert Sim.get_close_before_minutes("NEVER_MAPPED") == nil
     end
   end
+
+  describe "list_strategy_versions_page/2" do
+    test "paginates and returns total_count across the whole filtered set" do
+      strategy = strategy_fixture()
+      for v <- 1..5, do: version_fixture(strategy, %{version: v})
+
+      {page1, total} = Sim.list_strategy_versions_page(nil, limit: 2, offset: 0)
+      assert total == 5
+      assert length(page1) == 2
+
+      {page2, total} = Sim.list_strategy_versions_page(nil, limit: 2, offset: 2)
+      assert total == 5
+      assert length(page2) == 2
+
+      assert Enum.map(page1, & &1.id) != Enum.map(page2, & &1.id)
+    end
+
+    test "filters by lifecycle_stage" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      discovery_version = version_fixture(strategy, %{version: 1})
+      quarantined = version_fixture(strategy, %{version: 2, target_pool_id: pool.id})
+      {:ok, _quarantined} = Sim.promote_strategy_version(quarantined, "quarantine")
+
+      {versions, total} = Sim.list_strategy_versions_page("discovery", limit: 20, offset: 0)
+      assert total == 1
+      assert [%{id: id}] = versions
+      assert id == discovery_version.id
+    end
+
+    test "clamps limit to the max page size" do
+      strategy = strategy_fixture()
+      for v <- 1..3, do: version_fixture(strategy, %{version: v})
+
+      {versions, _total} = Sim.list_strategy_versions_page(nil, limit: 10_000, offset: 0)
+      assert length(versions) == 3
+    end
+
+    test "preloads :strategy and :tags" do
+      strategy = strategy_fixture()
+      version_fixture(strategy, %{version: 1})
+
+      {[version], _total} = Sim.list_strategy_versions_page(nil, limit: 20, offset: 0)
+      assert %TradingOptionsSim.Sim.Strategy{} = version.strategy
+      assert version.tags == []
+    end
+  end
+
+  describe "list_sim_runs_page/2" do
+    defp page_run_fixture(version, attrs \\ %{}) do
+      {:ok, run} =
+        Sim.open_sim_run(
+          version,
+          Map.merge(
+            %{
+              symbol: "AAPL",
+              expiry: "20270115",
+              strike: Decimal.new("150.00"),
+              right: "C",
+              multiplier: 100,
+              direction: "long"
+            },
+            attrs
+          )
+        )
+
+      run
+    end
+
+    test "paginates and returns total_count" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      for _ <- 1..5, do: page_run_fixture(version)
+
+      {page1, total} = Sim.list_sim_runs_page(nil, limit: 2, offset: 0)
+      assert total == 5
+      assert length(page1) == 2
+    end
+
+    test "filters by status" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      open_run = page_run_fixture(version)
+      closed_run = page_run_fixture(version)
+
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, closed_run}} =
+        Sim.record_entry_fill(
+          closed_run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, _closed_run}} =
+        Sim.record_exit_fill(
+          closed_run,
+          %{action: "sell", quantity: 1, fill_price: Decimal.new("4.00"), filled_at: now},
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("4.00"),
+            exit_reason: "stopped_out",
+            realized_pnl: Decimal.new("-100.00")
+          }
+        )
+
+      {open_runs, open_total} = Sim.list_sim_runs_page("open", limit: 20, offset: 0)
+      assert open_total == 1
+      assert [%{id: id}] = open_runs
+      assert id == open_run.id
+
+      {closed_runs, closed_total} = Sim.list_sim_runs_page("closed", limit: 20, offset: 0)
+      assert closed_total == 1
+      assert [%{id: id}] = closed_runs
+      assert id == closed_run.id
+    end
+
+    test "preloads :tags and strategy_version: :strategy" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      page_run_fixture(version)
+
+      {[run], _total} = Sim.list_sim_runs_page(nil, limit: 20, offset: 0)
+      assert run.tags == []
+      assert %TradingOptionsSim.Sim.StrategyVersion{} = run.strategy_version
+      assert %TradingOptionsSim.Sim.Strategy{} = run.strategy_version.strategy
+    end
+  end
 end
