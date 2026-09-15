@@ -475,4 +475,76 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
 
     assert conn.resp_body =~ "no strategy with id"
   end
+
+  test "update_strategy_version_notes requires mcp:write scope", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Notes Scope Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-19", ["mcp:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "update_strategy_version_notes",
+        %{"version_id" => version.id, "notes" => "Should fail"},
+        2
+      )
+
+    assert conn.resp_body =~ "insufficient_scope"
+    assert Sim.get_strategy_version!(version.id).notes != "Should fail"
+  end
+
+  test "update_strategy_version_notes sets notes with mcp:write scope", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Notes Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-20", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "update_strategy_version_notes",
+        %{"version_id" => version.id, "notes" => "Exit on theta magnitude below -180"},
+        2
+      )
+
+    assert conn.resp_body =~ "Exit on theta magnitude below -180"
+    assert Sim.get_strategy_version!(version.id).notes == "Exit on theta magnitude below -180"
+  end
+
+  test "update_strategy_version_notes returns an error for an unknown version_id", %{conn: conn} do
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-21", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "update_strategy_version_notes",
+        %{"version_id" => Ecto.UUID.generate(), "notes" => "n/a"},
+        2
+      )
+
+    assert conn.resp_body =~ "no strategy version with id"
+  end
 end

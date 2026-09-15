@@ -23,7 +23,8 @@ defmodule TradingOptionsSim.MCP.Server do
 
   Write tools, each requiring `"mcp:write"`: `create_strategy`,
   `create_strategy_version`, `promote_version`, `downgrade_version`,
-  `activate_version`, `deactivate_version`, `add_strategy_version_tag`.
+  `activate_version`, `deactivate_version`, `add_strategy_version_tag`,
+  `update_strategy_version_notes`.
 
   Every write tool reuses `CallGuard.rate_limited?/2`'s per-token-and-tool
   bucket (45 calls/60s); every tool (read or write) uses
@@ -62,6 +63,7 @@ defmodule TradingOptionsSim.MCP.Server do
   component(TradingOptionsSim.MCP.Tools.ActivateVersion)
   component(TradingOptionsSim.MCP.Tools.DeactivateVersion)
   component(TradingOptionsSim.MCP.Tools.AddStrategyVersionTag)
+  component(TradingOptionsSim.MCP.Tools.UpdateStrategyVersionNotes)
 
   @impl true
   def init(_client_info, frame) do
