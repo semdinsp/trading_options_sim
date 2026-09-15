@@ -43,7 +43,11 @@ defmodule TradingOptionsSim.MCP.Tools.GetStrategy do
             version: v.version,
             lifecycle_stage: v.lifecycle_stage,
             direction: v.direction,
-            rating: v.rating
+            rating: v.rating,
+            notes: v.notes,
+            activated_at: v.activated_at,
+            deactivated_at: v.deactivated_at,
+            tags: Enum.map(v.tags, & &1.name)
           }
         end)
     }

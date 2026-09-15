@@ -42,13 +42,35 @@ defmodule TradingOptionsSim.Sim do
 
   # --- Strategy versions ------------------------------------------------------
 
+  @doc """
+  Sets `tags: []` on the freshly-inserted struct rather than preloading —
+  a brand-new version can't have any tags yet, and this avoids a wasted
+  round-trip while still satisfying `Serializer.strategy_version/1`'s
+  requirement that `:tags` be loaded (was `Ecto.Association.NotLoaded`
+  otherwise, since `Repo.insert/1`'s result never preloads associations).
+  """
   def create_strategy_version(%Strategy{} = strategy, attrs) do
     %StrategyVersion{}
     |> StrategyVersion.changeset(put_key(attrs, :strategy_id, strategy.id))
     |> Repo.insert()
+    |> case do
+      {:ok, version} -> {:ok, %{version | tags: []}}
+      error -> error
+    end
   end
 
-  def get_strategy_version!(id), do: Repo.get!(StrategyVersion, id)
+  @doc """
+  Preloads `:tags` — every real caller either needs it (any path that
+  ends up serialized via `TradingOptionsSimWeb.Api.Serializer.strategy_version/1`,
+  which requires it loaded) or is unaffected by the extra join (an
+  internal re-fetch before a lifecycle/activation update). Was
+  previously bare `Repo.get!/2`, with `StrategyVersionsLive` working
+  around the gap itself with a manual `Repo.preload(:tags)` call after
+  — folded in here instead of leaving every other caller (the API
+  controller, every MCP tool) to hit the same `Ecto.Association.NotLoaded`
+  crash on serialization.
+  """
+  def get_strategy_version!(id), do: Repo.get!(StrategyVersion, id) |> Repo.preload(:tags)
 
   @doc """
   `get_strategy_version!/1` preloaded with everything
@@ -65,10 +87,17 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.preload([:strategy, :tags, target_pool: :target_pool_members])
   end
 
+  @doc """
+  Preloads `:tags` — `GetStrategy` (MCP) surfaces each version's tags
+  alongside its notes/activation status, matching the detail every other
+  version listing (`list_strategy_versions/1`, `ListStrategyVersions` MCP
+  tool) already includes.
+  """
   def list_strategy_versions_for_strategy(%Strategy{id: strategy_id}) do
     StrategyVersion
     |> where([v], v.strategy_id == ^strategy_id)
     |> order_by([v], asc: v.version)
+    |> preload(:tags)
     |> Repo.all()
   end
 
@@ -88,6 +117,34 @@ defmodule TradingOptionsSim.Sim do
     |> order_by([v], desc: v.updated_at)
     |> preload([:strategy, :tags])
     |> Repo.all()
+  end
+
+  @doc """
+  Paginated `StrategyVersion` listing for `/api/v1/versions` and the
+  `list_strategy_versions` MCP tool — same filtering/ordering/preloads
+  as `list_strategy_versions/1`, bounded by `limit`/`offset` (clamped
+  to `@max_page_size`, same as `list_sim_runs_page/2`). Returns
+  `{versions, total_count}`.
+  """
+  @spec list_strategy_versions_page(String.t() | nil, keyword()) ::
+          {[StrategyVersion.t()], non_neg_integer()}
+  def list_strategy_versions_page(lifecycle_stage \\ nil, opts \\ []) do
+    limit = opts |> Keyword.get(:limit, 20) |> clamp_page_size()
+    offset = max(Keyword.get(opts, :offset, 0), 0)
+
+    base_query = StrategyVersion |> maybe_filter_lifecycle_stage(lifecycle_stage)
+
+    total_count = base_query |> select([v], count(v.id)) |> Repo.one()
+
+    versions =
+      base_query
+      |> order_by([v], desc: v.updated_at)
+      |> limit(^limit)
+      |> offset(^offset)
+      |> preload([:strategy, :tags])
+      |> Repo.all()
+
+    {versions, total_count}
   end
 
   defp maybe_filter_lifecycle_stage(query, nil), do: query
@@ -681,7 +738,13 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.insert()
   end
 
-  def get_sim_run!(id), do: Repo.get!(SimRun, id)
+  @doc """
+  Preloads `:tags` — same reasoning as `get_strategy_version!/1`'s own
+  doc: every real caller either needs it for serialization or is
+  unaffected by the extra join. `RunsLive` previously worked around the
+  gap itself with a manual `Repo.preload(:tags)` call.
+  """
+  def get_sim_run!(id), do: Repo.get!(SimRun, id) |> Repo.preload(:tags)
 
   @doc "Records the entry fill: creates the `entry`-kind `SimFill` and stamps `SimRun`'s own entry fields together."
   def record_entry_fill(%SimRun{} = run, fill_attrs, run_entry_attrs) do
@@ -778,8 +841,45 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.all()
   end
 
+  @doc """
+  Paginated `SimRun` listing for `/api/v1/runs` and the `list_sim_runs`
+  MCP tool — same filtering/ordering/preloads as `list_sim_runs/1`, but
+  bounded by `limit`/`offset` rather than returning every matching row
+  unconditionally. `limit` is clamped to `@max_page_size` (100) so a
+  caller can't force an unbounded query; `offset` defaults to `0`.
+  Returns `{runs, total_count}` — `total_count` is the count of every
+  matching row (ignoring `limit`/`offset`), so a caller can compute
+  whether more pages remain without a second round trip.
+  """
+  @spec list_sim_runs_page(String.t() | nil, keyword()) :: {[SimRun.t()], non_neg_integer()}
+  def list_sim_runs_page(status \\ nil, opts \\ []) do
+    limit = opts |> Keyword.get(:limit, 20) |> clamp_page_size()
+    offset = max(Keyword.get(opts, :offset, 0), 0)
+
+    base_query = SimRun |> maybe_filter_status(status)
+
+    total_count = base_query |> select([r], count(r.id)) |> Repo.one()
+
+    runs =
+      base_query
+      |> order_by([r], desc: r.inserted_at)
+      |> limit(^limit)
+      |> offset(^offset)
+      |> preload([:tags, strategy_version: :strategy])
+      |> Repo.all()
+
+    {runs, total_count}
+  end
+
   defp maybe_filter_status(query, nil), do: query
   defp maybe_filter_status(query, status), do: where(query, [r], r.status == ^status)
+
+  @max_page_size 100
+
+  defp clamp_page_size(limit) when is_integer(limit) and limit > 0,
+    do: min(limit, @max_page_size)
+
+  defp clamp_page_size(_limit), do: 20
 
   @doc """
   Every currently-active `StrategyVersion` (`activated_at` set,

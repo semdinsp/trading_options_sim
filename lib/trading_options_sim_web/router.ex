@@ -43,13 +43,20 @@ defmodule TradingOptionsSimWeb.Router do
     post "/strategies", StrategyController, :create
     post "/strategies/:id/versions", StrategyController, :create_version
 
+    get "/versions", StrategyVersionController, :index
     get "/versions/:id", StrategyVersionController, :show
     post "/versions/:id/promote", StrategyVersionController, :promote
     post "/versions/:id/downgrade", StrategyVersionController, :downgrade
+    post "/versions/:id/activate", StrategyVersionController, :activate
+    post "/versions/:id/deactivate", StrategyVersionController, :deactivate
     post "/versions/:id/link_live_strategy", StrategyVersionController, :link_live_strategy
     post "/versions/:id/unlink_live_strategy", StrategyVersionController, :unlink_live_strategy
     put "/versions/:id/tags", StrategyVersionController, :put_tags
     post "/versions/:id/tags", StrategyVersionController, :add_tag
+    delete "/versions/:id/tags/:tag_id", StrategyVersionController, :remove_tag
+
+    get "/runs", RunController, :index
+    get "/runs/:id", RunController, :show
 
     get "/target_pools", TargetPoolController, :index
     get "/target_pools/:id", TargetPoolController, :show

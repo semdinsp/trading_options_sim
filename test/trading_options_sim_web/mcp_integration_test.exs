@@ -250,4 +250,93 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     conn = call_tool(raw, session, "deactivate_version", %{"version_id" => version.id}, 2)
     assert conn.resp_body =~ "insufficient_scope"
   end
+
+  test "list_strategy_versions returns full detail including notes and tags, no scope required",
+       %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP List Versions Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, version} = Sim.set_strategy_version_notes(version, "watch this one closely")
+    {:ok, _version} = Sim.add_tag_to_strategy_version_by_name(version, "needs review")
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-11", ["mcp:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "list_strategy_versions", %{}, 2)
+
+    assert conn.resp_body =~ "watch this one closely"
+    assert conn.resp_body =~ "needs review"
+    assert conn.resp_body =~ "total_count"
+  end
+
+  test "list_strategy_versions paginates and filters by stage", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP List Versions Paginate"})
+
+    for v <- 1..3 do
+      {:ok, _version} =
+        Sim.create_strategy_version(strategy, %{
+          version: v,
+          position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+        })
+    end
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-12", ["mcp:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "list_strategy_versions", %{"limit" => 2}, 2)
+    body = conn.resp_body
+    assert body =~ "total_count\\\":3"
+  end
+
+  test "list_sim_runs requires runs:read scope", %{conn: conn} do
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-13", ["mcp:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "list_sim_runs", %{}, 2)
+    assert conn.resp_body =~ "insufficient_scope"
+  end
+
+  test "list_sim_runs returns runs with tags when granted runs:read scope", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP List Runs Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: "MCPRUN1",
+        expiry: "20270115",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    {:ok, _run} = Sim.add_tag_to_run_by_name(run, "watch closely")
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-14", ["runs:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "list_sim_runs", %{"status" => "open"}, 2)
+
+    assert conn.resp_body =~ "MCPRUN1"
+    assert conn.resp_body =~ "watch closely"
+    assert conn.resp_body =~ "total_count"
+  end
 end
