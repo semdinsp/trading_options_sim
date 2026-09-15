@@ -170,4 +170,80 @@ defmodule TradingOptionsSim.SimRunTest do
       assert Enum.map(fills, & &1.kind) == ["entry", "exit"]
     end
   end
+
+  describe "count_fills_for_version/1" do
+    test "counts every fill across every run belonging to the version" do
+      version = version_fixture()
+      {:ok, run1} = Sim.open_sim_run(version, run_attrs())
+      {:ok, run2} = Sim.open_sim_run(version, run_attrs())
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, _run1}} =
+        Sim.record_entry_fill(
+          run1,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, run2}} =
+        Sim.record_entry_fill(
+          run2,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, _run2}} =
+        Sim.record_exit_fill(
+          run2,
+          %{action: "sell", quantity: 1, fill_price: Decimal.new("6.00"), filled_at: now},
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "target_hit",
+            realized_pnl: Decimal.new("100.00")
+          }
+        )
+
+      # run1: 1 fill (entry only), run2: 2 fills (entry + exit) = 3 total.
+      assert Sim.count_fills_for_version(version) == 3
+    end
+
+    test "returns 0 when the version has no fills yet" do
+      version = version_fixture()
+      assert Sim.count_fills_for_version(version) == 0
+    end
+  end
+
+  describe "list_recent_fills_for_version/2" do
+    test "returns fills across every run for the version, most recent first, bounded by limit" do
+      version = version_fixture()
+      {:ok, run} = Sim.open_sim_run(version, run_attrs())
+      now = DateTime.utc_now()
+      later = DateTime.add(now, 3600, :second)
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, _run}} =
+        Sim.record_exit_fill(
+          run,
+          %{action: "sell", quantity: 1, fill_price: Decimal.new("6.00"), filled_at: later},
+          %{
+            exit_at: later,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "target_hit",
+            realized_pnl: Decimal.new("100.00")
+          }
+        )
+
+      fills = Sim.list_recent_fills_for_version(version, 1)
+      assert length(fills) == 1
+      assert hd(fills).kind == "exit"
+      assert Sim.count_fills_for_version(version) == 2
+    end
+  end
 end

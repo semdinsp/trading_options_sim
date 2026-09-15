@@ -161,6 +161,52 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
       assert html =~ "DETAILSYM6"
       assert html =~ "entry"
       assert html =~ "exit"
+      # Two fills (one entry, one exit) from the single trade cycle above.
+      assert html =~ "2 of 2"
+    end
+
+    test "shows the total fill count separately from the displayed (limit-15) list", %{
+      conn: conn
+    } do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, run} =
+        TradingOptionsSim.Sim.open_sim_run(version, %{
+          symbol: "DETAILSYM7",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        TradingOptionsSim.Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, _run}} =
+        TradingOptionsSim.Sim.record_exit_fill(
+          run,
+          %{action: "sell", quantity: 1, fill_price: Decimal.new("6.00"), filled_at: now},
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "target_hit",
+            realized_pnl: Decimal.new("100.00")
+          }
+        )
+
+      assert TradingOptionsSim.Sim.count_fills_for_version(version) == 2
+
+      {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      assert html =~ "2 of 2"
     end
   end
 

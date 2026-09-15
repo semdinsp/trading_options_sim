@@ -192,6 +192,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     |> assign(:members, members)
     |> assign(:is_active?, is_active?)
     |> assign(:recent_fills, Sim.list_recent_fills_for_version(version))
+    |> assign(:total_fill_count, Sim.count_fills_for_version(version))
   end
 
   # Always derives this member's state from ONE live read
@@ -522,13 +523,14 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
         <.member_card :for={entry <- @members} entry={entry} />
 
-        <.recent_fills_panel fills={@recent_fills} />
+        <.recent_fills_panel fills={@recent_fills} total_count={@total_fill_count} />
       </div>
     </Layouts.app>
     """
   end
 
   attr :fills, :list, required: true
+  attr :total_count, :integer, required: true
 
   # Every entry/exit fill across every target-pool member's contract,
   # most-recent-first — a direct answer to "did a position actually
@@ -536,12 +538,15 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   # member card the operator happens to be looking at (a fill for a
   # symbol whose card has since gone quiet is still visible here).
   # Hidden entirely when empty rather than showing an empty panel on
-  # every version that's never had a fill yet.
+  # every version that's never had a fill yet. `total_count` (from
+  # Sim.count_fills_for_version/1) is shown alongside the panel's own
+  # limit-15 list so an operator can tell whether they're looking at
+  # everything or just the most recent slice of a longer history.
   defp recent_fills_panel(assigns) do
     ~H"""
     <div :if={@fills != []} class="border border-warning/40 bg-base-100 p-3">
       <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50 mb-2">
-        Recent Fills
+        Recent Fills <span class="text-base-content/30">({length(@fills)} of {@total_count})</span>
       </div>
       <div class="overflow-x-auto">
         <table class="font-data text-[11px] w-full">
