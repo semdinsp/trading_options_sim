@@ -199,6 +199,87 @@ defmodule TradingOptionsSim.SimActivatorTest do
       refute is_nil(reloaded_second_run.entry_at)
       assert ContractMonitor.snapshot(pid).position_open? == true
     end
+
+    test "reopening within the churn window after a fast exit marks the prior run as churn" do
+      pool = pool_fixture(["CHURNTEST1"])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          rules: %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+          }
+        })
+
+      {:ok, [_pid], []} = SimActivator.activate(version)
+
+      message = fn price ->
+        %{type: :price, symbol: "CHURNTEST1", source: :ibkr, data: %{last: price}}
+        |> Map.put(:__struct__, TradingHub.Message)
+      end
+
+      # First cycle: enter, then exit almost immediately — a real
+      # churn-qualifying fast close (well under the 90s hold-time
+      # threshold in normal test execution).
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST1", message.(130.0))
+      Process.sleep(50)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST1", message.(150.0))
+      Process.sleep(50)
+
+      [first_run] = Sim.list_sim_runs("closed") |> Enum.filter(&(&1.symbol == "CHURNTEST1"))
+      refute first_run.is_churn
+
+      # Reactivate — a genuinely new SimRun opens (see the test above),
+      # and re-enters well within the 120s reopen-gap window.
+      {:ok, [_pid], []} = SimActivator.activate(version)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST1", message.(130.0))
+      Process.sleep(50)
+
+      assert Sim.get_sim_run!(first_run.id).is_churn == true
+    end
+
+    test "does not mark a run held longer than the churn threshold as churn" do
+      pool = pool_fixture(["CHURNTEST2"])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          rules: %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+          }
+        })
+
+      {:ok, [_pid], []} = SimActivator.activate(version)
+
+      message = fn price ->
+        %{type: :price, symbol: "CHURNTEST2", source: :ibkr, data: %{last: price}}
+        |> Map.put(:__struct__, TradingHub.Message)
+      end
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST2", message.(130.0))
+      Process.sleep(50)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST2", message.(150.0))
+      Process.sleep(50)
+
+      [first_run] = Sim.list_sim_runs("closed") |> Enum.filter(&(&1.symbol == "CHURNTEST2"))
+
+      # Back-date the closed run's own entry_at so its hold time exceeds
+      # the 90s churn threshold, simulating a real, non-churn trade.
+      {:ok, _run} =
+        first_run
+        |> Ecto.Changeset.change(entry_at: DateTime.add(first_run.exit_at, -600, :second))
+        |> TradingOptionsSim.Repo.update()
+
+      {:ok, [_pid], []} = SimActivator.activate(version)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST2", message.(130.0))
+      Process.sleep(50)
+
+      refute Sim.get_sim_run!(first_run.id).is_churn
+    end
   end
 
   describe "deactivate/1" do

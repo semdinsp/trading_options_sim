@@ -699,14 +699,17 @@ defmodule TradingOptionsSim.ContractMonitor do
            %{
              entry_at: now,
              entry_price: price,
+             risk_at_entry: Sim.compute_risk_at_entry(price, state.multiplier, state.quantity),
              entry_snapshot: jsonify_snapshot(snapshot),
              context: entry_context(state)
            }
          ) do
-      {:ok, {_fill, _run}} ->
+      {:ok, {_fill, run}} ->
         Logger.info(
           "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} entered at #{Decimal.to_string(price)}"
         )
+
+        Sim.maybe_mark_prior_run_as_churn(state.strategy_version.id, run)
 
         %{state | position_open?: true}
 

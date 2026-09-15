@@ -274,6 +274,26 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "risk_at_entry" do
+    test "is entry_price * multiplier * quantity" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "RISKTEST1"
+      key = contract_key(symbol)
+      {_pid, run} = start_monitor(version, key)
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      entered_run = Sim.get_sim_run!(run.id)
+      refute is_nil(entered_run.risk_at_entry)
+      assert Decimal.equal?(entered_run.risk_at_entry, Decimal.mult(entered_run.entry_price, 100))
+    end
+  end
+
   describe "context tracking" do
     test "captures dte_at_entry and implied_volatility (and a nil regime_label when trading_signal is unreachable)" do
       version =

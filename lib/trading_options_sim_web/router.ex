@@ -24,6 +24,7 @@ defmodule TradingOptionsSimWeb.Router do
     live "/settings", SettingsLive
     live "/runs", RunsLive
     live "/active_strategies", ActiveStrategiesLive
+    live "/candidates", CandidatesLive
     live "/strategy_versions", StrategyVersionsLive
     live "/strategy_versions/:id", StrategyVersionDetailLive
     live "/system-performance", SystemPerformanceLive

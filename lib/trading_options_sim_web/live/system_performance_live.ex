@@ -15,10 +15,10 @@ defmodule TradingOptionsSimWeb.SystemPerformanceLive do
     restarted — every cron-driven safety net (`QuarantineEligibilityWorker`,
     `EodCloser`) missed however long the gap was, same reasoning
     `trading_system`'s identical panel documents.
-  * **Cron / Oban Health** — this app's one cron worker
-    (`QuarantineEligibilityWorker`), same shape as `trading_system`'s
-    panel: last job (any state), last two successful completions, and a
-    pending-job count across all queues.
+  * **Cron / Oban Health** — this app's cron workers
+    (`QuarantineEligibilityWorker`, `PerformanceSnapshotWorker`), same
+    shape as `trading_system`'s panel: last job (any state), last two
+    successful completions, and a pending-job count across all queues.
   """
 
   use TradingOptionsSimWeb, :live_view

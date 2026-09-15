@@ -2,9 +2,18 @@ defmodule TradingOptionsSim.Sim.CronHealthTest do
   use TradingOptionsSim.DataCase, async: true
 
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.Sim.Workers.PerformanceSnapshotWorker
   alias TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker
 
   describe "cron_worker_health/0" do
+    test "includes every cron-scheduled worker, not just QuarantineEligibilityWorker" do
+      health = Sim.cron_worker_health()
+      workers = Enum.map(health, & &1.worker)
+
+      assert QuarantineEligibilityWorker in workers
+      assert PerformanceSnapshotWorker in workers
+    end
+
     test "matches a real completed job against its worker, not just nil-for-everyone" do
       # Regression coverage for the exact bug trading_system hit: comparing
       # oban_jobs.worker (stored WITHOUT the "Elixir." prefix —

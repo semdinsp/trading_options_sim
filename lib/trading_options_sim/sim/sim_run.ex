@@ -40,6 +40,7 @@ defmodule TradingOptionsSim.Sim.SimRun do
     field :entry_price, :decimal
     field :stop_loss_price, :decimal
     field :take_profit_price, :decimal
+    field :risk_at_entry, :decimal
 
     field :exit_at, :utc_datetime_usec
     field :exit_price, :decimal
@@ -52,6 +53,8 @@ defmodule TradingOptionsSim.Sim.SimRun do
     field :exit_snapshot, :map, default: %{}
 
     field :context, :map, default: %{}
+
+    field :is_churn, :boolean, default: false
 
     has_many :sim_fills, TradingOptionsSim.Sim.SimFill
 
@@ -93,6 +96,10 @@ defmodule TradingOptionsSim.Sim.SimRun do
   once here, at entry, and never updated afterward — mirrors
   `trading_live`'s own regime columns being stamped once on the opening
   fill only (confirmed by reading `LiveFill`'s schema directly).
+
+  `risk_at_entry` is the expectancy_r/lcb95/ucb95 R-multiple denominator
+  — see `Sim.compute_risk_at_entry/1`'s own doc (and its TODO) for what
+  it actually measures today.
   """
   def entry_changeset(sim_run, attrs) do
     cast(sim_run, attrs, [
@@ -100,9 +107,22 @@ defmodule TradingOptionsSim.Sim.SimRun do
       :entry_price,
       :stop_loss_price,
       :take_profit_price,
+      :risk_at_entry,
       :entry_snapshot,
       :context
     ])
+  end
+
+  @doc """
+  Flags this run as churn — a flatten-and-reopen loop, not a genuine
+  independent trade. See `Sim.maybe_mark_prior_run_as_churn/2`'s own doc
+  for the detection thresholds. Applied retroactively to an
+  already-closed run once a qualifying reopen is observed, mirroring
+  `trading_system`'s own `StrategyRun.churn_changeset/1` (confirmed by
+  reading that schema directly).
+  """
+  def churn_changeset(sim_run) do
+    change(sim_run, is_churn: true)
   end
 
   @doc """
