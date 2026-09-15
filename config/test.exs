@@ -25,6 +25,13 @@ config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
 # hub_client_child/0.
 config :trading_options_sim, :start_hub_client, false
 
+# SimReactivator queries the Repo from application boot, before
+# test_helper.exs puts Repo into sandbox :manual mode — left on, it
+# grabs a connection outside any test's sandbox ownership and breaks
+# other tests' checkout. Same hazard/fix as trading_live's own
+# reactivate_strategies_on_boot test override.
+config :trading_options_sim, :reactivate_strategies_on_boot, false
+
 # Force the MCP transport to start even though the Endpoint isn't
 # actually listening under `server: false` — an MCP integration test
 # dispatches straight into the plug pipeline via Plug.Test, which
