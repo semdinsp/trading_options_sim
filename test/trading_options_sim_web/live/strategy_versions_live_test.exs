@@ -178,4 +178,54 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
       refute html =~ "hot"
     end
   end
+
+  describe "trading hours settings" do
+    test "shows the default trading hours policy and overnight hold state", %{conn: conn} do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, _view, html} = live(conn, ~p"/strategy_versions")
+
+      assert html =~ "Regular Hours Only"
+      assert html =~ "Overnight Hold: Off"
+      refute version.overnight_hold
+    end
+
+    test "changing the trading hours policy dropdown persists the choice", %{conn: conn} do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions")
+
+      view
+      |> form("#trading-hours-form-#{version.id}", %{"policy" => "unrestricted"})
+      |> render_change()
+
+      assert Sim.get_strategy_version!(version.id).trading_hours_policy == "unrestricted"
+    end
+
+    test "toggling overnight hold flips it on then off", %{conn: conn} do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, view, html} = live(conn, ~p"/strategy_versions")
+      assert html =~ "Overnight Hold: Off"
+
+      html =
+        view
+        |> element("button[phx-click=toggle_overnight_hold][phx-value-id='#{version.id}']")
+        |> render_click()
+
+      assert html =~ "Overnight Hold: On"
+      assert Sim.get_strategy_version!(version.id).overnight_hold == true
+
+      html =
+        view
+        |> element("button[phx-click=toggle_overnight_hold][phx-value-id='#{version.id}']")
+        |> render_click()
+
+      assert html =~ "Overnight Hold: Off"
+      assert Sim.get_strategy_version!(version.id).overnight_hold == false
+    end
+  end
 end

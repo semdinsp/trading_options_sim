@@ -136,7 +136,7 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
               </h2>
             </.link>
             <.lifecycle_badge stage={version.lifecycle_stage} />
-            <span class="font-data text-xs text-base-content/40 ml-auto">
+            <span class="font-data text-xs text-base-content/40">
               {length(version.sim_runs)} open
             </span>
             <button

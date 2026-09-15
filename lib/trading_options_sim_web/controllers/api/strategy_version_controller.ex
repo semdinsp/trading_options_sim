@@ -17,7 +17,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
               :activate,
               :deactivate,
               :link_live_strategy,
-              :unlink_live_strategy
+              :unlink_live_strategy,
+              :update_trading_hours
             ]
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
@@ -119,6 +120,22 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
     version = Sim.get_strategy_version!(id)
 
     with {:ok, version} <- Sim.unlink_live_strategy(version) do
+      json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
+    end
+  end
+
+  @doc """
+  POST /api/v1/versions/:id/trading_hours {"trading_hours_policy": "unrestricted", "overnight_hold": true}
+
+  Either key may be omitted — see `StrategyVersion.operational_changeset/2`'s
+  own doc for why this is a separate, deliberate-exception changeset
+  from a version's immutable trading logic.
+  """
+  def update_trading_hours(conn, %{"id" => id} = params) do
+    version = Sim.get_strategy_version!(id)
+    attrs = Map.take(params, ["trading_hours_policy", "overnight_hold"])
+
+    with {:ok, version} <- Sim.update_trading_hours_settings(version, attrs) do
       json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
     end
   end

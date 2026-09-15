@@ -19,11 +19,17 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
   allowed here even though `Sim.promote_strategy_version/2` wouldn't
   let a retired version move to any other *stage* without first
   un-retiring it back to `discovery`).
+
+  Each row also has a `trading_hours_policy` dropdown and an
+  `overnight_hold` toggle — ported from `trading_live`'s own identical
+  per-strategy settings (see `StrategyVersion.trading_hours_policies/0`
+  and `Sim.update_trading_hours_settings/2` for the full mapping).
   """
 
   use TradingOptionsSimWeb, :live_view
 
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.Sim.StrategyVersion
   alias TradingOptionsSim.SimActivator
 
   @impl true
@@ -130,6 +136,25 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
         {:ok, _unretired} -> put_flash(socket, :info, "Unretired — back to discovery")
         {:error, _reason} -> put_flash(socket, :error, "Could not unretire this version")
       end
+
+    {:noreply, load_versions(socket)}
+  end
+
+  def handle_event(
+        "set_trading_hours_policy",
+        %{"version_id" => id, "policy" => policy},
+        socket
+      ) do
+    version = Sim.get_strategy_version!(id)
+    {:ok, _version} = Sim.update_trading_hours_settings(version, %{trading_hours_policy: policy})
+    {:noreply, load_versions(socket)}
+  end
+
+  def handle_event("toggle_overnight_hold", %{"id" => id}, socket) do
+    version = Sim.get_strategy_version!(id)
+
+    {:ok, _version} =
+      Sim.update_trading_hours_settings(version, %{overnight_hold: !version.overnight_hold})
 
     {:noreply, load_versions(socket)}
   end
@@ -285,6 +310,52 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
                 autofocus
               />
             </form>
+          </div>
+
+          <div class="flex items-center gap-3 mt-2">
+            <form
+              id={"trading-hours-form-#{version.id}"}
+              phx-change="set_trading_hours_policy"
+              class="inline-flex items-center gap-1"
+            >
+              <input type="hidden" name="version_id" value={version.id} />
+              <label
+                for={"trading-hours-#{version.id}"}
+                class="text-[11px] uppercase text-base-content/40 font-data"
+              >
+                Hours
+              </label>
+              <select
+                id={"trading-hours-#{version.id}"}
+                name="policy"
+                class="select select-xs select-bordered font-data text-[11px]"
+              >
+                <option
+                  :for={policy <- StrategyVersion.trading_hours_policies()}
+                  value={policy}
+                  selected={policy == version.trading_hours_policy}
+                >
+                  {StrategyVersion.trading_hours_policy_label(policy)}
+                </option>
+              </select>
+            </form>
+
+            <button
+              type="button"
+              phx-click="toggle_overnight_hold"
+              phx-value-id={version.id}
+              class={[
+                "px-1.5 py-0.5 border text-[11px] uppercase tracking-wide font-data",
+                if(version.overnight_hold,
+                  do: "border-warning/40 text-warning bg-warning/10",
+                  else:
+                    "border-base-content/20 text-base-content/40 hover:border-warning/40 hover:text-warning"
+                )
+              ]}
+              title="Exempt this version's open positions from automatic end-of-day close"
+            >
+              Overnight Hold: {if version.overnight_hold, do: "On", else: "Off"}
+            </button>
           </div>
         </div>
       </div>

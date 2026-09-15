@@ -72,6 +72,8 @@ defmodule TradingOptionsSim.MCP.Tools.ListStrategyVersions do
       target_pool_id: version.target_pool_id,
       activated_at: version.activated_at,
       deactivated_at: version.deactivated_at,
+      trading_hours_policy: version.trading_hours_policy,
+      overnight_hold: version.overnight_hold,
       notes: version.notes,
       rating: version.rating,
       tags: Enum.map(version.tags, & &1.name)

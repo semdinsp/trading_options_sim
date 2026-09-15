@@ -444,6 +444,48 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.list_sim_fills(run) == []
     end
 
+    test "\"unrestricted\" trading_hours_policy overrides a closed exchange session" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      {:ok, version} =
+        Sim.update_trading_hours_settings(version, %{trading_hours_policy: "unrestricted"})
+
+      symbol = "HOURSTEST3"
+      key = contract_key(symbol)
+
+      {pid, run} = start_monitor(version, key, exchange: closed_exchange_fixture())
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == true
+      assert length(Sim.list_sim_fills(run)) == 1
+    end
+
+    test "\"extended_only\" trading_hours_policy fails closed even on an open exchange session" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      {:ok, version} =
+        Sim.update_trading_hours_settings(version, %{trading_hours_policy: "extended_only"})
+
+      symbol = "HOURSTEST4"
+      key = contract_key(symbol)
+
+      {pid, run} = start_monitor(version, key, exchange: always_open_exchange_fixture())
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.list_sim_fills(run) == []
+    end
+
     test "still updates last_snapshot while the session is closed (observation always runs)" do
       version =
         version_fixture(%{

@@ -186,6 +186,19 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
+  Sets `trading_hours_policy` and/or `overnight_hold` — `attrs` may
+  include either or both keys. See `StrategyVersion.operational_changeset/2`'s
+  own doc for why this is a separate, deliberate-exception changeset.
+  """
+  @spec update_trading_hours_settings(StrategyVersion.t(), map()) ::
+          {:ok, StrategyVersion.t()} | {:error, Ecto.Changeset.t()}
+  def update_trading_hours_settings(%StrategyVersion{} = version, attrs) do
+    version
+    |> StrategyVersion.operational_changeset(attrs)
+    |> Repo.update()
+  end
+
+  @doc """
   Marks `version` as durably active — sets `activated_at` to now,
   clears `deactivated_at`. Called by `SimActivator.activate/1` on every
   call (even a no-op re-activation against an already-running monitor),

@@ -52,6 +52,7 @@ defmodule TradingOptionsSimWeb.Router do
     post "/versions/:id/deactivate", StrategyVersionController, :deactivate
     post "/versions/:id/link_live_strategy", StrategyVersionController, :link_live_strategy
     post "/versions/:id/unlink_live_strategy", StrategyVersionController, :unlink_live_strategy
+    post "/versions/:id/trading_hours", StrategyVersionController, :update_trading_hours
     put "/versions/:id/tags", StrategyVersionController, :put_tags
     post "/versions/:id/tags", StrategyVersionController, :add_tag
     delete "/versions/:id/tags/:tag_id", StrategyVersionController, :remove_tag

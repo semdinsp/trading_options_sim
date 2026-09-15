@@ -3,10 +3,13 @@ defmodule TradingOptionsSim.EodCloser do
   Periodic GenServer that force-closes every open position within its
   own exchange's `ExchangeTradingHours.close_before_minutes` (11 by
   default) of that exchange's close — ported from `TradingLive.EodCloser`
-  per `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §5c, scoped down: no
-  `overnight_hold`/`time_box_exit_et`/`close_after_hours` equivalent
-  exists in this app yet, so every open position is force-closed
-  unconditionally near its exchange's close in v1.
+  per `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §5c.
+
+  A `StrategyVersion` with `overnight_hold: true` is exempt from this
+  automatic close (see `overnight_hold?/1`'s own doc) — no
+  `time_box_exit_et`/`close_after_hours` equivalent exists in this app
+  yet, so those two trading_live-specific exemptions have no analog
+  here.
 
   Runs every `@tick_interval_ms` (60s by default). Each tick, scans
   every running `ContractMonitor` via the `MonitorRegistry`, reads its
@@ -128,15 +131,40 @@ defmodule TradingOptionsSim.EodCloser do
             :ok
 
           session ->
-            if within_close_window?(session, now, exchange) do
-              Logger.info(
-                "EodCloser: forcing EOD close for strategy_version #{strategy_version_id} (#{exchange} closes soon)"
-              )
+            cond do
+              not within_close_window?(session, now, exchange) ->
+                :ok
 
-              send(pid, {:force_close_eod, :eod_flatten})
+              overnight_hold?(strategy_version_id) ->
+                Logger.info(
+                  "EodCloser: #{strategy_version_id} would normally force-close near #{exchange}'s close, but overnight_hold is set — leaving it open"
+                )
+
+              true ->
+                Logger.info(
+                  "EodCloser: forcing EOD close for strategy_version #{strategy_version_id} (#{exchange} closes soon)"
+                )
+
+                send(pid, {:force_close_eod, :eod_flatten})
             end
         end
     end
+  end
+
+  # Ported from trading_live's own overnight_hold exemption
+  # (confirmed by reading TradingLive.EodCloser directly) — suppresses
+  # ONLY this automatic EOD force-close, never a manual flatten
+  # (Sim.deactivate_strategy_version/1 calls ContractMonitor.force_close/2
+  # directly, bypassing this module entirely, same "manual always
+  # overrides the automatic exemption" posture trading_live's own
+  # moduledoc documents). Read fresh per tick rather than cached on
+  # ContractMonitor's own state — unlike trading_live, which applies a
+  # live toggle via PubSub to an already-running monitor, this app's
+  # EodCloser already re-scans every open position every tick, so a
+  # flag change is naturally picked up on the very next scan with no
+  # extra plumbing needed.
+  defp overnight_hold?(strategy_version_id) do
+    Sim.get_strategy_version!(strategy_version_id).overnight_hold
   end
 
   defp fetch_snapshot(pid) do

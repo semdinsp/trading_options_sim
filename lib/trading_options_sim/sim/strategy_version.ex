@@ -42,6 +42,25 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   @retired_reasons ~w(manual failed_quarantine abandoned)
   @sources ~w(native promoted_from_trading_system)
 
+  # Ported from trading_live's own LiveStrategySettings.after_hours_policy
+  # (confirmed by reading that schema directly) — same four values, same
+  # order. "regular_and_extended"/"extended_only" are honest no-ops today,
+  # not silently broken: trading_live itself has no real extended-hours
+  # (pre-market/after-hours) session data to check against either (see
+  # that app's own transmission_allowed?/1 and its code comment), so
+  # ContractMonitor.session_open?/1 degrades "regular_and_extended" to
+  # exactly "regular_hours_only"'s check and fails "extended_only" closed
+  # — matching trading_live's own documented behavior exactly, not a gap
+  # unique to this app.
+  @trading_hours_policies ~w(regular_hours_only regular_and_extended extended_only unrestricted)
+
+  @trading_hours_policy_labels %{
+    "regular_hours_only" => "Regular Hours Only",
+    "regular_and_extended" => "Regular + Extended",
+    "extended_only" => "Extended Hours Only",
+    "unrestricted" => "Unrestricted (24h)"
+  }
+
   @option_rights ~w(C P either)
   @expiry_selections ~w(fixed dte_target leaps)
   @strike_selections ~w(fixed_delta fixed_strike pct_otm)
@@ -90,6 +109,12 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     field :rating, :integer
     field :deleted_at, :utc_datetime
 
+    # Operator-adjustable trading-hours/overnight settings — see
+    # trading_hours_policies/0's own doc for the value set, and
+    # ContractMonitor.session_open?/1 / EodCloser for enforcement.
+    field :trading_hours_policy, :string, default: "regular_hours_only"
+    field :overnight_hold, :boolean, default: false
+
     belongs_to :strategy, TradingOptionsSim.Sim.Strategy
     belongs_to :parent_version, __MODULE__, foreign_key: :parent_version_id
     belongs_to :target_pool, TradingOptionsSim.Sim.TargetPool
@@ -118,6 +143,14 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   @doc "The full set of valid `retired_reason` values."
   @spec retired_reasons() :: [String.t()]
   def retired_reasons, do: @retired_reasons
+
+  @doc "The full set of valid `trading_hours_policy` values, in dropdown order."
+  @spec trading_hours_policies() :: [String.t()]
+  def trading_hours_policies, do: @trading_hours_policies
+
+  @doc "Human-readable label for one `trading_hours_policy` value — the dropdown's own option text."
+  @spec trading_hours_policy_label(String.t()) :: String.t()
+  def trading_hours_policy_label(policy), do: Map.fetch!(@trading_hours_policy_labels, policy)
 
   @doc """
   Builds a new strategy version. Never mutated in place once created —
@@ -169,6 +202,22 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   @doc "Same deliberate-exception shape as `rating_changeset/2` — notes are revisable commentary."
   def notes_changeset(strategy_version, attrs) do
     cast(strategy_version, attrs, [:notes])
+  end
+
+  @doc """
+  Same deliberate-exception shape as `rating_changeset/2` —
+  `trading_hours_policy`/`overnight_hold` are operator-adjustable
+  settings, not part of a version's immutable trading logic, so
+  changing them doesn't require a new `version` number the way
+  `rules`/`option_leg_config` would. Named `operational_changeset/2`
+  to match `trading_live`'s own identical-purpose changeset
+  (`LiveStrategySettings.operational_changeset/2`, confirmed by
+  reading that schema directly).
+  """
+  def operational_changeset(strategy_version, attrs) do
+    strategy_version
+    |> cast(attrs, [:trading_hours_policy, :overnight_hold])
+    |> validate_inclusion(:trading_hours_policy, @trading_hours_policies)
   end
 
   @doc """

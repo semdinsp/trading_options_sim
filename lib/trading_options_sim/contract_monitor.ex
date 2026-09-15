@@ -671,6 +671,28 @@ defmodule TradingOptionsSim.ContractMonitor do
   # explicitly opted into hours gating, so silently ignoring the
   # mismatch and filling anyway would hide a real configuration bug
   # rather than surface it.
+  # trading_hours_policy is checked first, same precedence
+  # trading_live's own transmission_allowed?/1 uses (confirmed by
+  # reading that function directly) — "unrestricted" bypasses exchange-
+  # hours checking entirely regardless of :exchange, and "extended_only"
+  # fails closed regardless of :exchange, before the nil-exchange
+  # fail-open/unresolvable-exchange fail-closed rules below ever apply.
+  # "regular_and_extended" falls through to the same check as
+  # "regular_hours_only" — see trading_hours_policies/0's own doc for
+  # why (no real extended-hours session data exists in this app either,
+  # matching trading_live's own honestly-a-no-op state for that value).
+  #
+  # state.strategy_version is loaded once at init/1 and never refreshed
+  # — a policy change made via the UI while this monitor is already
+  # running only takes effect on its next reactivation, same documented
+  # behavior trading_live's own dropdown has (that app's own comment:
+  # takes effect on next reactivation, not live-applied mid-session —
+  # unlike overnight_hold, which trading_live DOES apply live via
+  # PubSub; this app's own overnight_hold is read fresh per EodCloser
+  # tick instead, so it doesn't need that same live-apply mechanism).
+  defp session_open?(%{strategy_version: %{trading_hours_policy: "unrestricted"}}), do: true
+  defp session_open?(%{strategy_version: %{trading_hours_policy: "extended_only"}}), do: false
+
   defp session_open?(%{exchange: nil}), do: true
 
   defp session_open?(%{exchange: exchange}) do
