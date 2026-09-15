@@ -67,6 +67,29 @@ config :phoenix_live_view,
 # at the `config/runtime.exs`.
 config :trading_options_sim, TradingOptionsSim.Mailer, adapter: Swoosh.Adapters.Local
 
+# Elixir's built-in Calendar.UTCOnlyTimeZoneDatabase only resolves "Etc/UTC"
+# — any other zone raises/returns {:error, :utc_only_time_zone_database}.
+# TradingCore.MarketHours.open?/2 (used by ContractMonitor's own
+# session_open?/1 exchange-hours gate) calls DateTime.shift_zone/2 against
+# each ExchangeSession's real IANA tz (e.g. "America/New_York" for NASDAQ/
+# ARCA) — without a real tz database, every price tick that reaches
+# maybe_transition/2 for a member with a non-nil :exchange crashes this
+# GenServer outright (confirmed live 2026-09-15: two activated SPY option
+# strategies died within seconds of their first real tick, silently
+# leaving their SimRun stuck "open" in the DB with no running monitor —
+# see trading_system/trading_live's own identical fix and incident notes
+# for the same root cause in their own config.exs).
+config :elixir, :time_zone_database, Tzdata.TimeZoneDatabase
+
+# tzdata polls tzdata.services.spacetime.dev for release updates by default
+# — a background updater racing its own ETS release swap against a
+# concurrent lookup is a known source of transient
+# {:error, :time_zone_not_found} failures even for a zone that
+# unquestionably exists. Disabled — matches trading_system/trading_live's
+# own precedent of updating tz data via `mix deps.update tzdata` (a
+# deliberate, tested step) rather than a live network poll at runtime.
+config :tzdata, :autoupdate, :disabled
+
 # Configure esbuild (the version is required)
 config :esbuild,
   version: "0.25.4",
