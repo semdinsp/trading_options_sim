@@ -278,12 +278,6 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   defp format_rule(rule) when map_size(rule) == 0, do: "(empty — vacuously true)"
   defp format_rule(rule), do: Jason.encode!(rule, pretty: true)
 
-  defp format_expiry(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>) do
-    "#{y}-#{m}-#{d}"
-  end
-
-  defp format_expiry(other), do: other
-
   defp format_snapshot_value(%Decimal{} = value), do: Decimal.to_string(value)
 
   defp format_snapshot_value(value) when is_float(value),
@@ -689,51 +683,19 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             </tbody>
           </table>
 
-          <div
+          <.last_closed_run
             :if={not @entry.snapshot.position_open? and @entry.last_closed_run}
+            run={@entry.last_closed_run}
             class="mt-2 font-data text-[11px]"
-          >
-            <span class="text-base-content/40">Last closed:</span>
-            <span :if={@entry.last_closed_run.exit_price}>
-              ${Decimal.round(@entry.last_closed_run.exit_price, 2)}
-            </span>
-            <span
-              :if={@entry.last_closed_run.realized_pnl}
-              class={pnl_class(@entry.last_closed_run.realized_pnl)}
-            >
-              {pnl_sign(@entry.last_closed_run.realized_pnl)}${Decimal.round(
-                Decimal.abs(@entry.last_closed_run.realized_pnl),
-                2
-              )}
-            </span>
-            <span :if={is_nil(@entry.last_closed_run.exit_price)} class="text-base-content/50">
-              Closed without an entry ({@entry.last_closed_run.exit_reason})
-            </span>
-          </div>
+          />
         </div>
       </div>
 
-      <div
+      <.last_closed_run
         :if={not @entry.running? and @entry.last_closed_run}
+        run={@entry.last_closed_run}
         class="font-data text-[11px]"
-      >
-        <span class="text-base-content/40">Last closed:</span>
-        <span :if={@entry.last_closed_run.exit_price}>
-          ${Decimal.round(@entry.last_closed_run.exit_price, 2)}
-        </span>
-        <span
-          :if={@entry.last_closed_run.realized_pnl}
-          class={pnl_class(@entry.last_closed_run.realized_pnl)}
-        >
-          {pnl_sign(@entry.last_closed_run.realized_pnl)}${Decimal.round(
-            Decimal.abs(@entry.last_closed_run.realized_pnl),
-            2
-          )}
-        </span>
-        <span :if={is_nil(@entry.last_closed_run.exit_price)} class="text-base-content/50">
-          Closed without an entry ({@entry.last_closed_run.exit_reason})
-        </span>
-      </div>
+      />
 
       <div
         :if={not @entry.running? and is_nil(@entry.last_closed_run)}
@@ -741,6 +703,30 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       >
         No monitor running for this symbol — activate the strategy above.
       </div>
+    </div>
+    """
+  end
+
+  attr :run, :map, required: true
+  attr :class, :string, default: nil
+
+  # Shown both inline in a running member's "Position" column (while
+  # flat, with no currently-open run) and standalone for a non-running
+  # member with trade history — same summary either way, so this is one
+  # component rather than the markup living twice in render/1.
+  defp last_closed_run(assigns) do
+    ~H"""
+    <div class={@class}>
+      <span class="text-base-content/40">Last closed:</span>
+      <span :if={@run.exit_price}>
+        ${Decimal.round(@run.exit_price, 2)}
+      </span>
+      <span :if={@run.realized_pnl} class={pnl_class(@run.realized_pnl)}>
+        {pnl_sign(@run.realized_pnl)}${Decimal.round(Decimal.abs(@run.realized_pnl), 2)}
+      </span>
+      <span :if={is_nil(@run.exit_price)} class="text-base-content/50">
+        Closed without an entry ({@run.exit_reason})
+      </span>
     </div>
     """
   end
