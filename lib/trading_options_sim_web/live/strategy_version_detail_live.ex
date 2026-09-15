@@ -666,7 +666,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
                   {(@entry.run && @entry.run.direction) || @entry.fallback_direction}
                 </td>
               </tr>
-              <tr :if={@entry.run}>
+              <tr :if={@entry.run && @entry.run.entry_price}>
                 <td class="text-base-content/40 pr-3 py-0.5">Entry</td>
                 <td class="pr-3 py-0.5 tabular-nums">
                   ${Decimal.round(@entry.run.entry_price, 2)}
@@ -677,13 +677,13 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
                 <td class="text-base-content/40 pr-3 py-0.5">Entered</td>
                 <td class="pr-3 py-0.5">{@entry.entry_fill.filled_at}</td>
               </tr>
-              <tr :if={is_nil(@entry.run)}>
+              <tr :if={is_nil(@entry.run) || is_nil(@entry.run.entry_price)}>
                 <td class="text-base-content/40 pr-3 py-0.5">Current</td>
                 <td class="pr-3 py-0.5 tabular-nums">
                   {current_price_display(@entry.snapshot)}
                 </td>
               </tr>
-              <tr :if={is_nil(@entry.run)}>
+              <tr :if={is_nil(@entry.run) || is_nil(@entry.run.entry_price)}>
                 <td class="text-base-content/40 pr-3 py-0.5" colspan="2">
                   <span class="text-base-content/30 normal-case">
                     Entry price/qty pending — this contract's own

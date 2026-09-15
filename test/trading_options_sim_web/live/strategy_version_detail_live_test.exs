@@ -287,6 +287,54 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "pending"
   end
 
+  test "does not crash when position_open? but the SimRun's own entry_price is still nil", %{
+    conn: conn
+  } do
+    # Confirmed live 2026-09-15: FunctionClauseError in Decimal.decimal/1
+    # (called from Decimal.round/2) at
+    # GET /strategy_versions/:id — @entry.run existed (a real open
+    # SimRun row, status "open") but its entry_price was still nil, a
+    # real state open_sim_run/2 leaves a run in until
+    # record_entry_fill/3's own transaction commits both the entry fill
+    # and entry_price together. The Entry row's own guard was
+    # `:if={@entry.run}` — true here despite entry_price being nil, so
+    # `Decimal.round(@entry.run.entry_price, 2)` crashed on nil rather
+    # than falling back to the same "Current price / pending" display
+    # the is_nil(@entry.run) case already handles below.
+    strategy = strategy_fixture()
+    pool = pool_fixture("DETAILSYM9")
+
+    version =
+      version_fixture(strategy, %{
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config(),
+        rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}}
+      })
+
+    {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+
+    message =
+      %{type: :price, symbol: "DETAILSYM9", source: :ibkr, data: %{last: 150.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM9", message)
+    Process.sleep(50)
+
+    [run] = Sim.list_open_sim_runs(version)
+    refute is_nil(run.entry_price)
+
+    {:ok, _run} =
+      run
+      |> Ecto.Changeset.change(entry_price: nil)
+      |> TradingOptionsSim.Repo.update()
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    assert html =~ "Current"
+    assert html =~ "150.0"
+    assert html =~ "pending"
+  end
+
   describe "activate/deactivate" do
     test "activating starts a monitor and shows it as running", %{conn: conn} do
       strategy = strategy_fixture()
