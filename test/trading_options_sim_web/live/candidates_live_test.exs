@@ -144,6 +144,27 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
     assert html =~ "n_closes"
   end
 
+  test "clicking the r_per_capital_hour column header re-sorts without crashing", %{conn: conn} do
+    strategy = strategy_fixture()
+    version = version_fixture(strategy)
+
+    candidate_run_fixture(version, %{
+      symbol: "CANDLIVE9",
+      exit_price: Decimal.new("6.00"),
+      realized_pnl: Decimal.new("100.00")
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/candidates")
+    view |> element("button", "Show all") |> render_click()
+
+    html =
+      view
+      |> element("th[phx-value-sort_by='r_per_capital_hour']")
+      |> render_click()
+
+    assert html =~ "cap-hr"
+  end
+
   test "toggling near-miss filters to rows failing exactly 1-2 gates", %{conn: conn} do
     strategy = strategy_fixture(%{name: "Near Miss Strategy"})
     version = version_fixture(strategy)

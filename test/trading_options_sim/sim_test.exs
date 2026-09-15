@@ -956,6 +956,8 @@ defmodule TradingOptionsSim.SimTest do
 
   describe "full_universe_version_metrics/0" do
     defp candidate_run_fixture(version, attrs) do
+      direction = Map.get(attrs, :direction, "long")
+
       {:ok, run} =
         Sim.open_sim_run(
           version,
@@ -966,13 +968,14 @@ defmodule TradingOptionsSim.SimTest do
               strike: Decimal.new("150.00"),
               right: "C",
               multiplier: 100,
-              direction: "long"
+              direction: direction
             },
             Map.take(attrs, [:symbol])
           )
         )
 
-      now = DateTime.utc_now()
+      exit_at = DateTime.utc_now()
+      entry_at = DateTime.add(exit_at, -Map.get(attrs, :hold_seconds, 0), :second)
       entry_price = Decimal.new("5.00")
       risk_at_entry = Sim.compute_risk_at_entry(entry_price, 100, 1)
 
@@ -980,27 +983,27 @@ defmodule TradingOptionsSim.SimTest do
         Sim.record_entry_fill(
           run,
           %{
-            action: "buy",
+            action: if(direction == "short", do: "sell", else: "buy"),
             quantity: 1,
             fill_price: entry_price,
-            filled_at: now,
+            filled_at: entry_at,
             commission: Decimal.new("1.68")
           },
-          %{entry_at: now, entry_price: entry_price, risk_at_entry: risk_at_entry}
+          %{entry_at: entry_at, entry_price: entry_price, risk_at_entry: risk_at_entry}
         )
 
       {:ok, {_fill, run}} =
         Sim.record_exit_fill(
           run,
           %{
-            action: "sell",
+            action: if(direction == "short", do: "buy", else: "sell"),
             quantity: 1,
             fill_price: Map.fetch!(attrs, :exit_price),
-            filled_at: now,
+            filled_at: exit_at,
             commission: Decimal.new("1.68")
           },
           %{
-            exit_at: now,
+            exit_at: exit_at,
             exit_price: Map.fetch!(attrs, :exit_price),
             exit_reason: Map.get(attrs, :exit_reason, "target_hit"),
             realized_pnl: Map.fetch!(attrs, :realized_pnl),
@@ -1088,6 +1091,61 @@ defmodule TradingOptionsSim.SimTest do
         |> Enum.filter(&(&1.strategy_version_id == version.id))
 
       assert row.exit_reason_histogram == %{"rule_exit" => 1, "expiry" => 1}
+    end
+
+    test "computes capital_hours/avg_hold_seconds/r_per_capital_hour, long and short alike" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      # risk_at_entry = 5.00 * 100 * 1 = 500 for both runs (direction
+      # doesn't change the magnitude of premium at risk).
+      candidate_run_fixture(version, %{
+        symbol: "CAND5",
+        direction: "long",
+        exit_price: Decimal.new("6.00"),
+        realized_pnl: Decimal.new("100.00"),
+        # 1 hour
+        hold_seconds: 3600
+      })
+
+      candidate_run_fixture(version, %{
+        symbol: "CAND5",
+        direction: "short",
+        exit_price: Decimal.new("4.00"),
+        realized_pnl: Decimal.new("50.00"),
+        # 2 hours
+        hold_seconds: 7200
+      })
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      # capital_hours = 500*1 + 500*2 = 1500
+      assert Decimal.equal?(Decimal.round(row.capital_hours, 2), Decimal.new("1500.00"))
+      assert_in_delta Decimal.to_float(row.avg_hold_seconds), 5400.0, 0.5
+
+      # r_per_capital_hour = total realized_pnl / total capital_hours = 150/1500 = 0.1
+      assert Decimal.equal?(Decimal.round(row.r_per_capital_hour, 4), Decimal.new("0.1000"))
+    end
+
+    test "r_per_capital_hour is nil (not a huge number) when capital_hours is near zero" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      candidate_run_fixture(version, %{
+        symbol: "CAND6",
+        exit_price: Decimal.new("6.00"),
+        realized_pnl: Decimal.new("100.00"),
+        hold_seconds: 0
+      })
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert Decimal.equal?(row.capital_hours, Decimal.new(0))
+      assert is_nil(row.r_per_capital_hour)
     end
   end
 

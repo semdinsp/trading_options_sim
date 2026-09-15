@@ -163,6 +163,32 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
     end
   end
 
+  describe "GET /api/v1/versions/metrics" do
+    test "returns one row per discovery/quarantine version with gates", %{conn: conn} do
+      version = version_fixture()
+
+      conn = conn |> token_conn(["strategies:read"]) |> get(~p"/api/v1/versions/metrics")
+      body = json_response(conn, 200)
+
+      assert [row] =
+               Enum.filter(
+                 body["candidate_metrics"],
+                 &(&1["strategy_version_id"] == version.id)
+               )
+
+      assert row["n_closes"] == 0
+      assert Map.has_key?(row, "capital_hours")
+      assert Map.has_key?(row, "avg_hold_seconds")
+      assert Map.has_key?(row, "r_per_capital_hour")
+      assert row["gates"]["sample_floor"] in ["pass", "fail", "not_computed", "not_applicable"]
+    end
+
+    test "403s without strategies:read scope", %{conn: conn} do
+      conn = conn |> token_conn(["tags:write"]) |> get(~p"/api/v1/versions/metrics")
+      assert json_response(conn, 403)
+    end
+  end
+
   describe "POST /api/v1/versions/:id/promote" do
     test "422s with the invalid-transition error shape when there's no target pool", %{
       conn: conn

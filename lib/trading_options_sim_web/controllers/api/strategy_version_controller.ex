@@ -7,7 +7,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
 
   action_fallback TradingOptionsSimWeb.Api.FallbackController
 
-  plug TradingOptionsSimWeb.ApiAuthPlug, [scope: "strategies:read"] when action in [:index, :show]
+  plug TradingOptionsSimWeb.ApiAuthPlug,
+       [scope: "strategies:read"] when action in [:index, :show, :metrics]
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "strategies:write"]
@@ -51,6 +52,23 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
   def show(conn, %{"id" => id}) do
     version = Sim.get_strategy_version!(id)
     json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
+  end
+
+  @doc """
+  GET /api/v1/versions/metrics
+
+  The same `Sim.full_universe_version_metrics/0` + `CandidateGates`
+  data `/candidates` renders — one row per non-deleted
+  `discovery`/`quarantine` version, each paired with its nine gate
+  verdicts. Computed fresh on every call, same as the LiveView (not a
+  cached/rolled-up read) — see `full_universe_version_metrics/0`'s own
+  doc for why. Mirrors the `list_candidate_metrics` MCP tool; both use
+  `Serializer.candidate_metrics/1` so field names never drift between
+  the two surfaces.
+  """
+  def metrics(conn, _params) do
+    rows = Sim.full_universe_version_metrics() |> Enum.map(&Serializer.candidate_metrics/1)
+    json(conn, %{"candidate_metrics" => rows})
   end
 
   @doc "POST /api/v1/versions/:id/promote {\"to\": \"quarantine\" | \"test_portfolio\" | \"discovery\"}"

@@ -131,6 +131,46 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
     %{"id" => tag.id, "name" => tag.name, "description" => tag.description}
   end
 
+  @doc """
+  One `Sim.full_universe_version_metrics/0` row plus its
+  `CandidateGates.evaluate/2` verdicts — the same data
+  `CandidatesLive` renders, for `GET /api/v1/versions/metrics` and the
+  `list_candidate_metrics` MCP tool. Field names match `CandidatesLive`'s
+  own assigns exactly (no REST-only renaming) so a client reads the same
+  vocabulary as the UI.
+  """
+  def candidate_metrics(row) do
+    %{
+      "strategy_version_id" => row.strategy_version_id,
+      "strategy_id" => row.strategy_id,
+      "strategy_name" => row.strategy_name,
+      "version" => row.version,
+      "lifecycle_stage" => row.lifecycle_stage,
+      "direction" => row.direction,
+      "rules" => row.rules,
+      "rating" => row.rating,
+      "tags" => tags(row.tags),
+      "target_pool_id" => row.target_pool_id,
+      "target_pool_name" => row.target_pool_name,
+      "quarantine_trading_days" => row.quarantine_trading_days,
+      "n_closes" => row.n_closes,
+      "expectancy_r" => str(row.expectancy_r),
+      "lcb95" => row.lcb95,
+      "ucb95" => row.ucb95,
+      "realized_pnl" => str(row.realized_pnl),
+      "avg_commission" => str(row.avg_commission),
+      "cost_margin" => str(row.cost_margin),
+      "capital_hours" => str(row.capital_hours),
+      "avg_hold_seconds" => str(row.avg_hold_seconds),
+      "r_per_capital_hour" => str(row.r_per_capital_hour),
+      "exit_reason_histogram" => row.exit_reason_histogram,
+      "excluded_count" => row.excluded_count,
+      "excluded_pnl" => str(row.excluded_pnl),
+      "last_traded_on" => str(row.last_traded_on),
+      "gates" => TradingOptionsSim.CandidateGates.evaluate(row)
+    }
+  end
+
   defp tags(tags) when is_list(tags), do: Enum.map(tags, &tag/1)
 
   defp str(nil), do: nil
