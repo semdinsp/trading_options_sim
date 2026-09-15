@@ -80,6 +80,26 @@ defmodule TradingOptionsSim.Sim do
   defp maybe_filter_lifecycle_stage(query, stage),
     do: where(query, [v], v.lifecycle_stage == ^stage)
 
+  @doc """
+  Total `StrategyVersion` count per `lifecycle_stage`, across every
+  strategy — a stable, whole-system orientation number (never scoped to
+  `list_strategy_versions/1`'s own `stage_filter`), same purpose as
+  `trading_system`'s `Trading.strategy_version_stage_counts/0` (which
+  `TradingSystemWeb.TradingComponents.stage_counts_strip/1` renders).
+  Returns a plain `%{"discovery" => n, "quarantine" => n, ...}` map —
+  a stage with zero rows is simply absent from the map, not `0`; the
+  caller (`stage_counts_strip/1`) defaults each key it reads.
+  """
+  @spec strategy_version_stage_counts() :: %{String.t() => non_neg_integer()}
+  def strategy_version_stage_counts do
+    StrategyVersion
+    |> where([v], is_nil(v.deleted_at))
+    |> group_by([v], v.lifecycle_stage)
+    |> select([v], {v.lifecycle_stage, count(v.id)})
+    |> Repo.all()
+    |> Map.new()
+  end
+
   def set_strategy_version_rating(%StrategyVersion{} = version, rating) do
     version
     |> StrategyVersion.rating_changeset(%{rating: rating})

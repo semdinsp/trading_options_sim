@@ -516,6 +516,42 @@ defmodule TradingOptionsSimWeb.CoreComponents do
   defp lifecycle_badge_class("retired"), do: "border-base-content/15 text-base-content/40"
   defp lifecycle_badge_class(_other), do: "border-base-content/20 text-base-content/60"
 
+  @doc """
+  A small `D N  Q N  T N  R N` strip — total `StrategyVersion` counts
+  per `lifecycle_stage`, across every strategy. A stable, whole-system
+  orientation number, deliberately **not** scoped to whatever
+  `stage_filter` a page's own list is currently applying (unlike
+  `ActiveStrategiesLive`'s "N open" per-row count, which is a different,
+  narrower metric this component doesn't replace) — matches
+  `trading_system`'s own `TradingSystemWeb.TradingComponents.stage_counts_strip/1`
+  convention (tabular-nums font-data styling, the second letter's stage
+  in `text-primary`), extended with a fourth `T` (`test_portfolio`)
+  since this app's `StrategyVersion.lifecycle_stages/0` has four stages
+  where `trading_system`'s has three — `discovery`/`quarantine`/
+  `retired` alone would silently drop every `test_portfolio` version
+  from the count.
+
+  `counts` is the plain `%{"discovery" => n, ...}` map
+  `Sim.strategy_version_stage_counts/0` returns — pass it straight
+  through; each key defaults to `0` if that stage has no rows at all.
+  """
+  attr :counts, :map, required: true
+
+  def stage_counts_strip(assigns) do
+    ~H"""
+    <div class="font-data text-[12px] tabular-nums text-base-content/50 flex flex-wrap gap-x-3">
+      <span title="Discovery (all, unfiltered)">D {Map.get(@counts, "discovery", 0)}</span>
+      <span class="text-primary" title="Quarantine (all, unfiltered)">
+        Q {Map.get(@counts, "quarantine", 0)}
+      </span>
+      <span title="Test Portfolio (all, unfiltered)">
+        T {Map.get(@counts, "test_portfolio", 0)}
+      </span>
+      <span title="Retired (all, unfiltered)">R {Map.get(@counts, "retired", 0)}</span>
+    </div>
+    """
+  end
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do

@@ -317,6 +317,27 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
+  describe "strategy_version_stage_counts/0" do
+    test "counts versions per lifecycle_stage across every strategy" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version_fixture(strategy, %{version: 1})
+      version_fixture(strategy, %{version: 2})
+      quarantine_version = version_fixture(strategy, %{version: 3, target_pool_id: pool.id})
+      {:ok, _} = Sim.promote_strategy_version(quarantine_version, "quarantine")
+
+      counts = Sim.strategy_version_stage_counts()
+
+      assert counts["discovery"] == 2
+      assert counts["quarantine"] == 1
+      refute Map.has_key?(counts, "retired")
+    end
+
+    test "returns an empty map when no versions exist" do
+      assert Sim.strategy_version_stage_counts() == %{}
+    end
+  end
+
   describe "list_sim_runs/1" do
     defp run_fixture(version, symbol, attrs \\ %{}) do
       {:ok, run} =

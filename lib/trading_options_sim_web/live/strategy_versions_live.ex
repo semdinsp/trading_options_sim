@@ -110,6 +110,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
     socket
     |> assign(:versions, Sim.list_strategy_versions(socket.assigns.stage_filter))
     |> assign(:active_version_ids, Sim.active_strategy_version_ids())
+    |> assign(:stage_counts, Sim.strategy_version_stage_counts())
   end
 
   defp filter_link_class(current, target) do
@@ -128,7 +129,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
     ~H"""
     <Layouts.app flash={@flash}>
       <div class="flex items-center justify-between mb-6">
-        <h1 class="text-2xl font-bold uppercase tracking-wide">Strategy Versions</h1>
+        <div class="flex items-center gap-4">
+          <h1 class="text-2xl font-bold uppercase tracking-wide">Strategy Versions</h1>
+          <.stage_counts_strip counts={@stage_counts} />
+        </div>
 
         <div class="flex gap-1">
           <.link patch={~p"/strategy_versions"} class={filter_link_class(@stage_filter, nil)}>
