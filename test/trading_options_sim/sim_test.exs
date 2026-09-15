@@ -542,6 +542,20 @@ defmodule TradingOptionsSim.SimTest do
       refute deactivated_version.id in active_ids
     end
 
+    # downgrade_strategy_version/3 only flips lifecycle_stage — it does
+    # not itself deactivate — so a version retired without first being
+    # deactivated would otherwise still look "active" here.
+    test "excludes a retired version even if never explicitly deactivated" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+      {:ok, retired} = Sim.downgrade_strategy_version(version, "retired")
+
+      refute is_nil(retired.activated_at)
+      assert is_nil(retired.deactivated_at)
+      refute retired.id in Enum.map(Sim.list_active_strategy_versions(), & &1.id)
+    end
+
     # A version stays "active" while flat — it's the activated_at/
     # deactivated_at pair that decides membership, not whether it
     # happens to have an open run right now (see those fields' own doc

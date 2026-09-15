@@ -17,10 +17,10 @@ defmodule TradingOptionsSimWeb.Router do
   scope "/", TradingOptionsSimWeb do
     pipe_through :browser
 
-    # No dashboard/home page exists yet — Settings is the only real
-    # operator-facing screen this app has, so route both here rather
-    # than leaving "/" on the unrelated Phoenix generator splash page.
-    live "/", SettingsLive
+    # Active Strategies is the primary operator-facing screen (what's
+    # running right now), so it doubles as the home page rather than
+    # leaving "/" on the unrelated Phoenix generator splash page.
+    live "/", ActiveStrategiesLive
     live "/settings", SettingsLive
     live "/runs", RunsLive
     live "/active_strategies", ActiveStrategiesLive

@@ -41,6 +41,34 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     assert html =~ "quarantine"
   end
 
+  test "does not show a retired version even if it was never explicitly deactivated", %{
+    conn: conn
+  } do
+    {:ok, strategy} = Sim.create_strategy(%{name: "Retired Strategy"})
+    {:ok, pool} = Sim.create_target_pool(%{name: "Retired Pool"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{},
+        target_pool_id: pool.id
+      })
+
+    {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+    {:ok, version} = Sim.mark_activated(version)
+    {:ok, _retired} = Sim.downgrade_strategy_version(version, "retired")
+
+    {:ok, _view, html} = live(conn, ~p"/active_strategies")
+
+    refute html =~ "Retired Strategy"
+    assert html =~ "No strategy versions currently have an open run"
+  end
+
+  test "the home page is Active Strategies", %{conn: conn} do
+    {:ok, _view, html} = live(conn, ~p"/")
+    assert html =~ "Active Strategies"
+  end
+
   test "shows the stage counts strip", %{conn: conn} do
     {:ok, strategy} = Sim.create_strategy(%{name: "Test Strategy"})
 

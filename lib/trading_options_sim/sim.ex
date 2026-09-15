@@ -890,6 +890,11 @@ defmodule TradingOptionsSim.Sim do
   second `list_open_sim_runs/1` round trip per version) — the Active
   Strategies page's data source.
 
+  Also excludes `lifecycle_stage == "retired"` — `downgrade_strategy_version/3`
+  only flips `lifecycle_stage`, it does not itself deactivate, so a
+  version retired without first being deactivated would otherwise still
+  show here as "active" on the page an operator lands on first.
+
   **Not** "has an open `SimRun`" — a version stays in this list while
   flat (its last position closed via a rule-triggered exit, watching
   for the next entry) exactly as long as while it holds an open
@@ -903,7 +908,11 @@ defmodule TradingOptionsSim.Sim do
   @spec list_active_strategy_versions() :: [StrategyVersion.t()]
   def list_active_strategy_versions do
     StrategyVersion
-    |> where([v], not is_nil(v.activated_at) and is_nil(v.deactivated_at))
+    |> where(
+      [v],
+      not is_nil(v.activated_at) and is_nil(v.deactivated_at) and
+        v.lifecycle_stage != "retired"
+    )
     |> preload([:strategy, sim_runs: ^from(r in SimRun, where: r.status == "open")])
     |> Repo.all()
   end
