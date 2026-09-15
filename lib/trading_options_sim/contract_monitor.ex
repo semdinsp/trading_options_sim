@@ -689,7 +689,13 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     case Sim.record_entry_fill(
            run,
-           %{action: action, quantity: state.quantity, fill_price: price, filled_at: now},
+           %{
+             action: action,
+             quantity: state.quantity,
+             fill_price: price,
+             filled_at: now,
+             commission: estimate_commission(state, price, action)
+           },
            %{entry_at: now, entry_price: price, entry_snapshot: jsonify_snapshot(snapshot)}
          ) do
       {:ok, {_fill, _run}} ->
@@ -712,15 +718,37 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     run = Sim.get_sim_run!(state.sim_run_id)
     realized_pnl = realized_pnl(run, price, state)
+    exit_commission = estimate_commission(state, price, action)
+
+    # The entry fill's own commission is already persisted; this exit
+    # fill's isn't inserted until record_exit_fill/3 below, so
+    # total_run_commission/1's sum here is entry-only until we add
+    # exit_commission ourselves — matching trading_system's own
+    # close_run/3, which sums both legs only after both orders exist.
+    realized_pnl_net =
+      case Sim.total_run_commission(run) do
+        nil ->
+          nil
+
+        entry_commission ->
+          Decimal.sub(realized_pnl, Decimal.add(entry_commission, exit_commission))
+      end
 
     case Sim.record_exit_fill(
            run,
-           %{action: action, quantity: state.quantity, fill_price: price, filled_at: now},
+           %{
+             action: action,
+             quantity: state.quantity,
+             fill_price: price,
+             filled_at: now,
+             commission: exit_commission
+           },
            %{
              exit_at: now,
              exit_price: price,
              exit_reason: exit_reason,
              realized_pnl: realized_pnl,
+             realized_pnl_net: realized_pnl_net,
              exit_snapshot: jsonify_snapshot(snapshot)
            }
          ) do
@@ -785,6 +813,21 @@ defmodule TradingOptionsSim.ContractMonitor do
         else: Decimal.sub(exit_price, entry_price)
 
     diff |> Decimal.mult(state.quantity) |> Decimal.mult(state.multiplier)
+  end
+
+  # Estimated per-fill commission via TradingCore.Costs.IBKR.option_cost/5
+  # (Fixed plan, IBKR's published options schedule — see that module's
+  # own moduledoc for its unverified-against-real-fills caveats: no ORF,
+  # no :tiered support, no percentage-of-notional cap). `notional` is
+  # this fill's actual trade value (fill_price × multiplier × quantity),
+  # matching order_cost/4's stock analog (`value = fill_price × shares`)
+  # rather than a strike-based notional — the fill price is what this
+  # contract actually traded at, so it's the more accurate of
+  # option_cost/5's own two documented notional choices.
+  defp estimate_commission(state, fill_price, action) do
+    side = if action == "sell", do: :sell, else: :buy
+    notional = fill_price |> Decimal.mult(state.multiplier) |> Decimal.mult(state.quantity)
+    TradingCore.Costs.IBKR.option_cost(Decimal.new(state.quantity), notional, side)
   end
 
   defp force_close_expiry(state, spot, dte) do

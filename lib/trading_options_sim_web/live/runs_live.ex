@@ -137,6 +137,7 @@ defmodule TradingOptionsSimWeb.RunsLive do
               <th>Entry</th>
               <th>Exit</th>
               <th>Realized P&amp;L</th>
+              <th>Est. Commission</th>
               <th>Exit reason</th>
               <th>Tags</th>
             </tr>
@@ -161,6 +162,9 @@ defmodule TradingOptionsSimWeb.RunsLive do
               <td>{format_price(run.exit_price)}</td>
               <td class={pnl_class(run.realized_pnl)}>
                 {format_price(run.realized_pnl)}
+              </td>
+              <td class="text-base-content/50">
+                {format_price(Sim.total_run_commission(run))}
               </td>
               <td class="text-base-content/60">{run.exit_reason || "—"}</td>
               <td>

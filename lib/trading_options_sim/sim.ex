@@ -837,7 +837,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> maybe_filter_status(status)
     |> order_by([r], desc: r.inserted_at)
-    |> preload([:tags, strategy_version: :strategy])
+    |> preload([:tags, :sim_fills, strategy_version: :strategy])
     |> Repo.all()
   end
 
@@ -939,6 +939,37 @@ defmodule TradingOptionsSim.Sim do
     |> where([f], f.sim_run_id == ^sim_run_id)
     |> order_by([f], asc: f.filled_at)
     |> Repo.all()
+  end
+
+  @doc """
+  Sums every fill's `commission` for `run` — `nil` (never coerced to
+  zero) if `run` has no fills yet, or if any fill's own `commission` is
+  `nil` (not yet estimated, or predates this feature) — mirrors
+  `trading_system`'s own `total_run_commission/1` (confirmed by reading
+  its `Trading.close_run/3` directly): understating a run's real cost by
+  silently treating an unknown commission as free is worse than just
+  saying "unknown." Uses `run.sim_fills` directly when already preloaded
+  (e.g. `list_sim_runs/1`'s own `:sim_fills` preload, for a page showing
+  many runs at once) rather than always issuing its own query.
+  """
+  @spec total_run_commission(SimRun.t()) :: Decimal.t() | nil
+  def total_run_commission(%SimRun{sim_fills: %Ecto.Association.NotLoaded{}} = run) do
+    total_run_commission(%{run | sim_fills: list_sim_fills(run)})
+  end
+
+  def total_run_commission(%SimRun{} = run) do
+    run.sim_fills
+    |> case do
+      [] ->
+        nil
+
+      fills ->
+        if Enum.any?(fills, &is_nil(&1.commission)) do
+          nil
+        else
+          Enum.reduce(fills, Decimal.new(0), &Decimal.add(&2, &1.commission))
+        end
+    end
   end
 
   @doc """

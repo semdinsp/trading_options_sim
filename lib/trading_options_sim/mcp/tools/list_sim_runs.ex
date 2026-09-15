@@ -73,6 +73,7 @@ defmodule TradingOptionsSim.MCP.Tools.ListSimRuns do
       exit_price: str(run.exit_price),
       exit_reason: run.exit_reason,
       realized_pnl: str(run.realized_pnl),
+      realized_pnl_net: str(run.realized_pnl_net),
       tags: Enum.map(run.tags, & &1.name)
     }
   end

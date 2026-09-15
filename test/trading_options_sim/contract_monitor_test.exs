@@ -218,6 +218,62 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "commission tracking" do
+    test "estimates and stores commission on both the entry and exit fill" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+        })
+
+      symbol = "COMMISSIONTEST1"
+      key = contract_key(symbol)
+      {_pid, run} = start_monitor(version, key)
+
+      broadcast_underlying_price(symbol, 130.0)
+      Process.sleep(50)
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      [entry_fill, exit_fill] = Sim.list_sim_fills(run)
+
+      refute is_nil(entry_fill.commission)
+      refute is_nil(exit_fill.commission)
+      assert Decimal.compare(entry_fill.commission, Decimal.new(0)) == :gt
+      assert Decimal.compare(exit_fill.commission, Decimal.new(0)) == :gt
+    end
+
+    test "sets realized_pnl_net to realized_pnl minus the summed entry+exit commission" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+        })
+
+      symbol = "COMMISSIONTEST2"
+      key = contract_key(symbol)
+      {_pid, run} = start_monitor(version, key)
+
+      broadcast_underlying_price(symbol, 130.0)
+      Process.sleep(50)
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      closed_run = Sim.get_sim_run!(run.id)
+      [entry_fill, exit_fill] = Sim.list_sim_fills(closed_run)
+      total_commission = Decimal.add(entry_fill.commission, exit_fill.commission)
+
+      refute is_nil(closed_run.realized_pnl_net)
+
+      assert Decimal.equal?(
+               closed_run.realized_pnl_net,
+               Decimal.sub(closed_run.realized_pnl, total_commission)
+             )
+
+      assert Decimal.equal?(Sim.total_run_commission(closed_run), total_commission)
+    end
+  end
+
   describe "short direction" do
     test "records buy/sell actions in the opposite order for a short position" do
       version =

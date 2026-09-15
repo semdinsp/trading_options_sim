@@ -171,6 +171,95 @@ defmodule TradingOptionsSim.SimRunTest do
     end
   end
 
+  describe "total_run_commission/1" do
+    test "sums commission across the run's fills" do
+      version = version_fixture()
+      {:ok, run} = Sim.open_sim_run(version, run_attrs())
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{
+            action: "buy",
+            quantity: 1,
+            fill_price: Decimal.new("5.00"),
+            filled_at: now,
+            commission: Decimal.new("1.68")
+          },
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, run}} =
+        Sim.record_exit_fill(
+          run,
+          %{
+            action: "sell",
+            quantity: 1,
+            fill_price: Decimal.new("6.00"),
+            filled_at: now,
+            commission: Decimal.new("1.68")
+          },
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "target_hit",
+            realized_pnl: Decimal.new("100.00")
+          }
+        )
+
+      assert Decimal.equal?(Sim.total_run_commission(run), Decimal.new("3.36"))
+    end
+
+    test "returns nil when the run has no fills yet" do
+      version = version_fixture()
+      {:ok, run} = Sim.open_sim_run(version, run_attrs())
+
+      assert Sim.total_run_commission(run) == nil
+    end
+
+    test "returns nil when any fill's commission is unknown" do
+      version = version_fixture()
+      {:ok, run} = Sim.open_sim_run(version, run_attrs())
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      assert Sim.total_run_commission(run) == nil
+    end
+
+    test "works whether or not :sim_fills is already preloaded" do
+      version = version_fixture()
+      {:ok, run} = Sim.open_sim_run(version, run_attrs())
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{
+            action: "buy",
+            quantity: 1,
+            fill_price: Decimal.new("5.00"),
+            filled_at: now,
+            commission: Decimal.new("1.68")
+          },
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      preloaded_run = TradingOptionsSim.Repo.preload(run, :sim_fills, force: true)
+
+      assert Decimal.equal?(
+               Sim.total_run_commission(run),
+               Sim.total_run_commission(preloaded_run)
+             )
+    end
+  end
+
   describe "count_fills_for_version/1" do
     test "counts every fill across every run belonging to the version" do
       version = version_fixture()
