@@ -51,6 +51,8 @@ defmodule TradingOptionsSim.Sim.SimRun do
     field :entry_snapshot, :map, default: %{}
     field :exit_snapshot, :map, default: %{}
 
+    field :context, :map, default: %{}
+
     has_many :sim_fills, TradingOptionsSim.Sim.SimFill
 
     many_to_many :tags, TradingOptionsSim.Sim.Tag,
@@ -82,14 +84,24 @@ defmodule TradingOptionsSim.Sim.SimRun do
     |> foreign_key_constraint(:strategy_version_id)
   end
 
-  @doc "Records the entry fill — sets entry_at/entry_price plus the risk levels computed from it."
+  @doc """
+  Records the entry fill — sets entry_at/entry_price plus the risk
+  levels computed from it. `context` is a free-form, deliberately
+  exploratory map (regime label, days-to-expiry-at-entry, implied
+  volatility assumption are the first candidates, not a closed set —
+  see the `add_context_to_sim_runs` migration's own comment) stamped
+  once here, at entry, and never updated afterward — mirrors
+  `trading_live`'s own regime columns being stamped once on the opening
+  fill only (confirmed by reading `LiveFill`'s schema directly).
+  """
   def entry_changeset(sim_run, attrs) do
     cast(sim_run, attrs, [
       :entry_at,
       :entry_price,
       :stop_loss_price,
       :take_profit_price,
-      :entry_snapshot
+      :entry_snapshot,
+      :context
     ])
   end
 

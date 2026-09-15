@@ -98,6 +98,7 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "exit_reason" => run.exit_reason,
       "realized_pnl" => str(run.realized_pnl),
       "realized_pnl_net" => str(run.realized_pnl_net),
+      "context" => run.context,
       "tags" => tags(run.tags),
       "inserted_at" => str(run.inserted_at)
     }
