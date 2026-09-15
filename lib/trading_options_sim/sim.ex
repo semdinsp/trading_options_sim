@@ -777,6 +777,72 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.insert()
   end
 
+  # TODO: once a strategy can actually set/exercise a real stop-loss
+  # (SimRun.stop_loss_price has no writer anywhere in this codebase as
+  # of 2026-09-15 — confirmed by grep), a stopped-out run's
+  # risk_at_entry should switch to (entry_price - stop_loss_price) *
+  # multiplier * quantity, the real defined-risk distance, rather than
+  # this premium-at-risk fallback. Until then, premium at risk is the
+  # standard convention for a defined-risk long option position with no
+  # stop (max loss on a long option is the premium paid) — real,
+  # computable today for every closed run, and not a placeholder value.
+  @doc """
+  The `expectancy_r`/`lcb95`/`ucb95` R-multiple denominator for one
+  entry fill — see this function's own `TODO` above for what it will
+  become once automatic stop-loss exercise exists.
+  """
+  @spec compute_risk_at_entry(Decimal.t(), integer(), integer()) :: Decimal.t()
+  def compute_risk_at_entry(entry_price, multiplier, quantity) do
+    entry_price |> Decimal.mult(multiplier) |> Decimal.mult(quantity)
+  end
+
+  @churn_max_hold_time_seconds 90
+  @churn_max_reopen_gap_seconds 120
+
+  @doc """
+  Flags the immediately-prior closed run for `{strategy_version_id,
+  symbol}` as churn if `new_run` (just opened) is a flatten-and-reopen
+  of it — held for under #{@churn_max_hold_time_seconds}s, then
+  reopened within #{@churn_max_reopen_gap_seconds}s of that close.
+  Mirrors `trading_system`'s own `maybe_mark_prior_run_as_churn/2`
+  (confirmed by reading that function directly), scoped by `symbol`
+  instead of `strategy_target_id` — this app has no separate targets
+  table, one target-pool member's `symbol` is the closest equivalent.
+
+  A no-op if no such prior run exists, or if it's already flagged (an
+  already-churned run isn't re-marked, and doesn't cascade — only the
+  ONE immediately-prior run is ever checked, matching the source
+  implementation's own `limit(1)`).
+  """
+  @spec maybe_mark_prior_run_as_churn(String.t(), SimRun.t()) :: :ok
+  def maybe_mark_prior_run_as_churn(strategy_version_id, %SimRun{} = new_run) do
+    cutoff = DateTime.add(DateTime.utc_now(), -@churn_max_reopen_gap_seconds, :second)
+
+    prior_run =
+      SimRun
+      |> where([r], r.strategy_version_id == ^strategy_version_id)
+      |> where([r], r.symbol == ^new_run.symbol)
+      |> where([r], r.status == "closed")
+      |> where([r], r.id != ^new_run.id)
+      |> where([r], not r.is_churn)
+      |> where([r], not is_nil(r.exit_at) and r.exit_at >= ^cutoff)
+      |> where(
+        [r],
+        not is_nil(r.entry_at) and
+          fragment("EXTRACT(EPOCH FROM (? - ?))", r.exit_at, r.entry_at) <
+            @churn_max_hold_time_seconds
+      )
+      |> order_by([r], desc: r.exit_at)
+      |> limit(1)
+      |> Repo.one()
+
+    if prior_run do
+      {:ok, _run} = prior_run |> SimRun.churn_changeset() |> Repo.update()
+    end
+
+    :ok
+  end
+
   @doc """
   Closes `run` with no entry ever having been filled — no `SimFill` row
   is created (there's nothing to record a fill for), just
@@ -1036,6 +1102,221 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.one()
   end
 
+  # --- Candidate metrics (Candidates page) -----------------------------------
+  #
+  # v1 of trading_system's own Trading.full_universe_version_metrics/2 +
+  # CandidateGates, scaled to this app's much smaller data volume and
+  # data model — see CandidateGates's own moduledoc for the full mapping
+  # from trading_system's nine gates to this app's equivalents, and
+  # Sim.compute_risk_at_entry/3's own doc for why expectancy_r here is a
+  # real R-multiple (entry-premium-at-risk denominator) rather than a
+  # placeholder.
+
+  @candidate_lifecycle_stages ~w(discovery quarantine)
+
+  @doc """
+  One metrics row per non-deleted `discovery`/`quarantine`-stage
+  `StrategyVersion` — everything `CandidateGates.evaluate/2` and
+  `CandidatesLive` need, computed fresh from live `SimRun`/`SimFill`
+  data on every call (deliberately NOT a `PerformanceSnapshot` read —
+  that table is a once-daily historical rollup; a candidate-triage page
+  needs current state). Mirrors `trading_system`'s own
+  `full_universe_version_metrics/2` (confirmed by reading that function
+  directly): one grouped SQL query for the statistical core
+  (n/expectancy_r/lcb95/ucb95/realized_pnl, `is_churn`-excluded), then a
+  handful of narrower per-version-id queries joined together in Elixir.
+
+  No `limit`/`offset` — this app's version count is nowhere near
+  `trading_system`'s ~900+, so returning the whole discovery+quarantine
+  population in one call (matching that page's own `@fetch_limit: 5000`
+  "just fetch everything" approach at its scale) needs no pagination
+  here either.
+  """
+  @spec full_universe_version_metrics() :: [map()]
+  def full_universe_version_metrics do
+    versions =
+      StrategyVersion
+      |> where([v], is_nil(v.deleted_at))
+      |> where([v], v.lifecycle_stage in @candidate_lifecycle_stages)
+      |> preload([:strategy, :tags, :target_pool])
+      |> Repo.all()
+
+    version_ids = Enum.map(versions, & &1.id)
+    stats_by_id = expectancy_r_stats_by_version(version_ids)
+    commission_by_id = avg_commission_by_version(version_ids)
+    exit_histogram_by_id = exit_reason_histogram_by_version(version_ids)
+    last_traded_by_id = last_traded_on_by_version(version_ids)
+    excluded_by_id = excluded_run_stats_by_version(version_ids)
+
+    Enum.map(versions, fn version ->
+      stats =
+        Map.get(stats_by_id, version.id, %{
+          n_closes: 0,
+          expectancy_r: nil,
+          lcb95: nil,
+          ucb95: nil,
+          realized_pnl: nil
+        })
+
+      excluded = Map.get(excluded_by_id, version.id, %{count: 0, pnl: Decimal.new(0)})
+      avg_commission = Map.get(commission_by_id, version.id)
+
+      %{
+        strategy_version_id: version.id,
+        strategy_id: version.strategy_id,
+        strategy_name: version.strategy.name,
+        version: version.version,
+        lifecycle_stage: version.lifecycle_stage,
+        direction: version.direction,
+        rules: version.rules,
+        rating: version.rating,
+        tags: version.tags,
+        target_pool_id: version.target_pool_id,
+        target_pool_name: version.target_pool && version.target_pool.name,
+        quarantine_trading_days: version.quarantine_trading_days || 0,
+        n_closes: stats.n_closes,
+        expectancy_r: stats.expectancy_r,
+        lcb95: stats.lcb95,
+        ucb95: stats.ucb95,
+        realized_pnl: stats.realized_pnl,
+        avg_commission: avg_commission,
+        cost_margin: cost_margin(stats.expectancy_r, avg_commission, stats.n_closes),
+        exit_reason_histogram: Map.get(exit_histogram_by_id, version.id, %{}),
+        excluded_count: excluded.count,
+        excluded_pnl: excluded.pnl,
+        last_traded_on: Map.get(last_traded_by_id, version.id)
+      }
+    end)
+  end
+
+  # n/expectancy_r/lcb95/ucb95/realized_pnl, grouped by strategy_version_id
+  # — excludes is_churn runs and any run missing risk_at_entry (a run
+  # closed via close_run_without_entry/2 never received an entry fill,
+  # so it has no risk_at_entry, no entry_price, nothing to divide by;
+  # same "closed but never traded" case this app already models
+  # elsewhere).
+  defp expectancy_r_stats_by_version(version_ids) do
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids)
+    |> where([r], r.status == "closed")
+    |> where([r], not r.is_churn)
+    |> where([r], not is_nil(r.realized_pnl_net))
+    |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
+    |> group_by([r], r.strategy_version_id)
+    |> select([r], %{
+      strategy_version_id: r.strategy_version_id,
+      n: count(r.id),
+      mean: avg(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
+      stddev: fragment("stddev_samp(? / ?)", r.realized_pnl_net, r.risk_at_entry),
+      realized_pnl: sum(r.realized_pnl_net)
+    })
+    |> Repo.all()
+    |> Map.new(fn row ->
+      stats =
+        if row.n >= 2 and row.mean do
+          stddev = row.stddev || Decimal.new(0)
+          {lcb, ucb} = TradingCore.Stats.bounds(row.mean, stddev, row.n, :p95)
+
+          %{
+            expectancy_r: row.mean,
+            lcb95: lcb && Decimal.to_float(lcb),
+            ucb95: ucb && Decimal.to_float(ucb)
+          }
+        else
+          %{expectancy_r: row.mean, lcb95: nil, ucb95: nil}
+        end
+
+      stats = Map.merge(stats, %{n_closes: row.n, realized_pnl: row.realized_pnl})
+      {row.strategy_version_id, stats}
+    end)
+  end
+
+  # This app's own cost basis for gate E/cost_margin — average REAL
+  # estimated commission per closed run (TradingCore.Costs.IBKR, see
+  # ContractMonitor.estimate_commission/3), expressed in R-units by
+  # dividing through the same average risk_at_entry used for
+  # expectancy_r, rather than trading_system's more complex required_r/
+  # notional-slippage-estimate fallback — this app already has real
+  # per-fill commission data, a more direct cost floor than an
+  # estimated-slippage guess.
+  defp avg_commission_by_version(version_ids) do
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids)
+    |> where([r], r.status == "closed")
+    |> where([r], not r.is_churn)
+    |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
+    |> join(:inner, [r], f in SimFill, on: f.sim_run_id == r.id)
+    |> where([r, f], not is_nil(f.commission))
+    |> group_by([r], r.strategy_version_id)
+    |> select([r, f], %{
+      strategy_version_id: r.strategy_version_id,
+      avg_commission_r: avg(fragment("? / ?", f.commission, r.risk_at_entry))
+    })
+    |> Repo.all()
+    |> Map.new(fn row -> {row.strategy_version_id, row.avg_commission_r} end)
+  end
+
+  # Gate E's own basis: expectancy_r minus the average per-fill
+  # commission (in R-units, summed across both legs) — nil (never
+  # coerced to zero) whenever either input is missing, same
+  # "understating cost by guessing is worse than saying unknown"
+  # posture this module already uses elsewhere.
+  defp cost_margin(nil, _avg_commission_r, _n_closes), do: nil
+  defp cost_margin(_expectancy_r, nil, _n_closes), do: nil
+  defp cost_margin(_expectancy_r, _avg_commission_r, 0), do: nil
+
+  defp cost_margin(expectancy_r, avg_commission_r, _n_closes) do
+    # avg_commission_r is per-fill; two fills (entry + exit) per closed
+    # run, so double it for a whole-round-trip cost estimate.
+    Decimal.sub(expectancy_r, Decimal.mult(avg_commission_r, 2))
+  end
+
+  defp exit_reason_histogram_by_version(version_ids) do
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids)
+    |> where([r], r.status == "closed")
+    |> where([r], not r.is_churn)
+    |> where([r], not is_nil(r.exit_reason))
+    |> group_by([r], [r.strategy_version_id, r.exit_reason])
+    |> select([r], {r.strategy_version_id, r.exit_reason, count(r.id)})
+    |> Repo.all()
+    |> Enum.group_by(fn {version_id, _reason, _count} -> version_id end)
+    |> Map.new(fn {version_id, rows} ->
+      {version_id, Map.new(rows, fn {_id, reason, count} -> {reason, count} end)}
+    end)
+  end
+
+  defp last_traded_on_by_version(version_ids) do
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids)
+    |> where([r], r.status == "closed")
+    |> where([r], not is_nil(r.exit_at))
+    |> group_by([r], r.strategy_version_id)
+    |> select([r], {r.strategy_version_id, max(r.exit_at)})
+    |> Repo.all()
+    |> Map.new()
+  end
+
+  # Churn + never-entered-fill exclusions, for the Churn column and
+  # gate C's own denominator — mirrors expectancy_r_stats_by_version/1's
+  # own is_churn filter, just counting the complement instead.
+  defp excluded_run_stats_by_version(version_ids) do
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids)
+    |> where([r], r.status == "closed")
+    |> where([r], r.is_churn)
+    |> group_by([r], r.strategy_version_id)
+    |> select([r], %{
+      strategy_version_id: r.strategy_version_id,
+      count: count(r.id),
+      pnl: sum(r.realized_pnl_net)
+    })
+    |> Repo.all()
+    |> Map.new(fn row ->
+      {row.strategy_version_id, %{count: row.count, pnl: row.pnl || Decimal.new(0)}}
+    end)
+  end
+
   # --- Performance snapshots --------------------------------------------------
   #
   # v1 of trading_system's own StrategyPerformanceSnapshot, scaled down —
@@ -1231,7 +1512,8 @@ defmodule TradingOptionsSim.Sim do
   # --- Cron/Oban health (System Performance page) ---------------------------
 
   @cron_workers [
-    TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker
+    TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker,
+    TradingOptionsSim.Sim.Workers.PerformanceSnapshotWorker
   ]
 
   # Jobs sitting in one of these states are pending/stuck work, not

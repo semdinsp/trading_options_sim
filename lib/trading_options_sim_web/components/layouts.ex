@@ -90,6 +90,14 @@ defmodule TradingOptionsSimWeb.Layouts do
           </li>
           <li>
             <a
+              href="/candidates"
+              class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+            >
+              <.icon name="hero-trophy" class="h-4 w-4 mr-1" /> Candidates
+            </a>
+          </li>
+          <li>
+            <a
               href="/system-performance"
               class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
             >
@@ -99,9 +107,11 @@ defmodule TradingOptionsSimWeb.Layouts do
           <li>
             <a
               href="/settings"
+              title="Settings"
+              aria-label="Settings"
               class="rounded-none border border-transparent hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
             >
-              <.icon name="hero-cog-6-tooth" class="h-4 w-4 mr-1" /> Settings
+              <.icon name="hero-cog-6-tooth" class="h-4 w-4" />
             </a>
           </li>
         </ul>

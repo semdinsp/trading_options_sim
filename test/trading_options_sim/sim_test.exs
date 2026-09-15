@@ -912,4 +912,141 @@ defmodule TradingOptionsSim.SimTest do
       assert DateTime.compare(most_recent.period_end, oldest.period_end) == :gt
     end
   end
+
+  describe "full_universe_version_metrics/0" do
+    defp candidate_run_fixture(version, attrs) do
+      {:ok, run} =
+        Sim.open_sim_run(
+          version,
+          Map.merge(
+            %{
+              symbol: "CAND1",
+              expiry: "20271231",
+              strike: Decimal.new("150.00"),
+              right: "C",
+              multiplier: 100,
+              direction: "long"
+            },
+            Map.take(attrs, [:symbol])
+          )
+        )
+
+      now = DateTime.utc_now()
+      entry_price = Decimal.new("5.00")
+      risk_at_entry = Sim.compute_risk_at_entry(entry_price, 100, 1)
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{
+            action: "buy",
+            quantity: 1,
+            fill_price: entry_price,
+            filled_at: now,
+            commission: Decimal.new("1.68")
+          },
+          %{entry_at: now, entry_price: entry_price, risk_at_entry: risk_at_entry}
+        )
+
+      {:ok, {_fill, run}} =
+        Sim.record_exit_fill(
+          run,
+          %{
+            action: "sell",
+            quantity: 1,
+            fill_price: Map.fetch!(attrs, :exit_price),
+            filled_at: now,
+            commission: Decimal.new("1.68")
+          },
+          %{
+            exit_at: now,
+            exit_price: Map.fetch!(attrs, :exit_price),
+            exit_reason: Map.get(attrs, :exit_reason, "target_hit"),
+            realized_pnl: Map.fetch!(attrs, :realized_pnl),
+            realized_pnl_net: Map.fetch!(attrs, :realized_pnl)
+          }
+        )
+
+      run
+    end
+
+    test "computes n_closes/expectancy_r/realized_pnl for a discovery version" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      for _ <- 1..2 do
+        candidate_run_fixture(version, %{
+          symbol: "CAND2",
+          exit_price: Decimal.new("6.00"),
+          realized_pnl: Decimal.new("100.00")
+        })
+      end
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert row.n_closes == 2
+      assert row.lifecycle_stage == "discovery"
+      refute is_nil(row.expectancy_r)
+      assert Decimal.equal?(row.realized_pnl, Decimal.new("200.00"))
+    end
+
+    test "excludes churned runs from expectancy_r/realized_pnl but counts them as excluded" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      run =
+        candidate_run_fixture(version, %{
+          symbol: "CAND3",
+          exit_price: Decimal.new("6.00"),
+          realized_pnl: Decimal.new("100.00")
+        })
+
+      {:ok, _run} = run |> TradingOptionsSim.Sim.SimRun.churn_changeset() |> Repo.update()
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert row.n_closes == 0
+      assert row.excluded_count == 1
+      assert Decimal.equal?(row.excluded_pnl, Decimal.new("100.00"))
+    end
+
+    test "only returns discovery/quarantine versions, not retired ones" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{version: 1, target_pool_id: pool.id})
+      {:ok, version} = Sim.downgrade_strategy_version(version, "retired")
+
+      refute Sim.full_universe_version_metrics()
+             |> Enum.any?(&(&1.strategy_version_id == version.id))
+    end
+
+    test "builds an exit_reason_histogram across closed runs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      candidate_run_fixture(version, %{
+        symbol: "CAND4",
+        exit_price: Decimal.new("6.00"),
+        realized_pnl: Decimal.new("100.00"),
+        exit_reason: "rule_exit"
+      })
+
+      candidate_run_fixture(version, %{
+        symbol: "CAND4",
+        exit_price: Decimal.new("4.00"),
+        realized_pnl: Decimal.new("-100.00"),
+        exit_reason: "expiry"
+      })
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert row.exit_reason_histogram == %{"rule_exit" => 1, "expiry" => 1}
+    end
+  end
 end
