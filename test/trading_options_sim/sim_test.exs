@@ -772,4 +772,144 @@ defmodule TradingOptionsSim.SimTest do
       assert %TradingOptionsSim.Sim.Strategy{} = run.strategy_version.strategy
     end
   end
+
+  describe "snapshot_version/2" do
+    defp closed_run_fixture(version, attrs) do
+      {:ok, run} =
+        Sim.open_sim_run(
+          version,
+          Map.merge(
+            %{
+              symbol: "SNAP1",
+              expiry: "20271231",
+              strike: Decimal.new("150.00"),
+              right: "C",
+              multiplier: 100,
+              direction: "long"
+            },
+            attrs
+          )
+        )
+
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{
+            action: "buy",
+            quantity: 1,
+            fill_price: Decimal.new("5.00"),
+            filled_at: now,
+            commission: Decimal.new("1.68")
+          },
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      {:ok, {_fill, run}} =
+        Sim.record_exit_fill(
+          run,
+          %{
+            action: "sell",
+            quantity: 1,
+            fill_price: Decimal.new("6.00"),
+            filled_at: now,
+            commission: Decimal.new("1.68")
+          },
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "target_hit",
+            realized_pnl: Decimal.new("100.00"),
+            realized_pnl_net: Decimal.new("96.64")
+          }
+        )
+
+      run
+    end
+
+    test "is a no-op when the version has no closed runs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert Sim.snapshot_version(version) == :ok
+      assert Sim.list_performance_snapshots(version) == []
+    end
+
+    test "computes n_trades/win_rate/gross+net pnl/commission from closed runs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+
+      closed_run_fixture(version, %{symbol: "SNAP2"})
+
+      assert {:ok, snapshot} = Sim.snapshot_version(version)
+      assert snapshot.n_trades == 1
+      assert snapshot.n_wins == 1
+      assert snapshot.n_losses == 0
+      assert Decimal.equal?(snapshot.win_rate, Decimal.new(1))
+      assert Decimal.equal?(snapshot.realized_pnl_gross, Decimal.new("100.00"))
+      assert Decimal.equal?(snapshot.realized_pnl_net, Decimal.new("96.64"))
+      assert Decimal.equal?(snapshot.total_commission, Decimal.new("3.36"))
+      assert snapshot.lifecycle_stage == "discovery"
+    end
+
+    test "period_start is the version's activated_at when set" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+      closed_run_fixture(version, %{symbol: "SNAP3"})
+
+      assert {:ok, snapshot} = Sim.snapshot_version(version)
+      assert DateTime.compare(snapshot.period_start, version.activated_at) == :eq
+    end
+
+    test "period_start falls back to inserted_at when never activated" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      closed_run_fixture(version, %{symbol: "SNAP4"})
+
+      assert {:ok, snapshot} = Sim.snapshot_version(version)
+      assert DateTime.compare(snapshot.period_start, version.inserted_at) == :eq
+    end
+  end
+
+  describe "snapshot_all_active_versions/0" do
+    test "snapshots discovery/quarantine/test_portfolio versions with closed runs, skips the rest" do
+      strategy = strategy_fixture()
+
+      traded_version = version_fixture(strategy, %{version: 1})
+      closed_run_fixture(traded_version, %{symbol: "SNAPALL1"})
+
+      untraded_version = version_fixture(strategy, %{version: 2})
+
+      pool = target_pool_fixture()
+      retired_version = version_fixture(strategy, %{version: 3, target_pool_id: pool.id})
+      {:ok, retired_version} = Sim.downgrade_strategy_version(retired_version, "retired")
+      closed_run_fixture(retired_version, %{symbol: "SNAPALL3"})
+
+      counts = Sim.snapshot_all_active_versions()
+
+      assert counts.snapshotted == 1
+      assert counts.skipped == 1
+
+      assert [_snapshot] = Sim.list_performance_snapshots(traded_version)
+      assert Sim.list_performance_snapshots(untraded_version) == []
+      assert Sim.list_performance_snapshots(retired_version) == []
+    end
+  end
+
+  describe "list_performance_snapshots/1" do
+    test "returns snapshots most-recent-first" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      closed_run_fixture(version, %{symbol: "SNAPLIST1"})
+
+      {:ok, _first} = Sim.snapshot_version(version, ~U[2026-09-14 21:00:00Z])
+      {:ok, _second} = Sim.snapshot_version(version, ~U[2026-09-15 21:00:00Z])
+
+      [most_recent, oldest] = Sim.list_performance_snapshots(version)
+      assert DateTime.compare(most_recent.period_end, oldest.period_end) == :gt
+    end
+  end
 end
