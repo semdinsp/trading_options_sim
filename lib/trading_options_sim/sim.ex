@@ -11,6 +11,7 @@ defmodule TradingOptionsSim.Sim do
   alias TradingOptionsSim.Sim.{
     ApiToken,
     ExchangeSession,
+    PerformanceSnapshot,
     SimFill,
     SimRun,
     Strategy,
@@ -1033,6 +1034,129 @@ defmodule TradingOptionsSim.Sim do
     |> where([f, r], r.strategy_version_id == ^strategy_version_id)
     |> select([f], count(f.id))
     |> Repo.one()
+  end
+
+  # --- Performance snapshots --------------------------------------------------
+  #
+  # v1 of trading_system's own StrategyPerformanceSnapshot, scaled down —
+  # see PerformanceSnapshot's own moduledoc for what's ported and what's
+  # deliberately deferred.
+
+  @snapshot_lifecycle_stages ~w(discovery quarantine test_portfolio)
+
+  @doc """
+  Snapshots every non-deleted version currently in `discovery`,
+  `quarantine`, or `test_portfolio` — `retired` is excluded (a retired
+  version's track record doesn't change; there's nothing new to
+  compute) — writing one `PerformanceSnapshot` row per version that has
+  at least one closed run in its window (see `snapshot_version/2` — a
+  version with none is a no-op, not an all-nil row). Called by
+  `TradingOptionsSim.Sim.Workers.PerformanceSnapshotWorker`, same
+  "delegator + counts" shape `trading_system`'s own
+  `snapshot_all_active_versions/0` uses.
+  """
+  @spec snapshot_all_active_versions() :: %{
+          snapshotted: non_neg_integer(),
+          skipped: non_neg_integer()
+        }
+  def snapshot_all_active_versions do
+    computed_at = DateTime.utc_now()
+
+    StrategyVersion
+    |> where([v], is_nil(v.deleted_at))
+    |> where([v], v.lifecycle_stage in @snapshot_lifecycle_stages)
+    |> Repo.all()
+    |> Enum.reduce(%{snapshotted: 0, skipped: 0}, fn version, acc ->
+      case snapshot_version(version, computed_at) do
+        {:ok, _snapshot} -> Map.update!(acc, :snapshotted, &(&1 + 1))
+        :ok -> Map.update!(acc, :skipped, &(&1 + 1))
+      end
+    end)
+  end
+
+  @doc """
+  Computes and persists one `PerformanceSnapshot` for `version`, over
+  `version.activated_at` (or `inserted_at`, if never activated) through
+  `computed_at` — "this version's whole track record to date", the same
+  cumulative-since-X window `trading_system`'s own
+  `snapshot_version_mode/5` uses (confirmed by reading that function
+  directly), not a single calendar day.
+
+  A no-op (`:ok`, writes nothing) when there are no closed runs in that
+  window — same choice `trading_system` makes, avoiding an all-nil row
+  for a version that hasn't traded yet.
+  """
+  @spec snapshot_version(StrategyVersion.t(), DateTime.t()) ::
+          {:ok, PerformanceSnapshot.t()} | :ok
+  def snapshot_version(%StrategyVersion{} = version, computed_at \\ DateTime.utc_now()) do
+    period_start = version.activated_at || version.inserted_at
+
+    closed_runs =
+      SimRun
+      |> where([r], r.strategy_version_id == ^version.id and r.status == "closed")
+      |> where([r], r.exit_at >= ^period_start)
+      |> preload(:sim_fills)
+      |> Repo.all()
+
+    if closed_runs == [] do
+      :ok
+    else
+      %PerformanceSnapshot{}
+      |> PerformanceSnapshot.changeset(%{
+        strategy_version_id: version.id,
+        lifecycle_stage: version.lifecycle_stage,
+        period_start: period_start,
+        period_end: computed_at,
+        computed_at: computed_at,
+        n_trades: length(closed_runs),
+        n_wins: Enum.count(closed_runs, &won?/1),
+        n_losses: Enum.count(closed_runs, &(!won?(&1))),
+        win_rate: win_rate(closed_runs),
+        realized_pnl_gross: sum_decimal(closed_runs, & &1.realized_pnl),
+        realized_pnl_net: sum_decimal_if_all_present(closed_runs, & &1.realized_pnl_net),
+        total_commission: sum_decimal_if_all_present(closed_runs, &total_run_commission/1)
+      })
+      |> Repo.insert()
+    end
+  end
+
+  defp won?(%SimRun{realized_pnl: nil}), do: false
+
+  defp won?(%SimRun{realized_pnl: pnl}), do: Decimal.compare(pnl, Decimal.new(0)) == :gt
+
+  # Only ever called with a non-empty list — snapshot_version/2's own
+  # empty-list branch short-circuits to :ok before this is reached.
+  defp win_rate(closed_runs) do
+    wins = Enum.count(closed_runs, &won?/1)
+    Decimal.div(Decimal.new(wins), Decimal.new(length(closed_runs)))
+  end
+
+  defp sum_decimal(items, fun) do
+    Enum.reduce(items, Decimal.new(0), fn item, acc ->
+      Decimal.add(acc, fun.(item) || Decimal.new(0))
+    end)
+  end
+
+  # nil (never coerced to zero) if any item's own value is nil — same
+  # "understating cost/pnl by guessing zero is worse than saying
+  # unknown" posture total_run_commission/1 already uses.
+  defp sum_decimal_if_all_present(items, fun) do
+    values = Enum.map(items, fun)
+
+    if Enum.any?(values, &is_nil/1) do
+      nil
+    else
+      Enum.reduce(values, Decimal.new(0), &Decimal.add(&2, &1))
+    end
+  end
+
+  @doc "Every `PerformanceSnapshot` for `version`, most-recent-first."
+  @spec list_performance_snapshots(StrategyVersion.t()) :: [PerformanceSnapshot.t()]
+  def list_performance_snapshots(%StrategyVersion{id: strategy_version_id}) do
+    PerformanceSnapshot
+    |> where([s], s.strategy_version_id == ^strategy_version_id)
+    |> order_by([s], desc: s.period_end)
+    |> Repo.all()
   end
 
   # --- API tokens -----------------------------------------------------------

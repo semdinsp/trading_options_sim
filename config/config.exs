@@ -27,7 +27,16 @@ config :trading_options_sim, Oban,
        # reasoning (see that worker's moduledoc for the 2026-07-31
        # incident this timing avoids: checking Date.utc_today() at
        # 07:00 UTC finds a day that hasn't traded yet).
-       {"0 7 * * *", TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker}
+       {"0 7 * * *", TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker},
+       # 21:00 UTC — 1 hour after the US options market's 4pm ET close
+       # during EDT (drifts to 5pm ET during EST — a fixed UTC time, not
+       # derived from any ExchangeSession, same simplicity trade-off
+       # QuarantineEligibilityWorker's own fixed 07:00 UTC slot makes).
+       # Deliberately a separate slot from the 07:00 UTC one above, not
+       # stacked with it — see PerformanceSnapshotWorker's own moduledoc
+       # for why "shortly after today's close" and "after yesterday's
+       # day is fully done" are different timing requirements.
+       {"0 21 * * *", TradingOptionsSim.Sim.Workers.PerformanceSnapshotWorker}
      ]},
     {Oban.Plugins.Pruner, max_age: 8 * 24 * 60 * 60}
   ]
