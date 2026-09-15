@@ -1,9 +1,9 @@
 defmodule TradingOptionsSim.ContractMonitor do
   @moduledoc """
-  One GenServer per `{sim_run_id, contract_key}` — evaluates a strategy
-  version's entry/exit rules against a synthetically-priced option
-  contract for exactly one underlying, and records simulated fills on a
-  rule transition. See `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §5.
+  One GenServer per `{strategy_version_id, contract_key}` — evaluates a
+  strategy version's entry/exit rules against a synthetically-priced
+  option contract for exactly one underlying, and records simulated
+  fills on a rule transition. See `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §5.
 
   **Event-driven by construction, not a poll/worker loop** — reacts the
   instant a relevant tick arrives via its own local PubSub subscription
@@ -156,32 +156,48 @@ defmodule TradingOptionsSim.ContractMonitor do
   @type contract_key :: {String.t(), String.t(), Decimal.t(), String.t()}
 
   @doc """
-  Builds the `{run_id, contract_key_string}` Registry key — `contract_key`
-  is serialized as a stable string per plan §1
+  Builds the `{strategy_version_id, contract_key_string}` Registry key —
+  `contract_key` is serialized as a stable string per plan §1
   (`"AAPL:20270115:150.00:C"`).
+
+  Keyed by `strategy_version_id`, not `sim_run_id` — this monitor's
+  identity is the (version, contract) pair it's watching, which stays
+  stable across an entry/exit cycle even though the `SimRun` underneath
+  it closes and (on the next activation) a new one opens. Re-keyed
+  2026-09-15 from the original `{sim_run_id, contract_key}` scheme:
+  once a run closed, its monitor — genuinely still alive, still
+  watching for the next entry signal — became permanently
+  undiscoverable by `whereis/2`, since the closed run's own id was the
+  only key anything had left to look it up by. Confirmed live: this
+  made `StrategyVersionDetailLive` (and `SimActivator.deactivate/1`)
+  unable to tell "monitor alive but flat" apart from "never activated"
+  the instant a rule-triggered exit fired — both showed as "Not
+  running" even though the process was running and correctly evaluating
+  ticks. `strategy_version_id` never changes for the life of a running
+  monitor, so this gap can't recur.
   """
   @spec registry_key(String.t(), contract_key()) :: {String.t(), String.t()}
-  def registry_key(run_id, {symbol, expiry, strike, right}) do
-    {run_id, "#{symbol}:#{expiry}:#{Decimal.to_string(strike)}:#{right}"}
+  def registry_key(strategy_version_id, {symbol, expiry, strike, right}) do
+    {strategy_version_id, "#{symbol}:#{expiry}:#{Decimal.to_string(strike)}:#{right}"}
   end
 
   def start_link(opts) do
-    sim_run_id = Keyword.fetch!(opts, :sim_run_id)
+    strategy_version = Keyword.fetch!(opts, :strategy_version)
     contract_key = Keyword.fetch!(opts, :contract_key)
 
     GenServer.start_link(__MODULE__, opts,
       name:
         {:via, Registry,
-         {TradingOptionsSim.MonitorRegistry, registry_key(sim_run_id, contract_key)}}
+         {TradingOptionsSim.MonitorRegistry, registry_key(strategy_version.id, contract_key)}}
     )
   end
 
-  @doc "Looks up the running monitor for `{sim_run_id, contract_key}`, if any."
+  @doc "Looks up the running monitor for `{strategy_version_id, contract_key}`, if any."
   @spec whereis(String.t(), contract_key()) :: pid() | nil
-  def whereis(sim_run_id, contract_key) do
+  def whereis(strategy_version_id, contract_key) do
     case Registry.lookup(
            TradingOptionsSim.MonitorRegistry,
-           registry_key(sim_run_id, contract_key)
+           registry_key(strategy_version_id, contract_key)
          ) do
       [{pid, _value}] -> pid
       [] -> nil
@@ -289,7 +305,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   # real-trading_hub-subscription lifecycle this attach/detach pairing
   # drives. Multiple ContractMonitors for the same contract share one
   # listener (Registry-keyed by occ_symbol, not by this monitor's own
-  # {sim_run_id, contract_key}) — each one attach/1es on its own init/1
+  # {strategy_version_id, contract_key}) — each one attach/1es on its own init/1
   # and detach/1es on its own terminate/2, so the listener's real
   # trading_hub subscription only ever drops once every monitor sharing
   # it has gone.

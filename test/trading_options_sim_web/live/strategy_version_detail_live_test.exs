@@ -131,6 +131,47 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
       assert length(Sim.list_open_sim_runs(version)) == 1
     end
 
+    test "still shows Running (flat) after a rule-triggered exit closes the run", %{conn: conn} do
+      # Confirmed live 2026-09-15: before ContractMonitor's Registry key
+      # was re-keyed to {strategy_version_id, contract_key}, this page
+      # showed "Not running" for a monitor that was genuinely still
+      # alive and watching — it had just entered and exited within
+      # seconds on the same oscillating signal, and whereis/2 (keyed by
+      # the now-closed run's own id) could no longer find it.
+      strategy = strategy_fixture()
+      pool = pool_fixture("DETAILSYM5")
+
+      version =
+        version_fixture(strategy, %{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          rules: %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+          }
+        })
+
+      {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+
+      message = fn price ->
+        %{type: :price, symbol: "DETAILSYM5", source: :ibkr, data: %{last: price}}
+        |> Map.put(:__struct__, TradingHub.Message)
+      end
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM5", message.(130.0))
+      Process.sleep(50)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM5", message.(150.0))
+      Process.sleep(50)
+
+      assert Sim.list_open_sim_runs(version) == []
+
+      {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      assert html =~ "Running"
+      refute html =~ "No monitor running for this symbol"
+      assert html =~ "Flat — no open position"
+    end
+
     test "deactivating stops the monitor", %{conn: conn} do
       strategy = strategy_fixture()
       pool = pool_fixture("DETAILSYM3")

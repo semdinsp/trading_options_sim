@@ -156,6 +156,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     version = Sim.get_strategy_version_detail!(id)
     open_runs = Sim.list_open_sim_runs(version)
     runs_by_symbol = Map.new(open_runs, &{&1.symbol, &1})
+    contract_template = SimActivator.resolve_contract_template(version.option_leg_config)
 
     members =
       version.target_pool
@@ -163,7 +164,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
         nil -> []
         pool -> pool.target_pool_members
       end
-      |> Enum.map(&build_member_entry(version, &1, Map.get(runs_by_symbol, &1.symbol)))
+      |> Enum.map(
+        &build_member_entry(version, contract_template, &1, Map.get(runs_by_symbol, &1.symbol))
+      )
       |> Enum.sort_by(& &1.member.symbol)
 
     is_active? = open_runs != []
@@ -174,24 +177,42 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     |> assign(:is_active?, is_active?)
   end
 
-  # No open run for this member — never activated, or activated then
-  # closed. Still worth showing the most recent closed run (if any), so
-  # "was traded, closed, not currently running" reads differently from
-  # "never touched."
-  defp build_member_entry(version, member, nil) do
+  # No open run for this member — never activated, activated then
+  # closed, or genuinely flat right now. `whereis/2` is keyed by
+  # `{strategy_version_id, contract_key}` (see ContractMonitor's own
+  # doc on why), so a still-alive, still-watching monitor for this
+  # member's resolved contract stays discoverable even with no open
+  # run — this is what actually distinguishes "flat but running" from
+  # "never activated"/"closed and gone" here, since there's no run to
+  # read the monitor's identity from otherwise. Falls back to `nil`
+  # (never activated look) when option_leg_config isn't resolvable —
+  # same "don't guess a contract" posture SimActivator.activate/1 takes.
+  defp build_member_entry(version, contract_template, member, nil) do
+    pid =
+      case contract_template do
+        {:ok, template} ->
+          contract_key = {member.symbol, template.expiry, template.strike, template.right}
+          ContractMonitor.whereis(version.id, contract_key)
+
+        {:error, :unsupported_leg_config} ->
+          nil
+      end
+
+    snapshot = pid && fetch_monitor_snapshot(pid)
+
     %{
       member: member,
       run: nil,
-      running?: false,
-      snapshot: nil,
+      running?: not is_nil(snapshot),
+      snapshot: snapshot,
       entry_fill: nil,
-      last_closed_run: Sim.last_closed_sim_run(version, member.symbol)
+      last_closed_run: if(is_nil(snapshot), do: Sim.last_closed_sim_run(version, member.symbol))
     }
   end
 
-  defp build_member_entry(_version, member, run) do
+  defp build_member_entry(version, _contract_template, member, run) do
     contract_key = {run.symbol, run.expiry, run.strike, run.right}
-    pid = ContractMonitor.whereis(run.id, contract_key)
+    pid = ContractMonitor.whereis(version.id, contract_key)
     snapshot = pid && fetch_monitor_snapshot(pid)
     entry_fill = if snapshot && snapshot.position_open?, do: entry_fill(run)
 

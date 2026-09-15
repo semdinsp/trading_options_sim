@@ -29,8 +29,9 @@ defmodule TradingOptionsSim.SimActivator do
   @doc """
   Activates `version`: for each of its target pool's members, resolves a
   contract per `option_leg_config` and starts a `ContractMonitor` (a
-  no-op if one is already running for that `{sim_run_id, contract_key}`
-  — mirrors `StrategyActivator`'s own `whereis/2`-before-start guard).
+  no-op if one is already running for that `{strategy_version_id,
+  contract_key}` — mirrors `StrategyActivator`'s own `whereis/2`-before-
+  start guard).
 
   Returns `{:error, reason}` if the version has no target pool or an
   unsupported `option_leg_config`.
@@ -131,16 +132,16 @@ defmodule TradingOptionsSim.SimActivator do
 
     terminated_count =
       open_runs
-      |> Enum.map(&stop_monitor_for_run/1)
+      |> Enum.map(&stop_monitor_for_run(version.id, &1))
       |> Enum.count(& &1)
 
     {:ok, terminated_count}
   end
 
-  defp stop_monitor_for_run(run) do
+  defp stop_monitor_for_run(strategy_version_id, run) do
     contract_key = {run.symbol, run.expiry, run.strike, run.right}
 
-    case ContractMonitor.whereis(run.id, contract_key) do
+    case ContractMonitor.whereis(strategy_version_id, contract_key) do
       nil ->
         false
 
@@ -173,18 +174,31 @@ defmodule TradingOptionsSim.SimActivator do
     :exit, _reason -> :ok
   end
 
-  defp resolve_contract_template(%{
-         "expiry_selection" => expiry_selection,
-         "fixed_expiry" => expiry,
-         "strike_selection" => "fixed_strike",
-         "fixed_strike" => strike,
-         "right" => right
-       })
-       when expiry_selection in ["fixed", "leaps"] and right in ["C", "P"] do
+  @doc """
+  Resolves `option_leg_config` to a `%{expiry:, strike:, right:}`
+  contract template — the same v1-only `"fixed_strike"`/`"fixed"`
+  resolution `activate/1` itself uses, exposed publicly so
+  `StrategyVersionDetailLive` can derive a member's contract identity
+  without an open `SimRun` to read it from (needed to look up a
+  monitor that's alive but flat — see `ContractMonitor.registry_key/2`'s
+  own doc on why `SimRun`-derived contract fields alone aren't enough
+  once a run has closed).
+  """
+  @spec resolve_contract_template(map()) ::
+          {:ok, %{expiry: String.t(), strike: Decimal.t(), right: String.t()}}
+          | {:error, :unsupported_leg_config}
+  def resolve_contract_template(%{
+        "expiry_selection" => expiry_selection,
+        "fixed_expiry" => expiry,
+        "strike_selection" => "fixed_strike",
+        "fixed_strike" => strike,
+        "right" => right
+      })
+      when expiry_selection in ["fixed", "leaps"] and right in ["C", "P"] do
     {:ok, %{expiry: expiry, strike: Decimal.new(to_string(strike)), right: right}}
   end
 
-  defp resolve_contract_template(_config), do: {:error, :unsupported_leg_config}
+  def resolve_contract_template(_config), do: {:error, :unsupported_leg_config}
 
   defp start_for_member(version, member, contract_template) do
     contract_key =
@@ -228,7 +242,7 @@ defmodule TradingOptionsSim.SimActivator do
   end
 
   defp start_or_find_monitor(version, run_id, contract_key, exchange) do
-    case ContractMonitor.whereis(run_id, contract_key) do
+    case ContractMonitor.whereis(version.id, contract_key) do
       nil ->
         spec = %{
           id: {run_id, contract_key},

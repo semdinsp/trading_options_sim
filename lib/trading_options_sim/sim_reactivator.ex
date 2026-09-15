@@ -34,8 +34,9 @@ defmodule TradingOptionsSim.SimReactivator do
   (`Process.monitor/1`, re-armed after every `:DOWN`) and re-run the
   same reactivation pass whenever it goes down — `SimActivator.activate/1`
   is idempotent (guarded by `ContractMonitor.whereis/2`, a no-op against
-  an already-running monitor for the same `{sim_run_id, contract_key}`),
-  so running it redundantly alongside the boot-time pass is safe.
+  an already-running monitor for the same `{strategy_version_id,
+  contract_key}`), so running it redundantly alongside the boot-time
+  pass is safe.
 
   ## Retry on failure
 

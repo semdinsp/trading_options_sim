@@ -104,9 +104,9 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     test "a started monitor can be looked up via whereis/2" do
       version = version_fixture(%{})
       key = contract_key("REGKEY1")
-      {pid, run} = start_monitor(version, key)
+      {pid, _run} = start_monitor(version, key)
 
-      assert ContractMonitor.whereis(run.id, key) == pid
+      assert ContractMonitor.whereis(version.id, key) == pid
     end
   end
 
@@ -187,6 +187,34 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       closed_run = Sim.get_sim_run!(run.id)
       assert closed_run.status == "closed"
       assert closed_run.exit_reason == "rule_exit"
+    end
+
+    test "the monitor stays discoverable via whereis/2 after its run closes" do
+      # Confirmed live 2026-09-15: whereis/2 used to be keyed by
+      # {sim_run_id, contract_key} — once a run closed, its still-alive,
+      # still-watching monitor became permanently undiscoverable by
+      # anything that only had the (now-closed) run's own id to look it
+      # up by. Re-keyed by {strategy_version_id, contract_key} (see
+      # ContractMonitor.registry_key/2's own doc) precisely so this
+      # stays true.
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+        })
+
+      symbol = "EXITTEST2"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key)
+
+      broadcast_underlying_price(symbol, 130.0)
+      Process.sleep(50)
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert Sim.get_sim_run!(run.id).status == "closed"
+      assert Process.alive?(pid)
+      assert ContractMonitor.whereis(version.id, key) == pid
     end
   end
 

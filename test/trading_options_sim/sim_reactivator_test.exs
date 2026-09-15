@@ -69,13 +69,13 @@ defmodule TradingOptionsSim.SimReactivatorTest do
 
     run = orphaned_open_run_fixture(version, "REACTSYM1")
     contract_key = {run.symbol, run.expiry, run.strike, run.right}
-    assert ContractMonitor.whereis(run.id, contract_key) == nil
+    assert ContractMonitor.whereis(version.id, contract_key) == nil
 
     {:ok, pid} = SimReactivator.start_link()
     Process.sleep(50)
 
     assert Process.alive?(pid)
-    assert is_pid(ContractMonitor.whereis(run.id, contract_key))
+    assert is_pid(ContractMonitor.whereis(version.id, contract_key))
 
     GenServer.stop(pid)
   end
@@ -93,7 +93,7 @@ defmodule TradingOptionsSim.SimReactivatorTest do
 
     [run] = Sim.list_open_sim_runs(version)
     contract_key = {run.symbol, run.expiry, run.strike, run.right}
-    assert ContractMonitor.whereis(run.id, contract_key) == existing_pid
+    assert ContractMonitor.whereis(version.id, contract_key) == existing_pid
 
     GenServer.stop(pid)
   end
@@ -117,7 +117,7 @@ defmodule TradingOptionsSim.SimReactivatorTest do
 
     {:ok, pid} = SimReactivator.start_link()
     Process.sleep(50)
-    assert is_pid(ContractMonitor.whereis(run.id, contract_key))
+    assert is_pid(ContractMonitor.whereis(version.id, contract_key))
 
     # Simulate MonitorSupervisor crashing and restarting empty — send
     # the same :DOWN message SimReactivator's own Process.monitor/1
@@ -127,7 +127,7 @@ defmodule TradingOptionsSim.SimReactivatorTest do
     Process.sleep(50)
 
     assert Process.alive?(pid)
-    assert is_pid(ContractMonitor.whereis(run.id, contract_key))
+    assert is_pid(ContractMonitor.whereis(version.id, contract_key))
 
     GenServer.stop(pid)
   end
