@@ -445,6 +445,58 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
+  describe "list_recent_fills_for_version/2" do
+    test "returns entry and exit fills across every member's contract, most recent first" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      close_run(run_fixture(version, "AAPL"))
+      close_run(run_fixture(version, "MSFT"))
+
+      fills = Sim.list_recent_fills_for_version(version)
+
+      assert length(fills) == 4
+      assert Enum.map(fills, & &1.kind) |> Enum.frequencies() == %{"entry" => 2, "exit" => 2}
+    end
+
+    test "preloads sim_run so symbol/contract fields are available" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      close_run(run_fixture(version, "AAPL"))
+
+      [fill | _] = Sim.list_recent_fills_for_version(version)
+
+      assert fill.sim_run.symbol == "AAPL"
+    end
+
+    test "ignores fills belonging to a different strategy version" do
+      strategy = strategy_fixture()
+      version_a = version_fixture(strategy, %{version: 1})
+      version_b = version_fixture(strategy, %{version: 2})
+      close_run(run_fixture(version_a, "AAPL"))
+      close_run(run_fixture(version_b, "MSFT"))
+
+      fills = Sim.list_recent_fills_for_version(version_a)
+
+      assert Enum.all?(fills, &(&1.sim_run.symbol == "AAPL"))
+    end
+
+    test "respects the limit" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      close_run(run_fixture(version, "AAPL"))
+      close_run(run_fixture(version, "MSFT"))
+
+      assert length(Sim.list_recent_fills_for_version(version, 2)) == 2
+    end
+
+    test "returns an empty list when there are no fills yet" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert Sim.list_recent_fills_for_version(version) == []
+    end
+  end
+
   describe "last_closed_sim_run/2" do
     test "returns nil when no closed run exists for the symbol" do
       strategy = strategy_fixture()
