@@ -22,8 +22,8 @@ defmodule TradingOptionsSim.MCP.Server do
   `GET /api/v1/runs` endpoint's own scope): `list_sim_runs`.
 
   Write tools, each requiring `"mcp:write"`: `create_strategy`,
-  `promote_version`, `downgrade_version`, `activate_version`,
-  `deactivate_version`, `add_strategy_version_tag`.
+  `create_strategy_version`, `promote_version`, `downgrade_version`,
+  `activate_version`, `deactivate_version`, `add_strategy_version_tag`.
 
   Every write tool reuses `CallGuard.rate_limited?/2`'s per-token-and-tool
   bucket (45 calls/60s); every tool (read or write) uses
@@ -56,6 +56,7 @@ defmodule TradingOptionsSim.MCP.Server do
   component(TradingOptionsSim.MCP.Tools.GetTargetPool)
   component(TradingOptionsSim.MCP.Tools.ListTags)
   component(TradingOptionsSim.MCP.Tools.CreateStrategy)
+  component(TradingOptionsSim.MCP.Tools.CreateStrategyVersion)
   component(TradingOptionsSim.MCP.Tools.PromoteVersion)
   component(TradingOptionsSim.MCP.Tools.DowngradeVersion)
   component(TradingOptionsSim.MCP.Tools.ActivateVersion)

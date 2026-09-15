@@ -367,4 +367,112 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     assert conn.resp_body =~ "watch closely"
     assert conn.resp_body =~ "total_count"
   end
+
+  test "create_strategy_version requires mcp:write scope", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Create Version Scope Test"})
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-15", ["mcp:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "create_strategy_version",
+        %{"strategy_id" => strategy.id, "version" => 1},
+        2
+      )
+
+    assert conn.resp_body =~ "insufficient_scope"
+    refute Enum.any?(Sim.list_strategy_versions(nil), &(&1.strategy_id == strategy.id))
+  end
+
+  test "create_strategy_version creates a version with default position_sizing/direction", %{
+    conn: conn
+  } do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Create Version Test"})
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-16", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "create_strategy_version",
+        %{"strategy_id" => strategy.id, "version" => 1},
+        2
+      )
+
+    assert conn.resp_body =~ "version\\\":1"
+    assert conn.resp_body =~ "discovery"
+
+    [version] = Sim.list_strategy_versions(nil) |> Enum.filter(&(&1.strategy_id == strategy.id))
+    assert version.version == 1
+    assert version.direction == "long"
+    assert version.position_sizing == %{"method" => "fixed_qty", "qty" => 1}
+    assert version.lifecycle_stage == "discovery"
+  end
+
+  test "create_strategy_version accepts rules/direction/option_leg_config/target_pool_id", %{
+    conn: conn
+  } do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Create Version Full Test"})
+    {:ok, pool} = Sim.create_target_pool(%{name: "MCP Create Version Pool"})
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-17", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "create_strategy_version",
+        %{
+          "strategy_id" => strategy.id,
+          "version" => 1,
+          "direction" => "short",
+          "target_pool_id" => pool.id,
+          "rules" => %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+          },
+          "option_leg_config" => %{
+            "expiry_selection" => "fixed",
+            "fixed_expiry" => "20271231",
+            "strike_selection" => "fixed_strike",
+            "fixed_strike" => "150.00",
+            "right" => "C"
+          }
+        },
+        2
+      )
+
+    refute conn.resp_body =~ "isError\":true"
+
+    [version] = Sim.list_strategy_versions(nil) |> Enum.filter(&(&1.strategy_id == strategy.id))
+    assert version.direction == "short"
+    assert version.target_pool_id == pool.id
+    assert version.rules["entry"]["value"] == 100
+  end
+
+  test "create_strategy_version returns an error for an unknown strategy_id", %{conn: conn} do
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-18", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "create_strategy_version",
+        %{"strategy_id" => Ecto.UUID.generate(), "version" => 1},
+        2
+      )
+
+    assert conn.resp_body =~ "no strategy with id"
+  end
 end
