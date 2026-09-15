@@ -44,7 +44,23 @@ defmodule TradingOptionsSim.Application do
         # §5/§6) — Registry + DynamicSupervisor pair, mirroring trading_live's
         # MonitorRegistry/MonitorSupervisor.
         {Registry, keys: :unique, name: TradingOptionsSim.MonitorRegistry},
-        {DynamicSupervisor, name: TradingOptionsSim.MonitorSupervisor, strategy: :one_for_one},
+        # max_restarts/max_seconds raised well above DynamicSupervisor's
+        # own default (3 restarts in 5 seconds) — at the default, a burst
+        # of ContractMonitor crashes (e.g. a bad tick shared across every
+        # monitor watching the same underlying) would exceed the
+        # supervisor's own restart intensity, terminate it, and come back
+        # from TradingOptionsSim.Supervisor with zero children — nothing
+        # re-populates a DynamicSupervisor's dynamically-started children
+        # after its own restart except TradingOptionsSim.SimReactivator's
+        # :DOWN handler (see that module's own moduledoc), which only
+        # exists because trading_live hit exactly this failure mode live
+        # and fixed it the identical way (confirmed by reading that
+        # module directly).
+        {DynamicSupervisor,
+         name: TradingOptionsSim.MonitorSupervisor,
+         strategy: :one_for_one,
+         max_restarts: 100,
+         max_seconds: 10},
         TradingOptionsSim.PriceRelay,
         TradingOptionsSim.SignalConnection,
         # Exchange-hours support (OPTIONS_SIM_ARCHITECTURE_PLAN.md §5c) —
@@ -52,29 +68,33 @@ defmodule TradingOptionsSim.Application do
         # check, EodCloser force-closes open positions near session
         # close. Ported near-verbatim from trading_live's identical pair.
         TradingOptionsSim.ExchangeSessionCache,
-        TradingOptionsSim.EodCloser,
-        # MCP write-tool rate-limit table — see CallGuard.TableOwner's own
-        # moduledoc for why this must be a permanent supervised owner,
-        # not a lazily-created ETS table inside a short-lived MCP
-        # session process.
-        TradingOptionsSim.MCP.CallGuard.TableOwner,
-        # Binds no port of its own: :streamable_http here only registers a
-        # named transport process the Plug mounted at `/mcp` in
-        # TradingOptionsSimWeb.Router talks to, riding on the main
-        # Endpoint below. `start:` left unset in dev/prod —
-        # Anubis.Server.Supervisor's own should_start?/1 defers to
-        # Phoenix's "am I actually serving HTTP" signal, matching
-        # config/test.exs's Endpoint `server: false`. config/test.exs
-        # overrides this to `true` via :trading_options_sim,
-        # :mcp_force_start specifically so an MCP integration test can
-        # exercise the real `/mcp` HTTP transport (Plug.Test dispatches
-        # straight into the plug pipeline without a listening socket, so
-        # Anubis's own heuristic would otherwise leave it off there) —
-        # ported from trading_system's identical setup.
-        {TradingOptionsSim.MCP.Server,
-         transport:
-           {:streamable_http, start: Application.get_env(:trading_options_sim, :mcp_force_start)}}
+        TradingOptionsSim.EodCloser
       ] ++
+        reactivator_child() ++
+        [
+          # MCP write-tool rate-limit table — see CallGuard.TableOwner's own
+          # moduledoc for why this must be a permanent supervised owner,
+          # not a lazily-created ETS table inside a short-lived MCP
+          # session process.
+          TradingOptionsSim.MCP.CallGuard.TableOwner,
+          # Binds no port of its own: :streamable_http here only registers a
+          # named transport process the Plug mounted at `/mcp` in
+          # TradingOptionsSimWeb.Router talks to, riding on the main
+          # Endpoint below. `start:` left unset in dev/prod —
+          # Anubis.Server.Supervisor's own should_start?/1 defers to
+          # Phoenix's "am I actually serving HTTP" signal, matching
+          # config/test.exs's Endpoint `server: false`. config/test.exs
+          # overrides this to `true` via :trading_options_sim,
+          # :mcp_force_start specifically so an MCP integration test can
+          # exercise the real `/mcp` HTTP transport (Plug.Test dispatches
+          # straight into the plug pipeline without a listening socket, so
+          # Anubis's own heuristic would otherwise leave it off there) —
+          # ported from trading_system's identical setup.
+          {TradingOptionsSim.MCP.Server,
+           transport:
+             {:streamable_http,
+              start: Application.get_env(:trading_options_sim, :mcp_force_start)}}
+        ] ++
         hub_client_children() ++
         [
           # Start to serve requests, typically the last entry
@@ -85,6 +105,20 @@ defmodule TradingOptionsSim.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: TradingOptionsSim.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # Skipped in :test — SimReactivator queries the Repo from application
+  # boot, before test_helper.exs puts Repo into sandbox :manual mode, so
+  # left on it grabs a connection outside any test's sandbox ownership
+  # and breaks other tests' checkout — identical hazard and identical
+  # fix as trading_live's own reactivate_strategies_on_boot flag
+  # (confirmed by reading that module's config/test.exs directly).
+  defp reactivator_child do
+    if Application.get_env(:trading_options_sim, :reactivate_strategies_on_boot, true) do
+      [TradingOptionsSim.SimReactivator]
+    else
+      []
+    end
   end
 
   # Skipped in :test — no real trading_hub node to connect to, and every
