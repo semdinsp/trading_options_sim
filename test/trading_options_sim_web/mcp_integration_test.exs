@@ -134,4 +134,120 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     updated = Sim.get_strategy_version!(version.id)
     assert updated.lifecycle_stage == "quarantine"
   end
+
+  defp fixed_leg_config do
+    %{
+      "expiry_selection" => "fixed",
+      "fixed_expiry" => "20271231",
+      "strike_selection" => "fixed_strike",
+      "fixed_strike" => "150.00",
+      "right" => "C"
+    }
+  end
+
+  test "activate_version starts monitors for every target-pool member", %{conn: conn} do
+    {:ok, pool} = Sim.create_target_pool(%{name: "MCP Activate Pool"})
+    {:ok, _member} = Sim.add_target_pool_member(pool, %{symbol: "MCPACT1"})
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Activate Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1},
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config()
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-6", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "activate_version", %{"version_id" => version.id}, 2)
+
+    assert conn.resp_body =~ "monitors_running"
+    assert MapSet.member?(Sim.active_strategy_version_ids(), version.id)
+  end
+
+  test "activate_version returns an error for a version with no target pool", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Activate No Pool"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-7", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "activate_version", %{"version_id" => version.id}, 2)
+
+    assert conn.resp_body =~ "target_pool_id"
+    refute MapSet.member?(Sim.active_strategy_version_ids(), version.id)
+  end
+
+  test "activate_version requires mcp:write scope", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Activate Scope"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-8", ["mcp:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "activate_version", %{"version_id" => version.id}, 2)
+    assert conn.resp_body =~ "insufficient_scope"
+  end
+
+  test "deactivate_version stops running monitors", %{conn: conn} do
+    {:ok, pool} = Sim.create_target_pool(%{name: "MCP Deactivate Pool"})
+    {:ok, _member} = Sim.add_target_pool_member(pool, %{symbol: "MCPDEACT1"})
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Deactivate Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1},
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config()
+      })
+
+    {:ok, _pids, []} = TradingOptionsSim.SimActivator.activate(version)
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-9", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "deactivate_version", %{"version_id" => version.id}, 2)
+
+    assert conn.resp_body =~ "monitors_stopped"
+    refute MapSet.member?(Sim.active_strategy_version_ids(), version.id)
+  end
+
+  test "deactivate_version requires mcp:write scope", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Deactivate Scope"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-10", ["mcp:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "deactivate_version", %{"version_id" => version.id}, 2)
+    assert conn.resp_body =~ "insufficient_scope"
+  end
 end
