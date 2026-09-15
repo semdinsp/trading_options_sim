@@ -39,4 +39,16 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     assert html =~ "AAPL"
     assert html =~ "quarantine"
   end
+
+  test "shows the stage counts strip", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "Test Strategy"})
+
+    {:ok, _version} =
+      Sim.create_strategy_version(strategy, %{version: 1, position_sizing: %{}})
+
+    {:ok, _view, html} = live(conn, ~p"/active_strategies")
+
+    assert html =~ "D 1"
+    assert html =~ "Q 0"
+  end
 end

@@ -39,7 +39,9 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   end
 
   defp load_active_versions(socket) do
-    assign(socket, :active_versions, Sim.list_active_strategy_versions())
+    socket
+    |> assign(:active_versions, Sim.list_active_strategy_versions())
+    |> assign(:stage_counts, Sim.strategy_version_stage_counts())
   end
 
   defp direction_chip_class("long"), do: "border-long/40 text-long"
@@ -55,7 +57,10 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash}>
-      <h1 class="text-2xl font-bold uppercase tracking-wide mb-6">Active Strategies</h1>
+      <div class="flex items-center gap-4 mb-6">
+        <h1 class="text-2xl font-bold uppercase tracking-wide">Active Strategies</h1>
+        <.stage_counts_strip counts={@stage_counts} />
+      </div>
 
       <div :if={@active_versions == []} class="border border-base-300 p-8 text-center">
         <p class="font-data text-sm uppercase tracking-wide text-base-content/40">

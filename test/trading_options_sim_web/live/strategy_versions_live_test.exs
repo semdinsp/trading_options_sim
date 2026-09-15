@@ -48,6 +48,20 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
     assert html =~ "discovery"
   end
 
+  test "shows the stage counts strip, unaffected by the current stage filter", %{conn: conn} do
+    strategy = strategy_fixture()
+    discovery_version = version_fixture(strategy, %{version: 1})
+    version_fixture(strategy, %{version: 2})
+    {:ok, _retired} = Sim.downgrade_strategy_version(discovery_version, "retired")
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions?stage=retired")
+
+    # One retired, one still discovery — the strip counts both stages
+    # even though the page itself is filtered to only show "retired".
+    assert html =~ "D 1"
+    assert html =~ "R 1"
+  end
+
   describe "tagging" do
     test "toggling the tag control shows the add-tag form", %{conn: conn} do
       strategy = strategy_fixture()
