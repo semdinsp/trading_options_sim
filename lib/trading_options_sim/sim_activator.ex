@@ -325,6 +325,16 @@ defmodule TradingOptionsSim.SimActivator do
         end
 
       pid ->
+        # Reusing an already-running monitor (this contract's own
+        # long-lived process — see ContractMonitor.registry_key/2's own
+        # doc on why one can outlive any single SimRun) for `run_id` —
+        # update_sim_run_id/2 is the fix for a real, confirmed-live bug:
+        # without this, the monitor kept writing every subsequent
+        # entry/exit onto whatever run it was originally started with,
+        # silently corrupting an old, already-closed run's row instead
+        # of the new one SimActivator just opened (or found). See that
+        # function's own doc for the full incident.
+        :ok = ContractMonitor.update_sim_run_id(pid, run_id)
         pid
     end
   end
