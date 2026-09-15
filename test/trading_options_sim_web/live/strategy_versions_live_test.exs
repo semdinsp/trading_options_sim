@@ -28,6 +28,29 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
     assert html =~ "Test Strategy"
   end
 
+  test "the default (All) view excludes retired versions", %{conn: conn} do
+    strategy = strategy_fixture()
+    _discovery_version = version_fixture(strategy, %{version: 1})
+    retired_version = version_fixture(strategy, %{version: 2})
+    {:ok, _retired} = Sim.downgrade_strategy_version(retired_version, "retired")
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions")
+
+    assert html =~ "v1"
+    refute html =~ "v2"
+    assert Sim.get_strategy_version!(retired_version.id).lifecycle_stage == "retired"
+  end
+
+  test "the explicit Retired filter still shows retired versions", %{conn: conn} do
+    strategy = strategy_fixture()
+    version = version_fixture(strategy)
+    {:ok, _retired} = Sim.downgrade_strategy_version(version, "retired")
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions?stage=retired")
+
+    assert html =~ "Test Strategy"
+  end
+
   test "filters by lifecycle stage, including retired", %{conn: conn} do
     strategy = strategy_fixture()
     discovery_version = version_fixture(strategy, %{version: 1})
@@ -63,7 +86,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
   end
 
   describe "retire/unretire" do
-    test "retiring a version shows it as retired and swaps to an Unretire button", %{conn: conn} do
+    test "retiring a version drops it from the default (All) view — retired is opt-in", %{
+      conn: conn
+    } do
       strategy = strategy_fixture()
       version = version_fixture(strategy)
 
@@ -71,13 +96,17 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
       assert has_element?(view, "button[phx-click=retire][phx-value-id='#{version.id}']")
       refute has_element?(view, "button[phx-click=unretire][phx-value-id='#{version.id}']")
 
-      html =
-        view
-        |> element("button[phx-click=retire][phx-value-id='#{version.id}']")
-        |> render_click()
+      view
+      |> element("button[phx-click=retire][phx-value-id='#{version.id}']")
+      |> render_click()
 
-      assert html =~ "retired"
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "retired"
+      # Retired now, so it's gone from the default "All" view — retired
+      # versions are opt-in via the explicit "Retired" filter button.
+      refute has_element?(view, "button[phx-click=unretire][phx-value-id='#{version.id}']")
+      refute has_element?(view, "h2", "Test Strategy")
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions?stage=retired")
       assert has_element?(view, "button[phx-click=unretire][phx-value-id='#{version.id}']")
     end
 
