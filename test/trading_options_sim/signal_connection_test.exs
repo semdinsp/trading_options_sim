@@ -60,6 +60,13 @@ defmodule TradingOptionsSim.SignalConnectionTest do
     end
   end
 
+  describe "current_regime/0" do
+    test "returns {:error, reason} rather than crashing or hanging when trading_signal can't be reached" do
+      # Same reasoning as request_signal/1's own test above.
+      assert {:error, _reason} = SignalConnection.current_regime()
+    end
+  end
+
   describe "connected?/0" do
     test "returns a boolean without raising" do
       assert is_boolean(SignalConnection.connected?())

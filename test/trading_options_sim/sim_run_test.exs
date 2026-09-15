@@ -171,6 +171,64 @@ defmodule TradingOptionsSim.SimRunTest do
     end
   end
 
+  describe "closed_runs_by_regime/1" do
+    defp close_run(run, context \\ %{}) do
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00"), context: context}
+        )
+
+      {:ok, {_fill, run}} =
+        Sim.record_exit_fill(
+          run,
+          %{action: "sell", quantity: 1, fill_price: Decimal.new("6.00"), filled_at: now},
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "target_hit",
+            realized_pnl: Decimal.new("100.00")
+          }
+        )
+
+      run
+    end
+
+    test "groups closed runs by context[\"regime_label\"]" do
+      version = version_fixture()
+      {:ok, run1} = Sim.open_sim_run(version, run_attrs())
+      {:ok, run2} = Sim.open_sim_run(version, run_attrs())
+      close_run(run1, %{"regime_label" => "calm|up"})
+      close_run(run2, %{"regime_label" => "stressed|down"})
+
+      grouped = Sim.closed_runs_by_regime(version)
+
+      assert Map.keys(grouped) |> Enum.sort() == ["calm|up", "stressed|down"]
+      assert length(grouped["calm|up"]) == 1
+      assert length(grouped["stressed|down"]) == 1
+    end
+
+    test "groups a run with no regime_label under \"uncategorized\"" do
+      version = version_fixture()
+      {:ok, run} = Sim.open_sim_run(version, run_attrs())
+      close_run(run)
+
+      grouped = Sim.closed_runs_by_regime(version)
+
+      assert Map.keys(grouped) == ["uncategorized"]
+    end
+
+    test "only includes closed runs" do
+      version = version_fixture()
+      {:ok, _open_run} = Sim.open_sim_run(version, run_attrs())
+
+      assert Sim.closed_runs_by_regime(version) == %{}
+    end
+  end
+
   describe "total_run_commission/1" do
     test "sums commission across the run's fills" do
       version = version_fixture()

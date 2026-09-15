@@ -973,6 +973,32 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
+  Every closed `SimRun` for `version`, grouped by
+  `context["regime_label"]` (see the `add_context_to_sim_runs`
+  migration's own comment — `"regime_label"` is one of `context`'s
+  first, exploratory keys, not yet a real column). A run with no
+  `regime_label` (never captured, or `trading_signal` was unreachable at
+  entry — see `ContractMonitor.entry_context/1`'s own doc) groups under
+  the literal string `"uncategorized"`, a real, visible bucket key
+  rather than a silently-dropped row — mirrors
+  `TradingLive.PerformanceMetrics.expectancy_by_regime/1`'s identical
+  choice (confirmed by reading that function directly).
+
+  Grouping happens in Elixir after a full fetch, not a SQL `GROUP BY` —
+  same choice `trading_live`'s own regime rollup makes at comparable
+  data volumes (an unindexed JSON key isn't worth a `GROUP BY` until
+  `regime_label` is promoted to its own column, per the migration's own
+  note on when that's worth doing).
+  """
+  @spec closed_runs_by_regime(StrategyVersion.t()) :: %{String.t() => [SimRun.t()]}
+  def closed_runs_by_regime(%StrategyVersion{id: strategy_version_id}) do
+    SimRun
+    |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "closed")
+    |> Repo.all()
+    |> Enum.group_by(&(&1.context["regime_label"] || "uncategorized"))
+  end
+
+  @doc """
   The `limit` most recent `SimFill`s across every `SimRun` belonging to
   `version`, most-recent-first, preloaded with `:sim_run` — a "recent
   fills" panel's data source (`StrategyVersionDetailLive`), showing

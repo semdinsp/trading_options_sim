@@ -68,6 +68,25 @@ defmodule TradingOptionsSim.SignalConnection do
     GenServer.call(__MODULE__, {:request_signal, name}, 10_000)
   end
 
+  @doc """
+  erpc's `TradingSignal.Regime.SessionLabel.current/0` — the current
+  market regime label (`%{label:, vol_state:, trend_state:, ...}`, see
+  that module's own moduledoc), a fixed single remote call rather than a
+  `SignalDefinition`-backed subscription (`request_signal/1` above isn't
+  the right seam for this — regime isn't a numeric rule-tree signal).
+
+  Mirrors `trading_system`'s own `SignalHubConnection.current_regime/0`
+  (confirmed by reading that module directly) — a blocking erpc, not
+  `trading_live`'s non-blocking `RegimeCache`, since this app (like
+  `trading_system`) has no realtime order-submission path a blocking
+  call could delay; `ContractMonitor.submit_entry/2` calling this
+  directly is an acceptable cost here.
+  """
+  @spec current_regime() :: {:ok, map()} | {:error, term()}
+  def current_regime do
+    GenServer.call(__MODULE__, :current_regime, 5_000)
+  end
+
   @impl true
   def init(_opts) do
     signal_node =
@@ -103,6 +122,15 @@ defmodule TradingOptionsSim.SignalConnection do
       {:error, _reason} = error ->
         {:reply, error, state}
     end
+  end
+
+  def handle_call(:current_regime, _from, %{connected: false} = state) do
+    {:reply, {:error, :not_connected}, state}
+  end
+
+  def handle_call(:current_regime, _from, state) do
+    result = safe_erpc(state.signal_node, TradingSignal.Regime.SessionLabel, :current, [])
+    {:reply, result, state}
   end
 
   @impl true

@@ -274,6 +274,32 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "context tracking" do
+    test "captures dte_at_entry and implied_volatility (and a nil regime_label when trading_signal is unreachable)" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "CONTEXTTEST1"
+      key = contract_key(symbol)
+      {_pid, run} = start_monitor(version, key)
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      entered_run = Sim.get_sim_run!(run.id)
+
+      # No real trading_signal node is reachable in the test env, so
+      # current_regime/0 fails and regime_label stays nil — the real,
+      # fail-closed "unknown" state, not a guessed default.
+      assert entered_run.context["regime_label"] == nil
+      assert is_integer(entered_run.context["dte_at_entry"])
+      assert entered_run.context["dte_at_entry"] > 0
+      assert entered_run.context["implied_volatility"] == 0.30
+    end
+  end
+
   describe "short direction" do
     test "records buy/sell actions in the opposite order for a short position" do
       version =

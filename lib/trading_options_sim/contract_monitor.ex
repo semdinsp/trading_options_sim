@@ -696,7 +696,12 @@ defmodule TradingOptionsSim.ContractMonitor do
              filled_at: now,
              commission: estimate_commission(state, price, action)
            },
-           %{entry_at: now, entry_price: price, entry_snapshot: jsonify_snapshot(snapshot)}
+           %{
+             entry_at: now,
+             entry_price: price,
+             entry_snapshot: jsonify_snapshot(snapshot),
+             context: entry_context(state)
+           }
          ) do
       {:ok, {_fill, _run}} ->
         Logger.info(
@@ -828,6 +833,29 @@ defmodule TradingOptionsSim.ContractMonitor do
     side = if action == "sell", do: :sell, else: :buy
     notional = fill_price |> Decimal.mult(state.multiplier) |> Decimal.mult(state.quantity)
     TradingCore.Costs.IBKR.option_cost(Decimal.new(state.quantity), notional, side)
+  end
+
+  # Exploratory context captured once, at entry, for later per-regime /
+  # per-DTE-bucket performance rollups — see the `add_context_to_sim_runs`
+  # migration's own comment for why this is a free-form map rather than
+  # dedicated columns. `regime_label` is `nil` whenever
+  # SignalConnection.current_regime/0 fails (trading_signal unreachable,
+  # not yet connected) — a real, distinct "unknown" state, never guessed
+  # at or defaulted to a fake label, same fail-closed posture this
+  # module already uses for a missing rule-tree signal.
+  defp entry_context(state) do
+    %{
+      "regime_label" => regime_label(),
+      "dte_at_entry" => days_to_expiry(state.expiry),
+      "implied_volatility" => state.implied_volatility
+    }
+  end
+
+  defp regime_label do
+    case TradingOptionsSim.SignalConnection.current_regime() do
+      {:ok, %{label: label}} -> label
+      {:error, _reason} -> nil
+    end
   end
 
   defp force_close_expiry(state, spot, dte) do
