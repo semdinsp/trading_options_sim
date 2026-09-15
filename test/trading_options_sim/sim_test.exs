@@ -194,6 +194,47 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
+  describe "update_trading_hours_settings/2" do
+    test "defaults to regular_hours_only and overnight_hold false" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert version.trading_hours_policy == "regular_hours_only"
+      assert version.overnight_hold == false
+    end
+
+    test "updates trading_hours_policy" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert {:ok, updated} =
+               Sim.update_trading_hours_settings(version, %{
+                 trading_hours_policy: "unrestricted"
+               })
+
+      assert updated.trading_hours_policy == "unrestricted"
+    end
+
+    test "rejects an invalid trading_hours_policy" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert {:error, changeset} =
+               Sim.update_trading_hours_settings(version, %{trading_hours_policy: "bogus"})
+
+      assert "is invalid" in errors_on(changeset).trading_hours_policy
+    end
+
+    test "updates overnight_hold independently" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert {:ok, updated} = Sim.update_trading_hours_settings(version, %{overnight_hold: true})
+      assert updated.overnight_hold == true
+      assert updated.trading_hours_policy == "regular_hours_only"
+    end
+  end
+
   describe "tags" do
     test "get_or_create_tag/1 upserts by exact name match" do
       assert {:ok, tag1} = Sim.get_or_create_tag("no exit")

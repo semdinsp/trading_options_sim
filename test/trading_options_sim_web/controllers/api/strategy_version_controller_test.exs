@@ -298,4 +298,48 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert json_response(conn, 200)
     end
   end
+
+  describe "POST /api/v1/versions/:id/trading_hours" do
+    test "updates trading_hours_policy and overnight_hold", %{conn: conn} do
+      version = version_fixture()
+
+      conn =
+        conn
+        |> token_conn(["strategies:write"])
+        |> post(~p"/api/v1/versions/#{version.id}/trading_hours", %{
+          "trading_hours_policy" => "unrestricted",
+          "overnight_hold" => true
+        })
+
+      body = json_response(conn, 200)
+      assert body["strategy_version"]["trading_hours_policy"] == "unrestricted"
+      assert body["strategy_version"]["overnight_hold"] == true
+    end
+
+    test "422s on an invalid trading_hours_policy", %{conn: conn} do
+      version = version_fixture()
+
+      conn =
+        conn
+        |> token_conn(["strategies:write"])
+        |> post(~p"/api/v1/versions/#{version.id}/trading_hours", %{
+          "trading_hours_policy" => "bogus"
+        })
+
+      assert json_response(conn, 422)
+    end
+
+    test "403s with strategies:read only", %{conn: conn} do
+      version = version_fixture()
+
+      conn =
+        conn
+        |> token_conn(["strategies:read"])
+        |> post(~p"/api/v1/versions/#{version.id}/trading_hours", %{
+          "trading_hours_policy" => "unrestricted"
+        })
+
+      assert json_response(conn, 403)
+    end
+  end
 end

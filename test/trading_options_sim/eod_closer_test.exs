@@ -70,7 +70,7 @@ defmodule TradingOptionsSim.EodCloserTest do
   # doc) — that tick's own session_open?/1 check is irrelevant here
   # since maybe_transition/2 (position_open?: true clause) only fires on
   # a satisfied exit rule, and this fixture's version has none.
-  defp start_monitor_with_open_position(exchange, symbol) do
+  defp start_monitor_with_open_position(exchange, symbol, opts \\ []) do
     # A never-satisfied exit rule — a nil/empty rules map would evaluate
     # vacuously true (see TradingCore.RuleEngine.evaluate/2's own doc)
     # and force this position closed on the very first price tick,
@@ -79,6 +79,18 @@ defmodule TradingOptionsSim.EodCloserTest do
       version_fixture(%{
         "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 999_999}
       })
+
+    version =
+      if Keyword.has_key?(opts, :overnight_hold) do
+        {:ok, version} =
+          Sim.update_trading_hours_settings(version, %{
+            overnight_hold: Keyword.fetch!(opts, :overnight_hold)
+          })
+
+        version
+      else
+        version
+      end
 
     key = contract_key(symbol)
 
@@ -138,6 +150,22 @@ defmodule TradingOptionsSim.EodCloserTest do
     closed_run = Sim.get_sim_run!(run.id)
     assert closed_run.status == "closed"
     assert closed_run.exit_reason == "eod_flatten"
+  end
+
+  test "does not close a position when overnight_hold is set on its strategy version" do
+    exchange = "EOD-#{System.unique_integer([:positive])}"
+    :ok = seed_exchange_session(exchange, 5)
+
+    {pid, run} =
+      start_monitor_with_open_position(exchange, "EODHOLD1", overnight_hold: true)
+
+    assert ContractMonitor.snapshot(pid).position_open? == true
+
+    :ok = EodCloser.run_once()
+    Process.sleep(50)
+
+    assert ContractMonitor.snapshot(pid).position_open? == true
+    assert Sim.get_sim_run!(run.id).status == "open"
   end
 
   test "does not close a position when its exchange closes outside the window" do

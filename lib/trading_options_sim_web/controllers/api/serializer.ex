@@ -65,6 +65,8 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "retired_reason" => version.retired_reason,
       "activated_at" => str(version.activated_at),
       "deactivated_at" => str(version.deactivated_at),
+      "trading_hours_policy" => version.trading_hours_policy,
+      "overnight_hold" => version.overnight_hold,
       "live_strategy_app" => version.live_strategy_app,
       "live_strategy_id" => version.live_strategy_id,
       "live_strategy_active" => version.live_strategy_active,
