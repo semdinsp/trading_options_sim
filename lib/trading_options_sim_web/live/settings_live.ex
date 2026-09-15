@@ -330,11 +330,15 @@ defmodule TradingOptionsSimWeb.SettingsLive do
         >
           <div class="flex flex-wrap gap-4 items-end">
             <div>
-              <label class="block text-xs uppercase tracking-wide text-base-content/60 mb-1">
+              <label
+                for="api-token-label-input"
+                class="block text-xs uppercase tracking-wide text-base-content/60 mb-1"
+              >
                 Label
               </label>
               <input
                 type="text"
+                id="api-token-label-input"
                 name="api_token[label]"
                 value={Phoenix.HTML.Form.input_value(@token_form, :label)}
                 class="input input-bordered font-data text-sm"
@@ -343,9 +347,9 @@ defmodule TradingOptionsSimWeb.SettingsLive do
             </div>
 
             <div>
-              <label class="block text-xs uppercase tracking-wide text-base-content/60 mb-1">
+              <span class="block text-xs uppercase tracking-wide text-base-content/60 mb-1">
                 Scopes
-              </label>
+              </span>
               <div class="flex flex-wrap gap-2">
                 <label :for={scope <- @available_scopes} class="label cursor-pointer gap-1">
                   <input
@@ -380,7 +384,7 @@ defmodule TradingOptionsSimWeb.SettingsLive do
               <td>{token.label}</td>
               <td>{Enum.join(token.scopes, ", ")}</td>
               <td>{token_status(token)}</td>
-              <td>{token.last_used_at || "never"}</td>
+              <td>{(token.last_used_at && format_datetime(token.last_used_at)) || "never"}</td>
               <td>
                 <button
                   :if={is_nil(token.revoked_at)}
@@ -408,11 +412,15 @@ defmodule TradingOptionsSimWeb.SettingsLive do
 
         <.form for={%{}} as={:tag} phx-submit="create_tag" class="mb-4 flex items-end gap-2">
           <div>
-            <label class="block text-xs uppercase tracking-wide text-base-content/60 mb-1">
+            <label
+              for="new-tag-name-input"
+              class="block text-xs uppercase tracking-wide text-base-content/60 mb-1"
+            >
               New tag
             </label>
             <input
               type="text"
+              id="new-tag-name-input"
               name="tag_name"
               value={@new_tag_name}
               class="input input-bordered font-data text-sm"
@@ -476,6 +484,7 @@ defmodule TradingOptionsSimWeb.SettingsLive do
             phx-click="dismiss_backup_reminder"
             class="shrink-0 hover:text-error"
             title="Dismiss for this session"
+            aria-label="Dismiss backup reminder for this session"
           >
             <.icon name="hero-x-mark" class="h-4 w-4" />
           </button>

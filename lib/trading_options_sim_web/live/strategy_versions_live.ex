@@ -242,6 +242,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
               phx-value-id={version.id}
               class="ml-auto text-base-content/40 hover:text-primary"
               title="Manage tags"
+              aria-label="Manage tags"
             >
               <.icon name="hero-tag" class="h-4 w-4" />
             </button>
@@ -270,8 +271,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
               class="inline-flex"
             >
               <input type="hidden" name="version_id" value={version.id} />
+              <label for={"add-tag-input-#{version.id}"} class="sr-only">Add tag</label>
               <input
                 type="text"
+                id={"add-tag-input-#{version.id}"}
                 name="tag_name"
                 placeholder="add tag…"
                 class="input input-xs input-bordered font-data text-[11px]"

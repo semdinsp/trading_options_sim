@@ -437,8 +437,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             </span>
 
             <form phx-submit="add_tag" class="inline-flex items-center gap-1">
+              <label for="add-tag-input" class="sr-only">Add tag</label>
               <input
                 type="text"
+                id="add-tag-input"
                 name="tag_name"
                 placeholder="Add tag…"
                 autocomplete="off"
@@ -446,6 +448,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
               />
               <button
                 type="submit"
+                aria-label="Add tag"
                 class="px-1.5 py-0.5 border border-base-content/15 text-base-content/50 hover:border-primary/40 hover:text-primary"
               >
                 <.icon name="hero-plus" class="h-3 w-3" />
@@ -476,7 +479,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
           <form :if={@editing_notes?} phx-submit="save_notes" class="flex flex-col gap-3">
             <div class="flex items-center justify-between">
-              <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50">
+              <div
+                id="notes-field-label"
+                class="font-data text-[11px] uppercase tracking-wider text-base-content/50"
+              >
                 <.icon name="hero-document-text" class="h-4 w-4 mr-1 inline text-primary" /> Notes
               </div>
               <div class="flex items-center gap-2">
@@ -498,6 +504,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             <textarea
               name="notes"
               rows="3"
+              aria-labelledby="notes-field-label"
               class="textarea textarea-sm w-full font-sans text-sm"
               placeholder="Why this strategy exists, at a glance…"
             >{@version.notes}</textarea>
