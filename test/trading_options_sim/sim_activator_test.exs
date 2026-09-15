@@ -103,7 +103,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
       [run] = Sim.list_open_sim_runs(version)
       contract_key = {run.symbol, run.expiry, run.strike, run.right}
 
-      assert ContractMonitor.whereis(run.id, contract_key) == pid
+      assert ContractMonitor.whereis(version.id, contract_key) == pid
     end
   end
 

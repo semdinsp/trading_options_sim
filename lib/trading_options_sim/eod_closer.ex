@@ -78,7 +78,9 @@ defmodule TradingOptionsSim.EodCloser do
     now = DateTime.utc_now()
 
     running_monitors()
-    |> Enum.each(fn {run_id, pid} -> maybe_close_isolated(run_id, pid, now) end)
+    |> Enum.each(fn {strategy_version_id, pid} ->
+      maybe_close_isolated(strategy_version_id, pid, now)
+    end)
   rescue
     error ->
       Logger.error("EodCloser: scan pass failed: #{inspect(error)}")
@@ -90,7 +92,8 @@ defmodule TradingOptionsSim.EodCloser do
   # running IBKRLive listener on each tick (it has no handle_call(:snapshot,
   # ...) clause; confirmed live via mix test — the process gets restarted
   # by its :transient child spec, but the crash itself is real and pointless).
-  # ContractMonitor's own sim_run_id is always a binary (UUIDv7 string,
+  # ContractMonitor's own registry key is always {strategy_version_id,
+  # contract_key_string} — strategy_version_id a binary (UUIDv7 string,
   # see registry_key/2); IBKRLive's own first element is always the atom
   # :ibkr_live — the is_binary/1 guard is what actually discriminates the
   # two key shapes sharing this registry, not the tuple arity.
@@ -102,16 +105,16 @@ defmodule TradingOptionsSim.EodCloser do
 
   # One monitor raising (stale/crashed pid, unexpected snapshot shape)
   # must not abort the rest of this tick's scan.
-  defp maybe_close_isolated(run_id, pid, now) do
-    maybe_close(run_id, pid, now)
+  defp maybe_close_isolated(strategy_version_id, pid, now) do
+    maybe_close(strategy_version_id, pid, now)
   rescue
     error ->
       Logger.error(
-        "EodCloser: scan of run #{run_id} failed: #{inspect(error)} — continuing scan for remaining monitors"
+        "EodCloser: scan of strategy_version #{strategy_version_id} failed: #{inspect(error)} — continuing scan for remaining monitors"
       )
   end
 
-  defp maybe_close(run_id, pid, now) do
+  defp maybe_close(strategy_version_id, pid, now) do
     case fetch_snapshot(pid) do
       %{position_open?: false} ->
         :ok
@@ -127,7 +130,7 @@ defmodule TradingOptionsSim.EodCloser do
           session ->
             if within_close_window?(session, now, exchange) do
               Logger.info(
-                "EodCloser: forcing EOD close for run #{run_id} (#{exchange} closes soon)"
+                "EodCloser: forcing EOD close for strategy_version #{strategy_version_id} (#{exchange} closes soon)"
               )
 
               send(pid, {:force_close_eod, :eod_flatten})
