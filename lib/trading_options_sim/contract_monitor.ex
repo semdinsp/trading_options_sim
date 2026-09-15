@@ -228,6 +228,33 @@ defmodule TradingOptionsSim.ContractMonitor do
     GenServer.call(pid, {:force_close, reason})
   end
 
+  @doc """
+  Points this monitor at a different `SimRun` — call this when reusing
+  an already-running (flat) monitor for a fresh activation, before it
+  can possibly submit another entry.
+
+  Necessary because this monitor is now long-lived across activate/
+  deactivate and entry/exit cycles (`whereis/2` keyed by
+  `{strategy_version_id, contract_key}`, not by any one `SimRun` — see
+  `registry_key/2`'s own doc), but `state.sim_run_id` was otherwise
+  only ever set once, at `init/1`. Confirmed live 2026-09-15 as a real,
+  serious bug: `SimActivator.start_or_find_monitor/4` reusing an
+  existing monitor for a new run never told it about that new run's
+  id, so every subsequent entry/exit after the monitor's very first
+  cycle silently overwrote the *original* run's row with fresh
+  entry/exit data — one corrupted run was found with `exit_at` earlier
+  than its own `entry_at`, from two different real trade cycles
+  smashed into one row. A no-op if this monitor is currently mid-
+  position (`position_open?: true`) — switching run identity out from
+  under an open position would orphan whatever gets submitted next;
+  the caller (`SimActivator`) only ever calls this for a monitor it
+  already confirmed is flat.
+  """
+  @spec update_sim_run_id(pid(), String.t()) :: :ok
+  def update_sim_run_id(pid, sim_run_id) do
+    GenServer.call(pid, {:update_sim_run_id, sim_run_id})
+  end
+
   @impl true
   def init(opts) do
     sim_run_id = Keyword.fetch!(opts, :sim_run_id)
@@ -367,6 +394,22 @@ defmodule TradingOptionsSim.ContractMonitor do
   # `GenServer.call/2` instead of fired via `send/2`.
   def handle_call({:force_close, reason}, _from, state) do
     {:reply, :ok, do_force_close(state, reason)}
+  end
+
+  # See update_sim_run_id/2's own doc — a no-op while a position is
+  # actually open (mid-position is never a valid time to redirect which
+  # run this monitor is tracking), so a caller sequencing this before a
+  # potential entry doesn't need its own extra flat-check first.
+  def handle_call({:update_sim_run_id, _sim_run_id}, _from, %{position_open?: true} = state) do
+    Logger.warning(
+      "ContractMonitor: #{state.symbol} ignored update_sim_run_id/2 while a position is open"
+    )
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:update_sim_run_id, sim_run_id}, _from, state) do
+    {:reply, :ok, %{state | sim_run_id: sim_run_id}}
   end
 
   # A %TradingHub.Message{type: :price} broadcast from PriceRelay — the

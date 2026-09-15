@@ -133,6 +133,72 @@ defmodule TradingOptionsSim.SimActivatorTest do
       active_ids = Sim.list_active_strategy_versions() |> Enum.map(& &1.id)
       assert version.id in active_ids
     end
+
+    # The exact production incident this fixes (confirmed live
+    # 2026-09-15): ContractMonitor.registry_key/2 keys by
+    # {strategy_version_id, contract_key}, so the same monitor process
+    # survives across many activate/deactivate and entry/exit cycles —
+    # but its own state.sim_run_id was otherwise only ever set once, at
+    # init/1. Reactivating a flat monitor for a fresh SimRun (a second
+    # activate/1 after the first run already closed) without telling it
+    # about the new run's id meant every subsequent entry/exit silently
+    # overwrote the ORIGINAL run's row instead of the new one — a real
+    # corrupted run was found live with exit_at earlier than its own
+    # entry_at, two different trade cycles smashed into one row.
+    test "reactivating a flat monitor for a new run does not corrupt the old closed run" do
+      pool = pool_fixture(["AAPLSA6"])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          rules: %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+          }
+        })
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      message = fn price ->
+        %{type: :price, symbol: "AAPLSA6", source: :ibkr, data: %{last: price}}
+        |> Map.put(:__struct__, TradingHub.Message)
+      end
+
+      # First cycle: enter, then exit — closes the first SimRun.
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSA6", message.(130.0))
+      Process.sleep(50)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSA6", message.(150.0))
+      Process.sleep(50)
+
+      [first_run] = Sim.list_sim_runs("closed") |> Enum.filter(&(&1.symbol == "AAPLSA6"))
+      assert first_run.status == "closed"
+      first_exit_at = first_run.exit_at
+      first_entry_at = first_run.entry_at
+
+      # Reactivate — same monitor process (still alive, now flat) gets
+      # reused, opening a brand-new SimRun.
+      assert Sim.list_open_sim_runs(version) == []
+      {:ok, [^pid], []} = SimActivator.activate(version)
+      [second_run] = Sim.list_open_sim_runs(version)
+      assert second_run.id != first_run.id
+
+      # Second cycle: enter again on the SAME monitor process.
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSA6", message.(130.0))
+      Process.sleep(50)
+
+      # The first run must be completely untouched by the second entry.
+      reloaded_first_run = Sim.get_sim_run!(first_run.id)
+      assert reloaded_first_run.status == "closed"
+      assert reloaded_first_run.exit_at == first_exit_at
+      assert reloaded_first_run.entry_at == first_entry_at
+
+      # The second run must have received the new entry.
+      reloaded_second_run = Sim.get_sim_run!(second_run.id)
+      assert reloaded_second_run.status == "open"
+      refute is_nil(reloaded_second_run.entry_at)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+    end
   end
 
   describe "deactivate/1" do
