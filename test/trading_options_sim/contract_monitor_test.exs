@@ -189,6 +189,66 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert closed_run.exit_reason == "rule_exit"
     end
 
+    test "re-entering after a natural exit (no reactivation) opens a NEW SimRun, not the closed one" do
+      # Confirmed live 2026-09-15 as a real, serious bug distinct from
+      # the earlier sim_run_id-staleness one (that fix only covers
+      # SimActivator's own "reuse an already-running monitor for a NEW
+      # activation" path — see update_sim_run_id/2's own doc). A
+      # monitor that goes flat and re-enters entirely on its own, with
+      # no activate/1 call in between, had no mechanism to open a fresh
+      # SimRun at all: every entry after the very first one kept
+      # writing onto the SAME already-closed run row (entry_changeset/2
+      # never touches `status`), silently accumulating dozens of
+      # SimFill rows under one run whose own total_run_commission then
+      # summed every one of them. One real version was found with 51
+      # fills (26 entry/25 exit) on a single SimRun after ~3 minutes of
+      # a fast-oscillating signal.
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+        })
+
+      symbol = "EXITTEST3"
+      key = contract_key(symbol)
+      {pid, first_run} = start_monitor(version, key)
+
+      # Cycle 1: enter, then exit.
+      broadcast_underlying_price(symbol, 130.0)
+      Process.sleep(50)
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+      assert Sim.get_sim_run!(first_run.id).status == "closed"
+
+      # Cycle 2: re-enter on the SAME monitor — no SimActivator.activate/1
+      # call anywhere in this test, purely rule-driven oscillation.
+      broadcast_underlying_price(symbol, 130.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      # The first run must be untouched — still closed, still exactly 2
+      # fills (its own entry+exit), not resurrected by the second entry.
+      reloaded_first_run = Sim.get_sim_run!(first_run.id)
+      assert reloaded_first_run.status == "closed"
+      assert length(Sim.list_sim_fills(reloaded_first_run)) == 2
+
+      # A genuinely new, second SimRun must now be open.
+      [second_run] = Sim.list_open_sim_runs(version)
+      assert second_run.id != first_run.id
+      assert length(Sim.list_sim_fills(second_run)) == 1
+
+      # Cycle 3: exit again, so total_run_commission on the FIRST run
+      # only reflects its own 2 fills, never the second run's.
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      first_fills = Sim.list_sim_fills(Sim.get_sim_run!(first_run.id))
+      second_fills = Sim.list_sim_fills(Sim.get_sim_run!(second_run.id))
+      assert length(first_fills) == 2
+      assert length(second_fills) == 2
+      refute Sim.get_sim_run!(first_run.id).id == Sim.get_sim_run!(second_run.id).id
+    end
+
     test "the monitor stays discoverable via whereis/2 after its run closes" do
       # Confirmed live 2026-09-15: whereis/2 used to be keyed by
       # {sim_run_id, contract_key} — once a run closed, its still-alive,
