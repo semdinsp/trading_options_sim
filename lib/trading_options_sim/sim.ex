@@ -1453,6 +1453,43 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.all()
   end
 
+  @doc """
+  Live (never persisted) today-so-far stats for `version` — the
+  `ActiveStrategiesLive` summary strip's data source, same fields
+  `snapshot_version/2` computes (`n_trades`/`n_wins`/`n_losses`/
+  `realized_pnl_gross`/`realized_pnl_net`/`total_commission`) but for
+  "today" specifically rather than a version's whole
+  `activated_at`-to-now history, mirroring `trading_live`'s own
+  `performance_strip/1` ("today's fills," not cumulative). `nil` if no
+  runs closed today yet — same "no data" state that component's own
+  empty-state clause handles, rather than an all-zero row.
+  """
+  @spec today_stats_for_version(StrategyVersion.t()) :: map() | nil
+  def today_stats_for_version(%StrategyVersion{} = version) do
+    today_start = Date.utc_today() |> DateTime.new!(~T[00:00:00])
+
+    closed_runs =
+      SimRun
+      |> where([r], r.strategy_version_id == ^version.id and r.status == "closed")
+      |> where([r], r.exit_at >= ^today_start)
+      |> preload(:sim_fills)
+      |> Repo.all()
+
+    if closed_runs == [] do
+      nil
+    else
+      %{
+        n_trades: length(closed_runs),
+        n_wins: Enum.count(closed_runs, &won?/1),
+        n_losses: Enum.count(closed_runs, &(!won?(&1))),
+        fill_count: closed_runs |> Enum.map(&length(&1.sim_fills)) |> Enum.sum(),
+        realized_pnl_gross: sum_decimal(closed_runs, & &1.realized_pnl),
+        realized_pnl_net: sum_decimal_if_all_present(closed_runs, & &1.realized_pnl_net),
+        total_commission: sum_decimal_if_all_present(closed_runs, &total_run_commission/1)
+      }
+    end
+  end
+
   # --- API tokens -----------------------------------------------------------
   #
   # Backs both /api/v1 (TradingOptionsSimWeb.ApiAuthPlug) and this app's
