@@ -962,6 +962,22 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.all()
   end
 
+  @doc """
+  Total count of every `SimFill` across every `SimRun` belonging to
+  `version` — pairs with `list_recent_fills_for_version/2`'s own
+  `limit`-bounded list so the Recent Fills panel can show "N of TOTAL"
+  rather than leaving the operator unable to tell whether the 15 shown
+  are everything or just the most recent slice of a much longer history.
+  """
+  @spec count_fills_for_version(StrategyVersion.t()) :: non_neg_integer()
+  def count_fills_for_version(%StrategyVersion{id: strategy_version_id}) do
+    SimFill
+    |> join(:inner, [f], r in SimRun, on: f.sim_run_id == r.id)
+    |> where([f, r], r.strategy_version_id == ^strategy_version_id)
+    |> select([f], count(f.id))
+    |> Repo.one()
+  end
+
   # --- API tokens -----------------------------------------------------------
   #
   # Backs both /api/v1 (TradingOptionsSimWeb.ApiAuthPlug) and this app's
