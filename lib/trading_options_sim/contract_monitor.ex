@@ -680,12 +680,53 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
+  # Confirmed live 2026-09-15 as a real, serious bug distinct from the
+  # earlier sim_run_id-staleness one this same run_id field already has
+  # a fix for (see update_sim_run_id/2's own doc): that fix only covers
+  # SimActivator's own "reuse an already-running monitor for a NEW
+  # activation" path. It does nothing for a monitor that goes flat and
+  # re-enters entirely on its own, driven purely by rule oscillation,
+  # with no activate/1 call in between — state.sim_run_id was never
+  # updated in that path at all, so every entry after the monitor's
+  # very first one kept calling record_entry_fill/3 on the SAME
+  # already-closed run row. entry_changeset/2 never touches `status`,
+  # so this silently "resurrected" the row's entry_at/entry_price on
+  # each cycle while its dozens of SimFill rows just kept accumulating
+  # underneath it — one version was found with 51 fills (26 entry/25
+  # exit) attached to a single SimRun row after ~3 minutes of a fast-
+  # oscillating signal, its own total_run_commission summing every one
+  # of them ($54.40 for what looked like a single one-contract trade in
+  # the UI). Fixed by opening a genuinely new SimRun here whenever the
+  # run this monitor was last pointed at is already closed — the
+  # correct general fix, since SimActivator's own reactivation is just
+  # one specific way a monitor can find itself flat with a stale
+  # sim_run_id; a purely-internal flat cycle is another.
+  defp ensure_open_run(state) do
+    run = Sim.get_sim_run!(state.sim_run_id)
+
+    if run.status == "closed" do
+      {:ok, new_run} =
+        Sim.open_sim_run(state.strategy_version, %{
+          symbol: state.symbol,
+          expiry: state.expiry,
+          strike: state.strike,
+          right: state.right,
+          multiplier: state.multiplier,
+          direction: state.direction
+        })
+
+      {new_run, %{state | sim_run_id: new_run.id}}
+    else
+      {run, state}
+    end
+  end
+
   defp submit_entry(state, snapshot) do
     price = fill_price(snapshot["run_current_price"])
     now = DateTime.utc_now()
     action = if state.direction == "short", do: "sell", else: "buy"
 
-    run = Sim.get_sim_run!(state.sim_run_id)
+    {run, state} = ensure_open_run(state)
 
     case Sim.record_entry_fill(
            run,
