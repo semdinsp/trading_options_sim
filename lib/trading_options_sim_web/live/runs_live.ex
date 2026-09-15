@@ -103,6 +103,12 @@ defmodule TradingOptionsSimWeb.RunsLive do
     end
   end
 
+  # "$"-prefixed, matching the price formatting convention used
+  # throughout StrategyVersionDetailLive (e.g. its entry/exit/last-closed
+  # price displays) rather than a bare, ambiguous number.
+  defp format_price(nil), do: "—"
+  defp format_price(%Decimal{} = price), do: "$#{Decimal.round(price, 2)}"
+
   defp contract_label(run) do
     "#{run.symbol} #{format_expiry(run.expiry)} #{Decimal.to_string(run.strike)}#{run.right}"
   end
@@ -168,10 +174,10 @@ defmodule TradingOptionsSimWeb.RunsLive do
                   {run.status}
                 </span>
               </td>
-              <td>{run.entry_price || "—"}</td>
-              <td>{run.exit_price || "—"}</td>
+              <td>{format_price(run.entry_price)}</td>
+              <td>{format_price(run.exit_price)}</td>
               <td class={pnl_class(run.realized_pnl)}>
-                {run.realized_pnl || "—"}
+                {format_price(run.realized_pnl)}
               </td>
               <td class="text-base-content/60">{run.exit_reason || "—"}</td>
               <td>
@@ -198,14 +204,17 @@ defmodule TradingOptionsSimWeb.RunsLive do
                     phx-value-id={run.id}
                     class="text-base-content/40 hover:text-primary"
                     title="Manage tags"
+                    aria-label="Manage tags"
                   >
                     <.icon name="hero-tag" class="h-4 w-4" />
                   </button>
 
                   <form :if={@tagging_run_id == run.id} phx-submit="add_tag" class="inline-flex">
                     <input type="hidden" name="run_id" value={run.id} />
+                    <label for={"add-tag-input-#{run.id}"} class="sr-only">Add tag</label>
                     <input
                       type="text"
+                      id={"add-tag-input-#{run.id}"}
                       name="tag_name"
                       placeholder="add tag…"
                       class="input input-xs input-bordered font-data text-[11px]"
