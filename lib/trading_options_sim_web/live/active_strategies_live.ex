@@ -47,12 +47,6 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   defp direction_chip_class("long"), do: "border-long/40 text-long"
   defp direction_chip_class("short"), do: "border-short/40 text-short"
 
-  defp format_expiry(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>) do
-    "#{y}-#{m}-#{d}"
-  end
-
-  defp format_expiry(other), do: other
-
   @impl true
   def render(assigns) do
     ~H"""
