@@ -563,6 +563,43 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.list_sim_fills(run) |> length() == 1
     end
 
+    test "a Decimal-valued signal doesn't crash entry — persisted snapshot stores it as a string" do
+      # Confirmed live 2026-09-15: a real trading_signal broadcast can
+      # carry a Decimal (RuleEngine.evaluate/2's own type spec explicitly
+      # allows Decimal.t() | number()), which crashed submit_entry/2's
+      # Jason-backed entry_snapshot persistence outright
+      # (Protocol.UndefinedError, Jason.Encoder not implemented for
+      # Decimal) — this monitor died the instant a real entry fired.
+      SignalBusTest.stub_topic("vix_last", "signals:vix_last_decimal_topic")
+
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "vix_last", "op" => "gt", "value" => 20}
+        })
+
+      symbol = "SIGNALDECIMAL1"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key)
+
+      Phoenix.PubSub.broadcast(
+        TradingSignal.PubSub,
+        "signals:vix_last_decimal_topic",
+        {:signal, "vix_last_decimal_topic", Decimal.new("25.5")}
+      )
+
+      Process.sleep(30)
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      assert Process.alive?(pid)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      [fill] = Sim.list_sim_fills(run)
+      updated_run = Sim.get_sim_run!(run.id)
+      assert updated_run.entry_snapshot["vix_last"] == "25.5"
+      assert fill.kind == "entry"
+    end
+
     test "re-subscribes on :trading_signal_connected" do
       version =
         version_fixture(%{

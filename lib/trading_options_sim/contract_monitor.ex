@@ -631,7 +631,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     case Sim.record_entry_fill(
            run,
            %{action: action, quantity: state.quantity, fill_price: price, filled_at: now},
-           %{entry_at: now, entry_price: price, entry_snapshot: snapshot}
+           %{entry_at: now, entry_price: price, entry_snapshot: jsonify_snapshot(snapshot)}
          ) do
       {:ok, {_fill, _run}} ->
         Logger.info(
@@ -662,7 +662,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              exit_price: price,
              exit_reason: exit_reason,
              realized_pnl: realized_pnl,
-             exit_snapshot: snapshot
+             exit_snapshot: jsonify_snapshot(snapshot)
            }
          ) do
       {:ok, {_fill, _run}} ->
@@ -685,6 +685,36 @@ defmodule TradingOptionsSim.ContractMonitor do
   # this guards against is upstream, in the float arithmetic itself.
   defp fill_price(price) when is_float(price) do
     price |> Decimal.from_float() |> Decimal.round(2)
+  end
+
+  # "run_current_price" is usually a plain float (BlackScholes.compute/1's
+  # own return shape, or IBKRLive's tick.price), but a rule tree can
+  # reference a run_-prefixed key that a trading_signal broadcast
+  # happens to shadow with its own Decimal value (see build_snapshot/3's
+  # own doc on run_-prefix precedence) — confirmed live 2026-09-15: a
+  # signal-derived Decimal reaching here crashed this GenServer outright
+  # with a FunctionClauseError, since only the is_float/1 clause existed.
+  defp fill_price(%Decimal{} = price), do: Decimal.round(price, 2)
+  defp fill_price(price) when is_integer(price), do: price |> Decimal.new() |> Decimal.round(2)
+
+  # entry_snapshot/exit_snapshot are DB `:map` columns Ecto persists via
+  # Jason — but this same snapshot map is also handed to
+  # TradingCore.RuleEngine.evaluate/2 for live rule evaluation, whose own
+  # type spec explicitly allows `Decimal.t() | number()` values (that's
+  # correct and expected there, not a bug to "fix" upstream). Jason has
+  # no built-in Decimal encoder (deriving one is a library-wide decision
+  # this app doesn't own), so a Decimal value survives evaluation just
+  # fine but crashes Ecto's insert/update with
+  # Protocol.UndefinedError — confirmed live 2026-09-15: a
+  # trading_signal-sourced Decimal in the snapshot crashed submit_entry/2
+  # with exactly this error. Converted to a plain string here, at the
+  # point of persistence only — the in-memory snapshot RuleEngine
+  # actually evaluates against is never touched.
+  defp jsonify_snapshot(snapshot) do
+    Map.new(snapshot, fn
+      {key, %Decimal{} = value} -> {key, Decimal.to_string(value)}
+      {key, value} -> {key, value}
+    end)
   end
 
   defp realized_pnl(run, exit_price, state) do

@@ -78,7 +78,8 @@ defmodule TradingOptionsSim.MixProject do
       {:trading_core, path: "../trading_core"},
       {:uuidv7, "~> 1.0"},
       {:anubis_mcp, "~> 2.0"},
-      {:oban, "~> 2.23"}
+      {:oban, "~> 2.23"},
+      {:tzdata, "~> 1.1"}
     ]
   end
 
