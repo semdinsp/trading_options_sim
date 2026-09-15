@@ -174,9 +174,14 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
       <div :if={@versions != []} class="flex flex-col gap-px bg-base-300">
         <div :for={version <- @versions} class="bg-base-100 p-4">
           <div class="flex items-center gap-2 mb-2">
-            <h2 class="font-bold uppercase tracking-wide">
-              {version.strategy.name} <span class="text-base-content/40">v{version.version}</span>
-            </h2>
+            <.link
+              navigate={~p"/strategy_versions/#{version.id}"}
+              class="font-bold uppercase tracking-wide hover:text-primary"
+            >
+              <h2 class="inline">
+                {version.strategy.name} <span class="text-base-content/40">v{version.version}</span>
+              </h2>
+            </.link>
             <.lifecycle_badge stage={version.lifecycle_stage} />
             <span
               :if={MapSet.member?(@active_version_ids, version.id)}

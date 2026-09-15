@@ -50,6 +50,21 @@ defmodule TradingOptionsSim.Sim do
 
   def get_strategy_version!(id), do: Repo.get!(StrategyVersion, id)
 
+  @doc """
+  `get_strategy_version!/1` preloaded with everything
+  `StrategyVersionDetailLive` needs to render in one query: `:strategy`,
+  `:tags`, and `target_pool: :target_pool_members` (the version's own
+  target pool may be `nil` — a version can exist before one is set, see
+  `SimActivator.activate/1`'s own `:no_target_pool` error clause — so
+  this is a plain preload, not an inner join).
+  """
+  @spec get_strategy_version_detail!(String.t()) :: StrategyVersion.t()
+  def get_strategy_version_detail!(id) do
+    StrategyVersion
+    |> Repo.get!(id)
+    |> Repo.preload([:strategy, :tags, target_pool: :target_pool_members])
+  end
+
   def list_strategy_versions_for_strategy(%Strategy{id: strategy_id}) do
     StrategyVersion
     |> where([v], v.strategy_id == ^strategy_id)
@@ -576,6 +591,15 @@ defmodule TradingOptionsSim.Sim do
     end
   end
 
+  @doc "Removes one tag from `version`'s tag set by id — a no-op if it isn't currently applied."
+  @spec remove_tag_from_strategy_version(StrategyVersion.t(), String.t()) ::
+          {:ok, StrategyVersion.t()} | {:error, Ecto.Changeset.t()}
+  def remove_tag_from_strategy_version(%StrategyVersion{} = version, tag_id) do
+    version = Repo.preload(version, :tags)
+    remaining_ids = version.tags |> Enum.reject(&(&1.id == tag_id)) |> Enum.map(& &1.id)
+    put_strategy_version_tags(version, remaining_ids)
+  end
+
   @doc "Replaces `run`'s full tag set with `tag_ids` — an empty list clears every tag. Mirrors `put_strategy_version_tags/2`."
   def put_run_tags(%SimRun{} = run, tag_ids) do
     tags = Repo.all(from t in Tag, where: t.id in ^tag_ids)
@@ -666,6 +690,27 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "open")
     |> Repo.all()
+  end
+
+  @doc """
+  The most recently closed `SimRun` for `version`/`symbol`, or `nil` if
+  none exists — `StrategyVersionDetailLive`'s "last closed" summary for
+  a member with no currently-open run. `nil` `exit_price`/`realized_pnl`
+  (a run closed via `close_run_without_entry/2`, never filled) is a real
+  outcome, not something this filters out — the caller decides how to
+  render it.
+  """
+  @spec last_closed_sim_run(StrategyVersion.t(), String.t()) :: SimRun.t() | nil
+  def last_closed_sim_run(%StrategyVersion{id: strategy_version_id}, symbol) do
+    SimRun
+    |> where(
+      [r],
+      r.strategy_version_id == ^strategy_version_id and r.symbol == ^symbol and
+        r.status == "closed"
+    )
+    |> order_by([r], desc: r.exit_at)
+    |> limit(1)
+    |> Repo.one()
   end
 
   @doc """
