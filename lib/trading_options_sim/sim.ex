@@ -843,7 +843,7 @@ defmodule TradingOptionsSim.Sim do
   belongs to the version), hence the join rather than a plain `where`.
   """
   @spec list_recent_fills_for_version(StrategyVersion.t(), pos_integer()) :: [SimFill.t()]
-  def list_recent_fills_for_version(%StrategyVersion{id: strategy_version_id}, limit \\ 20) do
+  def list_recent_fills_for_version(%StrategyVersion{id: strategy_version_id}, limit \\ 15) do
     SimFill
     |> join(:inner, [f], r in SimRun, on: f.sim_run_id == r.id)
     |> where([f, r], r.strategy_version_id == ^strategy_version_id)
