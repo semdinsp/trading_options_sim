@@ -359,7 +359,9 @@ defmodule TradingOptionsSimWeb.SettingsLive do
               </div>
             </div>
 
-            <button type="submit" class="btn btn-primary rounded-none">Create token</button>
+            <button type="submit" class="btn btn-primary rounded-none">
+              <.icon name="hero-plus" class="h-4 w-4" /> Create token
+            </button>
           </div>
         </.form>
 
@@ -417,7 +419,9 @@ defmodule TradingOptionsSimWeb.SettingsLive do
               placeholder="e.g. needs-review"
             />
           </div>
-          <button type="submit" class="btn btn-primary rounded-none">Add tag</button>
+          <button type="submit" class="btn btn-primary rounded-none">
+            <.icon name="hero-plus" class="h-4 w-4" /> Add tag
+          </button>
         </.form>
 
         <div :if={@tags == []} class="text-sm text-base-content/40 font-data">No tags yet</div>
@@ -439,6 +443,21 @@ defmodule TradingOptionsSimWeb.SettingsLive do
             </button>
           </span>
         </div>
+      </section>
+
+      <section class="mb-8">
+        <h2 class="font-bold uppercase tracking-wide mb-2">Strategy Lifecycle</h2>
+        <p class="text-sm text-base-content/60 mb-4">
+          Retired versions are hidden from the main Strategy Versions list by default. A
+          retired version can be unretired back to discovery from the Retired filter.
+        </p>
+
+        <.link
+          navigate={~p"/strategy_versions?stage=retired"}
+          class="btn btn-primary rounded-none"
+        >
+          <.icon name="hero-archive-box" class="h-4 w-4" /> Show Retired Versions
+        </.link>
       </section>
 
       <section class="mb-8">
@@ -503,9 +522,8 @@ defmodule TradingOptionsSimWeb.SettingsLive do
             class="btn btn-primary rounded-none"
           >
             <.icon
-              :if={@backup_running?}
-              name="hero-arrow-path"
-              class="h-4 w-4 motion-safe:animate-spin"
+              name={if @backup_running?, do: "hero-arrow-path", else: "hero-circle-stack"}
+              class={["h-4 w-4", @backup_running? && "motion-safe:animate-spin"]}
             />
             {if @backup_running?, do: "Backing up…", else: "Back up database now"}
           </button>
@@ -520,11 +538,7 @@ defmodule TradingOptionsSimWeb.SettingsLive do
           <span class="font-data">dev_routes</span>
           at compile time, same as the route itself).
         </p>
-        <a
-          href="/dev/dashboard"
-          target="_blank"
-          class="inline-flex items-center gap-1 px-3 py-1.5 border border-primary/40 text-primary bg-primary/10 text-xs uppercase tracking-wide hover:bg-primary/20"
-        >
+        <a href="/dev/dashboard" target="_blank" class="btn btn-primary rounded-none">
           <.icon name="hero-arrow-top-right-on-square" class="h-4 w-4" /> Open LiveDashboard
         </a>
       </section>

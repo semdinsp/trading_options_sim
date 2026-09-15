@@ -52,6 +52,8 @@ defmodule TradingOptionsSim.MCP.Server do
   component(TradingOptionsSim.MCP.Tools.CreateStrategy)
   component(TradingOptionsSim.MCP.Tools.PromoteVersion)
   component(TradingOptionsSim.MCP.Tools.DowngradeVersion)
+  component(TradingOptionsSim.MCP.Tools.ActivateVersion)
+  component(TradingOptionsSim.MCP.Tools.DeactivateVersion)
   component(TradingOptionsSim.MCP.Tools.AddStrategyVersionTag)
 
   @impl true

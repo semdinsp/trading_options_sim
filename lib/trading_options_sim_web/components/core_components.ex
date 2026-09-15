@@ -517,6 +517,60 @@ defmodule TradingOptionsSimWeb.CoreComponents do
   defp lifecycle_badge_class(_other), do: "border-base-content/20 text-base-content/60"
 
   @doc """
+  Retire/unretire toggle for a `StrategyVersion` — a "Retire" button at
+  any non-`"retired"` stage, an "Unretire" button at `"retired"`.
+  Shared between `StrategyVersionsLive` and `StrategyVersionDetailLive`
+  so the action reads and behaves identically everywhere it appears —
+  both pages wire it to the same `"retire"`/`"unretire"` event names
+  (`phx-value-id={@version_id}`), backed by
+  `Sim.downgrade_strategy_version/3` (`to: "retired"`) and
+  `Sim.promote_strategy_version/2` (`to: "discovery"`, the only valid
+  un-retire target — see that function's own moduledoc) respectively.
+  Retiring is deliberately **not** gated on the version being
+  inactive — same "act on whatever's true right now, don't force a
+  particular order" posture `StrategyVersionsLive`'s own
+  activate/deactivate buttons already take; the caller's own event
+  handler decides whether to also deactivate first.
+
+  ## Examples
+
+      <.retire_button stage={@version.lifecycle_stage} version_id={@version.id} />
+  """
+  attr :stage, :string, required: true
+  attr :version_id, :string, required: true
+  attr :class, :string, default: nil
+
+  def retire_button(assigns) do
+    ~H"""
+    <button
+      :if={@stage != "retired"}
+      type="button"
+      phx-click="retire"
+      phx-value-id={@version_id}
+      data-confirm="Retire this version? It can be unretired later from the Retired filter."
+      class={[
+        "px-1.5 py-0.5 border border-base-content/20 text-base-content/50 text-[11px] uppercase tracking-wide font-data hover:border-error/40 hover:text-error",
+        @class
+      ]}
+    >
+      Retire
+    </button>
+    <button
+      :if={@stage == "retired"}
+      type="button"
+      phx-click="unretire"
+      phx-value-id={@version_id}
+      class={[
+        "px-1.5 py-0.5 border border-success/40 text-success bg-success/10 text-[11px] uppercase tracking-wide font-data hover:bg-success/20",
+        @class
+      ]}
+    >
+      Unretire
+    </button>
+    """
+  end
+
+  @doc """
   A small `D N  Q N  T N  R N` strip — total `StrategyVersion` counts
   per `lifecycle_stage`, across every strategy. A stable, whole-system
   orientation number, deliberately **not** scoped to whatever

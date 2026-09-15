@@ -10,6 +10,13 @@ defmodule TradingOptionsSimWeb.SettingsLiveTest do
     assert html =~ "API / MCP Tokens"
   end
 
+  test "shows a link to the retired versions filter", %{conn: conn} do
+    {:ok, view, html} = live(conn, ~p"/settings")
+
+    assert html =~ "Show Retired Versions"
+    assert has_element?(view, "a[href='/strategy_versions?stage=retired']")
+  end
+
   test "lists existing tokens", %{conn: conn} do
     {:ok, {_raw, _token}} = Sim.create_api_token("existing-token", ["strategies:read"])
 

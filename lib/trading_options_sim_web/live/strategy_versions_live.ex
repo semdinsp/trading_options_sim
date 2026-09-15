@@ -106,6 +106,30 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
      |> load_versions()}
   end
 
+  def handle_event("retire", %{"id" => id}, socket) do
+    version = Sim.get_strategy_version!(id)
+
+    socket =
+      case Sim.downgrade_strategy_version(version, "retired") do
+        {:ok, _retired} -> put_flash(socket, :info, "Retired")
+        {:error, _reason} -> put_flash(socket, :error, "Could not retire this version")
+      end
+
+    {:noreply, load_versions(socket)}
+  end
+
+  def handle_event("unretire", %{"id" => id}, socket) do
+    version = Sim.get_strategy_version!(id)
+
+    socket =
+      case Sim.promote_strategy_version(version, "discovery") do
+        {:ok, _unretired} -> put_flash(socket, :info, "Unretired — back to discovery")
+        {:error, _reason} -> put_flash(socket, :error, "Could not unretire this version")
+      end
+
+    {:noreply, load_versions(socket)}
+  end
+
   defp load_versions(socket) do
     socket
     |> assign(:versions, Sim.list_strategy_versions(socket.assigns.stage_filter))
@@ -209,6 +233,8 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
             >
               Activate
             </button>
+
+            <.retire_button stage={version.lifecycle_stage} version_id={version.id} />
 
             <button
               type="button"

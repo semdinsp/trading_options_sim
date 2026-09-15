@@ -101,6 +101,26 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
      |> load_version(socket.assigns.version.id)}
   end
 
+  def handle_event("retire", _params, socket) do
+    socket =
+      case Sim.downgrade_strategy_version(socket.assigns.version, "retired") do
+        {:ok, _retired} -> put_flash(socket, :info, "Retired")
+        {:error, _reason} -> put_flash(socket, :error, "Could not retire this version")
+      end
+
+    {:noreply, load_version(socket, socket.assigns.version.id)}
+  end
+
+  def handle_event("unretire", _params, socket) do
+    socket =
+      case Sim.promote_strategy_version(socket.assigns.version, "discovery") do
+        {:ok, _unretired} -> put_flash(socket, :info, "Unretired — back to discovery")
+        {:error, _reason} -> put_flash(socket, :error, "Could not unretire this version")
+      end
+
+    {:noreply, load_version(socket, socket.assigns.version.id)}
+  end
+
   def handle_event("edit_notes", _params, socket) do
     {:noreply, assign(socket, :editing_notes?, true)}
   end
@@ -350,6 +370,12 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
         >
           Deactivate
         </button>
+
+        <.retire_button
+          stage={@version.lifecycle_stage}
+          version_id={@version.id}
+          class="px-2 py-1 text-[11px]"
+        />
       </div>
 
       <div class="flex-1 overflow-y-auto flex flex-col gap-3">

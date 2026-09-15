@@ -62,6 +62,41 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
     assert html =~ "R 1"
   end
 
+  describe "retire/unretire" do
+    test "retiring a version shows it as retired and swaps to an Unretire button", %{conn: conn} do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions")
+      assert has_element?(view, "button[phx-click=retire][phx-value-id='#{version.id}']")
+      refute has_element?(view, "button[phx-click=unretire][phx-value-id='#{version.id}']")
+
+      html =
+        view
+        |> element("button[phx-click=retire][phx-value-id='#{version.id}']")
+        |> render_click()
+
+      assert html =~ "retired"
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "retired"
+      assert has_element?(view, "button[phx-click=unretire][phx-value-id='#{version.id}']")
+    end
+
+    test "unretiring a version puts it back in discovery", %{conn: conn} do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.downgrade_strategy_version(version, "retired")
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions?stage=retired")
+      assert has_element?(view, "button[phx-click=unretire][phx-value-id='#{version.id}']")
+
+      view
+      |> element("button[phx-click=unretire][phx-value-id='#{version.id}']")
+      |> render_click()
+
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "discovery"
+    end
+  end
+
   describe "tagging" do
     test "toggling the tag control shows the add-tag form", %{conn: conn} do
       strategy = strategy_fixture()
