@@ -105,6 +105,34 @@ defmodule TradingOptionsSim.SimActivatorTest do
 
       assert ContractMonitor.whereis(version.id, contract_key) == pid
     end
+
+    test "sets activated_at and clears any prior deactivated_at" do
+      pool = pool_fixture(["AAPLSA4"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, _pids, []} = SimActivator.activate(version)
+      {:ok, 1} = SimActivator.deactivate(version)
+
+      {:ok, _pids, []} = SimActivator.activate(version)
+
+      reloaded = Sim.get_strategy_version!(version.id)
+      refute is_nil(reloaded.activated_at)
+      assert is_nil(reloaded.deactivated_at)
+    end
+
+    test "an activated version appears in list_active_strategy_versions/0" do
+      pool = pool_fixture(["AAPLSA5"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, _pids, []} = SimActivator.activate(version)
+
+      active_ids = Sim.list_active_strategy_versions() |> Enum.map(& &1.id)
+      assert version.id in active_ids
+    end
   end
 
   describe "deactivate/1" do
@@ -124,6 +152,74 @@ defmodule TradingOptionsSim.SimActivatorTest do
 
       Process.sleep(20)
       refute Enum.any?(pids, &Process.alive?/1)
+    end
+
+    test "sets deactivated_at, leaves activated_at as history" do
+      pool = pool_fixture(["AAPLSD6"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, _pids, []} = SimActivator.activate(version)
+      {:ok, _count} = SimActivator.deactivate(version)
+
+      reloaded = Sim.get_strategy_version!(version.id)
+      refute is_nil(reloaded.activated_at)
+      refute is_nil(reloaded.deactivated_at)
+    end
+
+    test "a deactivated version no longer appears in list_active_strategy_versions/0" do
+      pool = pool_fixture(["AAPLSD7"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, _pids, []} = SimActivator.activate(version)
+      {:ok, _count} = SimActivator.deactivate(version)
+
+      active_ids = Sim.list_active_strategy_versions() |> Enum.map(& &1.id)
+      refute version.id in active_ids
+    end
+
+    # The exact production incident this fixes (confirmed live
+    # 2026-09-15, "Slope Long Calls v2"): a rule-triggered exit closes
+    # the run while the monitor stays alive, flat, watching for the
+    # next entry. Before this fix, deactivate/1 only ever looked up
+    # monitors by open-run symbols, so a flat monitor with no open run
+    # was invisible to it — deactivating left it running forever,
+    # orphaned from the version's own now-"deactivated" DB state.
+    test "stops a flat monitor with no open run (closed via a prior rule exit)" do
+      pool = pool_fixture(["AAPLSD8"])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          rules: %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+          }
+        })
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      message = fn price ->
+        %{type: :price, symbol: "AAPLSD8", source: :ibkr, data: %{last: price}}
+        |> Map.put(:__struct__, TradingHub.Message)
+      end
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSD8", message.(130.0))
+      Process.sleep(50)
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSD8", message.(150.0))
+      Process.sleep(50)
+
+      assert Sim.list_open_sim_runs(version) == []
+      assert Process.alive?(pid)
+
+      assert {:ok, 1} = SimActivator.deactivate(version)
+
+      Process.sleep(20)
+      refute Process.alive?(pid)
     end
 
     test "flattens an open position before terminating the monitor" do

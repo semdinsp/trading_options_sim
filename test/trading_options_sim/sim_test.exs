@@ -473,25 +473,45 @@ defmodule TradingOptionsSim.SimTest do
   end
 
   describe "list_active_strategy_versions/0" do
-    test "returns only versions with at least one open run" do
+    test "returns only versions with activated_at set and deactivated_at nil" do
       strategy = strategy_fixture()
-      version_with_open_run = version_fixture(strategy, %{version: 1})
-      version_with_no_runs = version_fixture(strategy, %{version: 2})
-      version_all_closed = version_fixture(strategy, %{version: 3})
+      activated_version = version_fixture(strategy, %{version: 1})
+      never_activated_version = version_fixture(strategy, %{version: 2})
+      deactivated_version = version_fixture(strategy, %{version: 3})
 
-      run_fixture(version_with_open_run, "AAPL")
-      close_run(run_fixture(version_all_closed, "MSFT"))
+      {:ok, activated_version} = Sim.mark_activated(activated_version)
+      {:ok, deactivated_version} = Sim.mark_activated(deactivated_version)
+      {:ok, deactivated_version} = Sim.mark_deactivated(deactivated_version)
 
       active_ids = Sim.list_active_strategy_versions() |> Enum.map(& &1.id)
 
-      assert version_with_open_run.id in active_ids
-      refute version_with_no_runs.id in active_ids
-      refute version_all_closed.id in active_ids
+      assert activated_version.id in active_ids
+      refute never_activated_version.id in active_ids
+      refute deactivated_version.id in active_ids
+    end
+
+    # A version stays "active" while flat — it's the activated_at/
+    # deactivated_at pair that decides membership, not whether it
+    # happens to have an open run right now (see those fields' own doc
+    # on why: this is exactly the distinction that was missing before
+    # 2026-09-15, when a flat-but-active version's monitor was silently
+    # lost on every app restart).
+    test "includes an activated version with zero open runs (flat, not deactivated)" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+      close_run(run_fixture(version, "AAPL"))
+
+      [active] = Sim.list_active_strategy_versions()
+
+      assert active.id == version.id
+      assert active.sim_runs == []
     end
 
     test "preloads :strategy and only the open sim_runs" do
       strategy = strategy_fixture()
       version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
       run_fixture(version, "AAPL")
       close_run(run_fixture(version, "MSFT"))
 
@@ -499,6 +519,31 @@ defmodule TradingOptionsSim.SimTest do
 
       assert active.strategy.id == strategy.id
       assert Enum.map(active.sim_runs, & &1.symbol) == ["AAPL"]
+    end
+  end
+
+  describe "mark_activated/1 and mark_deactivated/1" do
+    test "mark_activated/1 sets activated_at and clears deactivated_at" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+      {:ok, version} = Sim.mark_deactivated(version)
+
+      {:ok, reactivated} = Sim.mark_activated(version)
+
+      refute is_nil(reactivated.activated_at)
+      assert is_nil(reactivated.deactivated_at)
+    end
+
+    test "mark_deactivated/1 sets deactivated_at, leaves activated_at as history" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+
+      {:ok, deactivated} = Sim.mark_deactivated(version)
+
+      refute is_nil(deactivated.activated_at)
+      refute is_nil(deactivated.deactivated_at)
     end
   end
 

@@ -60,6 +60,15 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "discovery"
   end
 
+  test "shows a copy-UUID button for the version's own id", %{conn: conn} do
+    strategy = strategy_fixture()
+    version = version_fixture(strategy)
+
+    {:ok, view, _html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    assert has_element?(view, "button[data-copy-value='#{version.id}']")
+  end
+
   test "shows the entry and exit rule JSON", %{conn: conn} do
     strategy = strategy_fixture()
 

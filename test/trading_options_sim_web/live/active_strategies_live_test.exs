@@ -22,6 +22,7 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
       })
 
     {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+    {:ok, version} = Sim.mark_activated(version)
 
     {:ok, _run} =
       Sim.open_sim_run(version, %{
