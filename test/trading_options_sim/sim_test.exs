@@ -1090,4 +1090,44 @@ defmodule TradingOptionsSim.SimTest do
       assert row.exit_reason_histogram == %{"rule_exit" => 1, "expiry" => 1}
     end
   end
+
+  describe "today_stats_for_version/1" do
+    test "returns nil when nothing has closed today" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      assert Sim.today_stats_for_version(version) == nil
+    end
+
+    test "aggregates today's closed runs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      closed_run_fixture(version, %{symbol: "TODAYSTATS1"})
+
+      stats = Sim.today_stats_for_version(version)
+
+      assert stats.n_trades == 1
+      assert stats.n_wins == 1
+      assert stats.n_losses == 0
+      assert stats.fill_count == 2
+      assert Decimal.equal?(stats.realized_pnl_gross, Decimal.new("100.00"))
+      assert Decimal.equal?(stats.realized_pnl_net, Decimal.new("96.64"))
+    end
+
+    test "does not count a run closed before today" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      run = closed_run_fixture(version, %{symbol: "TODAYSTATS2"})
+      yesterday = DateTime.add(DateTime.utc_now(), -1, :day)
+
+      {:ok, _run} =
+        Sim.get_sim_run!(run.id)
+        |> Ecto.Changeset.change(exit_at: yesterday)
+        |> Repo.update()
+
+      assert Sim.today_stats_for_version(version) == nil
+    end
+  end
 end
