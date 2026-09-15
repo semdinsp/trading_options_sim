@@ -201,6 +201,46 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "Direction"
   end
 
+  test "shows the live current price when position_open? but the SimRun genuinely isn't found",
+       %{conn: conn} do
+    # Confirmed live 2026-09-15: on a strategy whose entry/exit rules
+    # sit close together on a fast-oscillating signal, an operator can
+    # load the detail page during the brief real window a position is
+    # open and see nothing but a vague "details refreshing…" — no
+    # price, no direction, nothing actionable. Forces exactly that
+    # state (position_open?: true, but the run this monitor is tracking
+    # has been deleted out from under it) to assert the fallback now
+    # shows at least the live current price and strategy direction
+    # instead of leaving the operator with nothing to look at.
+    strategy = strategy_fixture()
+    pool = pool_fixture("DETAILSYM8")
+
+    version =
+      version_fixture(strategy, %{
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config(),
+        rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}}
+      })
+
+    {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+
+    message =
+      %{type: :price, symbol: "DETAILSYM8", source: :ibkr, data: %{last: 150.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM8", message)
+    Process.sleep(50)
+
+    [run] = Sim.list_open_sim_runs(version)
+    TradingOptionsSim.Repo.delete!(run)
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    assert html =~ "Current"
+    assert html =~ "150.0"
+    assert html =~ "pending"
+  end
+
   describe "activate/deactivate" do
     test "activating starts a monitor and shows it as running", %{conn: conn} do
       strategy = strategy_fixture()

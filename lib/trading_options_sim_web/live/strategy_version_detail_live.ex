@@ -240,7 +240,8 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       running?: not is_nil(snapshot),
       snapshot: snapshot,
       entry_fill: entry_fill,
-      last_closed_run: if(is_nil(run), do: Sim.last_closed_sim_run(version, member.symbol))
+      last_closed_run: if(is_nil(run), do: Sim.last_closed_sim_run(version, member.symbol)),
+      fallback_direction: version.direction
     }
   end
 
@@ -290,6 +291,19 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
   defp format_snapshot_value(nil), do: "—"
   defp format_snapshot_value(value), do: to_string(value)
+
+  # "Current" price fallback shown while a position is open but its own
+  # SimRun hasn't resolved yet — reads straight from the monitor's own
+  # in-memory last_snapshot (always instantly available, no DB
+  # round-trip needed) rather than leaving the operator with no price
+  # at all during a real, briefly-open position on a fast-oscillating
+  # signal (confirmed live 2026-09-15).
+  defp current_price_display(snapshot) do
+    case Map.get(snapshot.last_snapshot, "run_current_price") do
+      nil -> "—"
+      price -> "$#{format_snapshot_value(price)}"
+    end
+  end
 
   defp direction_class("long"), do: "border-long/40 text-long"
   defp direction_class("short"), do: "border-short/40 text-short"
@@ -635,18 +649,18 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             Flat — no open position
           </div>
 
-          <table
-            :if={@entry.snapshot.position_open? and @entry.run}
-            class="font-data text-[11px] w-full"
-          >
+          <table :if={@entry.snapshot.position_open?} class="font-data text-[11px] w-full">
             <tbody>
               <tr>
                 <td class="text-base-content/40 pr-3 py-0.5">Direction</td>
-                <td class={["pr-3 py-0.5 uppercase", direction_class(@entry.run.direction)]}>
-                  {@entry.run.direction}
+                <td class={[
+                  "pr-3 py-0.5 uppercase",
+                  direction_class((@entry.run && @entry.run.direction) || @entry.fallback_direction)
+                ]}>
+                  {(@entry.run && @entry.run.direction) || @entry.fallback_direction}
                 </td>
               </tr>
-              <tr>
+              <tr :if={@entry.run}>
                 <td class="text-base-content/40 pr-3 py-0.5">Entry</td>
                 <td class="pr-3 py-0.5 tabular-nums">
                   ${Decimal.round(@entry.run.entry_price, 2)}
@@ -657,15 +671,23 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
                 <td class="text-base-content/40 pr-3 py-0.5">Entered</td>
                 <td class="pr-3 py-0.5">{@entry.entry_fill.filled_at}</td>
               </tr>
+              <tr :if={is_nil(@entry.run)}>
+                <td class="text-base-content/40 pr-3 py-0.5">Current</td>
+                <td class="pr-3 py-0.5 tabular-nums">
+                  {current_price_display(@entry.snapshot)}
+                </td>
+              </tr>
+              <tr :if={is_nil(@entry.run)}>
+                <td class="text-base-content/40 pr-3 py-0.5" colspan="2">
+                  <span class="text-base-content/30 normal-case">
+                    Entry price/qty pending — this contract's own
+                    <span class="font-data">SimRun</span>
+                    hasn't loaded yet (a real position, briefly open on a fast-oscillating signal).
+                  </span>
+                </td>
+              </tr>
             </tbody>
           </table>
-
-          <div
-            :if={@entry.snapshot.position_open? and is_nil(@entry.run)}
-            class="text-base-content/40 text-sm"
-          >
-            Position open — details refreshing…
-          </div>
 
           <div
             :if={not @entry.snapshot.position_open? and @entry.last_closed_run}
