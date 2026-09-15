@@ -137,17 +137,6 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
     |> assign(:stage_counts, Sim.strategy_version_stage_counts())
   end
 
-  defp filter_link_class(current, target) do
-    base =
-      "px-2 py-1 border font-data text-xs uppercase tracking-wide hover:border-primary/40 hover:text-primary"
-
-    if current == target do
-      base <> " border-primary/40 text-primary bg-primary/10"
-    else
-      base <> " border-transparent text-base-content/60"
-    end
-  end
-
   @impl true
   def render(assigns) do
     ~H"""

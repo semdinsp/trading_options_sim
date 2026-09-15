@@ -607,6 +607,43 @@ defmodule TradingOptionsSimWeb.CoreComponents do
   end
 
   @doc """
+  CSS classes for one filter-link tab (`RunsLive`'s status filter,
+  `StrategyVersionsLive`'s stage filter) — primary-highlighted when
+  `target` is the currently-active filter, muted otherwise. `target`
+  is `nil` for the "All" tab.
+
+  ## Examples
+
+      <.link patch={~p"/runs"} class={filter_link_class(@status_filter, nil)}>All</.link>
+  """
+  @spec filter_link_class(String.t() | nil, String.t() | nil) :: String.t()
+  def filter_link_class(current, target) do
+    base =
+      "px-2 py-1 border font-data text-xs uppercase tracking-wide hover:border-primary/40 hover:text-primary"
+
+    if current == target do
+      base <> " border-primary/40 text-primary bg-primary/10"
+    else
+      base <> " border-transparent text-base-content/60"
+    end
+  end
+
+  @doc """
+  Formats a contract's `"YYYYMMDD"` wire-format expiry string (per
+  `tws_api`'s own convention) as `"YYYY-MM-DD"` for display — shared by
+  every page that renders a resolved option contract
+  (`RunsLive`, `ActiveStrategiesLive`, `StrategyVersionDetailLive`).
+  Passes through unchanged if it doesn't match that shape (defensive
+  only — every real `SimRun`/contract-template expiry is wire-format).
+  """
+  @spec format_expiry(String.t()) :: String.t()
+  def format_expiry(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>) do
+    "#{y}-#{m}-#{d}"
+  end
+
+  def format_expiry(other), do: other
+
+  @doc """
   A small button that copies `id` to the clipboard on click, with a
   brief "Copied!" confirmation — for the UUID strings shown throughout
   this app's detail pages (`StrategyVersionDetailLive`, and any future

@@ -135,6 +135,34 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     assert updated.lifecycle_stage == "quarantine"
   end
 
+  test "add_strategy_version_tag returns an MCP error for an invalid tag name", %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Tag Error Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-tag-error", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "add_strategy_version_tag",
+        %{"version_id" => version.id, "name" => "   "},
+        2
+      )
+
+    assert conn.resp_body =~ "failed to tag version"
+
+    refute version.id |> Sim.get_strategy_version_detail!() |> Map.fetch!(:tags) |> Enum.any?()
+  end
+
   defp fixed_leg_config do
     %{
       "expiry_selection" => "fixed",

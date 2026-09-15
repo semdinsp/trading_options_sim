@@ -32,6 +32,9 @@ defmodule TradingOptionsSim.MCP.Tools.AddStrategyVersionTag do
         {:error, :not_found} ->
           {:error, Error.execution("no strategy version with id #{id}"), frame}
 
+        {:error, changeset} ->
+          {:error, Error.execution("failed to tag version: #{inspect(changeset.errors)}"), frame}
+
         body ->
           {:reply, Response.json(Response.tool(), body), frame}
       end
@@ -43,7 +46,7 @@ defmodule TradingOptionsSim.MCP.Tools.AddStrategyVersionTag do
 
     case Sim.add_tag_to_strategy_version_by_name(version, name) do
       {:ok, version} -> %{id: version.id, tags: Enum.map(version.tags, & &1.name)}
-      {:error, changeset} -> %{error: inspect(changeset.errors)}
+      {:error, changeset} -> {:error, changeset}
     end
   rescue
     Ecto.NoResultsError -> {:error, :not_found}

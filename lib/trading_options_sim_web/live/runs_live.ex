@@ -76,17 +76,6 @@ defmodule TradingOptionsSimWeb.RunsLive do
     assign(socket, :runs, Sim.list_sim_runs(socket.assigns.status_filter))
   end
 
-  defp filter_link_class(current, target) do
-    base =
-      "px-2 py-1 border font-data text-xs uppercase tracking-wide hover:border-primary/40 hover:text-primary"
-
-    if current == target do
-      base <> " border-primary/40 text-primary bg-primary/10"
-    else
-      base <> " border-transparent text-base-content/60"
-    end
-  end
-
   defp status_badge_class("open"), do: "border-info/40 text-info bg-info/10"
   defp status_badge_class("closed"), do: "border-base-content/20 text-base-content/60"
   defp status_badge_class(_), do: "border-base-content/20 text-base-content/60"
@@ -112,12 +101,6 @@ defmodule TradingOptionsSimWeb.RunsLive do
   defp contract_label(run) do
     "#{run.symbol} #{format_expiry(run.expiry)} #{Decimal.to_string(run.strike)}#{run.right}"
   end
-
-  defp format_expiry(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>) do
-    "#{y}-#{m}-#{d}"
-  end
-
-  defp format_expiry(other), do: other
 
   @impl true
   def render(assigns) do
