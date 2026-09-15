@@ -62,6 +62,17 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     field :quarantine_last_counted_date, :date
     field :retired_reason, :string
 
+    # Durable activation record — see this field's own migration for why
+    # "activated" can't be derived from "has an open SimRun" alone (a
+    # flat-but-active version has no open run at all). `activated_at` is
+    # set on every activate/1 call (even a no-op re-activation, so it
+    # always reflects the most recent activation) and cleared to nil on
+    # deactivate/1; `not is_nil(activated_at) and is_nil(deactivated_at)`
+    # is "currently active." Mirrors trading_live's own
+    # LiveStrategySettings.deactivated_at convention.
+    field :activated_at, :utc_datetime
+    field :deactivated_at, :utc_datetime
+
     field :live_strategy_app, :string
     field :live_strategy_id, :binary_id
     field :live_strategy_active, :boolean, default: false
@@ -158,6 +169,17 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   @doc "Same deliberate-exception shape as `rating_changeset/2` — notes are revisable commentary."
   def notes_changeset(strategy_version, attrs) do
     cast(strategy_version, attrs, [:notes])
+  end
+
+  @doc """
+  Records an activation or deactivation — see `activated_at`'s own doc
+  for why this is a durable field, not derived from `SimRun` state.
+  Deliberately separate from `lifecycle_stage_changeset/2`: activation
+  is orthogonal to lifecycle stage (a version at any stage can be
+  activated/deactivated — see `SimActivator`'s own moduledoc).
+  """
+  def activation_changeset(strategy_version, attrs) do
+    cast(strategy_version, attrs, [:activated_at, :deactivated_at])
   end
 
   @doc """

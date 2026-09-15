@@ -41,13 +41,18 @@ defmodule TradingOptionsSim.SimReactivatorTest do
     version
   end
 
-  # Simulates the exact real-world scenario this module fixes: a SimRun
-  # left "open" in the DB with no running monitor — an app restart
-  # (crash, deploy, plain `mix phx.server` restart) with nothing to
-  # repopulate MonitorSupervisor's dynamically-started children.
-  # open_sim_run/2 directly (not SimActivator.activate/1) so no monitor
-  # process is ever started for it — matching a fresh boot's own state.
+  # Simulates the exact real-world scenario this module fixes: a
+  # version that was activated (activated_at set — see that field's own
+  # doc for why list_active_strategy_versions/0 keys off this, not "has
+  # an open run") with a SimRun left "open" in the DB but no running
+  # monitor — an app restart (crash, deploy, plain `mix phx.server`
+  # restart) with nothing to repopulate MonitorSupervisor's
+  # dynamically-started children. open_sim_run/2 directly (not
+  # SimActivator.activate/1) so no monitor process is ever started for
+  # it — matching a fresh boot's own state.
   defp orphaned_open_run_fixture(version, symbol) do
+    {:ok, _version} = Sim.mark_activated(version)
+
     {:ok, run} =
       Sim.open_sim_run(version, %{
         symbol: symbol,
@@ -78,6 +83,63 @@ defmodule TradingOptionsSim.SimReactivatorTest do
     assert is_pid(ContractMonitor.whereis(version.id, contract_key))
 
     GenServer.stop(pid)
+  end
+
+  # The exact production incident this module exists to fix (confirmed
+  # live 2026-09-15, "Slope Long Calls v2"): a version was activated,
+  # its position closed via a rule-triggered exit (no open SimRun left
+  # at all — not "orphaned," genuinely flat), and the app restarted
+  # minutes later. Before activated_at/deactivated_at existed,
+  # SimReactivator's own Sim.list_active_strategy_versions/0 call found
+  # nothing to reactivate (no open run = invisible), so the monitor
+  # never came back despite the operator never deactivating the
+  # strategy.
+  test "restarts a monitor for an activated version with zero open runs (flat)" do
+    pool = pool_fixture(["REACTSYM4"])
+
+    version =
+      version_fixture(%{
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config(),
+        rules: %{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+        }
+      })
+
+    {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
+
+    # Enter, then let a real rule-triggered exit close the run — this is
+    # the actual production sequence ("Slope Long Calls v2", confirmed
+    # live 2026-09-15): a genuinely-closed run, not an orphaned
+    # never-entered one (do_force_close/2 is a no-op when flat, so
+    # killing the process alone would never produce this state).
+    message = fn price ->
+      %{type: :price, symbol: "REACTSYM4", source: :ibkr, data: %{last: price}}
+      |> Map.put(:__struct__, TradingHub.Message)
+    end
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:REACTSYM4", message.(130.0))
+    Process.sleep(50)
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:REACTSYM4", message.(150.0))
+    Process.sleep(50)
+
+    assert Sim.list_open_sim_runs(version) == []
+
+    # Simulate the restart: kill the (now flat) monitor directly rather
+    # than waiting for a real app boot.
+    :ok = GenServer.stop(pid, :normal)
+    Process.sleep(20)
+
+    contract_key = {"REACTSYM4", "20271231", Decimal.new("150.00"), "C"}
+    assert ContractMonitor.whereis(version.id, contract_key) == nil
+
+    {:ok, reactivator_pid} = SimReactivator.start_link()
+    Process.sleep(50)
+
+    assert is_pid(ContractMonitor.whereis(version.id, contract_key))
+
+    GenServer.stop(reactivator_pid)
   end
 
   test "does not start a second monitor for an already-running run" do

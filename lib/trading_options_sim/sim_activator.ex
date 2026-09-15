@@ -74,6 +74,8 @@ defmodule TradingOptionsSim.SimActivator do
       unsubscribed_symbols =
         pids |> Enum.reject(&ibkr_live_subscribed?/1) |> Enum.map(&monitor_symbol/1)
 
+      {:ok, _updated} = Sim.mark_activated(version)
+
       {:ok, pids, unsubscribed_symbols}
     end
   end
@@ -129,24 +131,63 @@ defmodule TradingOptionsSim.SimActivator do
   @spec deactivate(StrategyVersion.t()) :: {:ok, non_neg_integer()}
   def deactivate(%StrategyVersion{} = version) do
     open_runs = Sim.list_open_sim_runs(version)
+    runs_by_symbol = Map.new(open_runs, &{&1.symbol, &1})
+    contract_template = resolve_contract_template(version.option_leg_config)
 
     terminated_count =
-      open_runs
-      |> Enum.map(&stop_monitor_for_run(version.id, &1))
+      version
+      |> monitored_symbols(runs_by_symbol, contract_template)
+      |> Enum.map(fn symbol ->
+        stop_monitor_for_symbol(
+          version.id,
+          symbol,
+          Map.get(runs_by_symbol, symbol),
+          contract_template
+        )
+      end)
       |> Enum.count(& &1)
+
+    {:ok, _updated} = Sim.mark_deactivated(version)
 
     {:ok, terminated_count}
   end
 
-  defp stop_monitor_for_run(strategy_version_id, run) do
-    contract_key = {run.symbol, run.expiry, run.strike, run.right}
+  # Every symbol worth checking for a running monitor: every open run's
+  # own symbol, plus (when the leg config resolves and a target pool is
+  # set) every target-pool member's symbol — a flat-but-active monitor
+  # has no open run to find it by, so deactivate/1 must also check by
+  # resolved contract, same as StrategyVersionDetailLive's own fallback
+  # (see that module's `build_member_entry/4`). Deliberately tolerant of
+  # an unresolvable leg config or missing target pool (a version can
+  # still be deactivated even if its own config has since become
+  # invalid) — falls back to open-run symbols alone in that case.
+  defp monitored_symbols(%{target_pool_id: nil}, runs_by_symbol, _contract_template) do
+    Map.keys(runs_by_symbol)
+  end
 
-    case ContractMonitor.whereis(strategy_version_id, contract_key) do
+  defp monitored_symbols(_version, runs_by_symbol, {:error, :unsupported_leg_config}) do
+    Map.keys(runs_by_symbol)
+  end
+
+  defp monitored_symbols(version, runs_by_symbol, {:ok, _template}) do
+    member_symbols =
+      version.target_pool_id
+      |> Sim.get_target_pool!()
+      |> Map.fetch!(:target_pool_members)
+      |> Enum.map(& &1.symbol)
+
+    (Map.keys(runs_by_symbol) ++ member_symbols) |> Enum.uniq()
+  end
+
+  defp stop_monitor_for_symbol(strategy_version_id, symbol, run, contract_template) do
+    contract_key = symbol_contract_key(symbol, run, contract_template)
+
+    case contract_key && ContractMonitor.whereis(strategy_version_id, contract_key) do
       nil ->
         false
 
       pid ->
-        flatten_and_close(pid, run)
+        if run, do: flatten_and_close(pid, run)
 
         case DynamicSupervisor.terminate_child(TradingOptionsSim.MonitorSupervisor, pid) do
           :ok -> true
@@ -154,6 +195,16 @@ defmodule TradingOptionsSim.SimActivator do
         end
     end
   end
+
+  defp symbol_contract_key(symbol, %{} = run, _contract_template) do
+    {symbol, run.expiry, run.strike, run.right}
+  end
+
+  defp symbol_contract_key(symbol, nil, {:ok, template}) do
+    {symbol, template.expiry, template.strike, template.right}
+  end
+
+  defp symbol_contract_key(_symbol, nil, {:error, :unsupported_leg_config}), do: nil
 
   # snapshot/1 read BEFORE force_close/2 — force_close/2 flips
   # position_open? to false as a side effect of flattening, so checking

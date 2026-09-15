@@ -552,6 +552,70 @@ defmodule TradingOptionsSimWeb.CoreComponents do
     """
   end
 
+  @doc """
+  A small button that copies `id` to the clipboard on click, with a
+  brief "Copied!" confirmation — for the UUID strings shown throughout
+  this app's detail pages (`StrategyVersionDetailLive`, and any future
+  one that shows an entity's own id). A core component rather than a
+  one-off, since IDs get copied constantly when cross-referencing a
+  record against `mix run`/RPC output, logs, or another app's own UI.
+
+  Self-contained: each instance carries its own colocated hook (scoped
+  by `id`, so multiple buttons on one page never collide), unlike
+  `trading_live`'s own copy-strategy-id pattern (one page-level
+  `phx-hook` wrapper with event delegation) — this trades a few bytes
+  of duplicated hook JS per button for "drop it in anywhere, no
+  surrounding wrapper required," which matters more for a shared
+  component meant to be reused across many different pages/layouts.
+
+  ## Examples
+
+      <.copy_uuid_button id="copy-version-id" value={@version.id} />
+  """
+  attr :id, :string, required: true
+  attr :value, :string, required: true
+  attr :class, :string, default: nil
+  attr :title, :string, default: "Copy ID"
+
+  def copy_uuid_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      id={@id}
+      phx-hook=".CopyUuidButton"
+      phx-update="ignore"
+      data-copy-value={@value}
+      title={@title}
+      aria-label={@title}
+      class={[
+        "p-1 border border-base-content/15 text-base-content/50 hover:border-primary/40 hover:text-primary transition-colors",
+        @class
+      ]}
+    >
+      <.icon name="hero-clipboard-document" class="h-3.5 w-3.5" />
+    </button>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyUuidButton">
+      export default {
+        mounted() {
+          this.originalTitle = this.el.getAttribute("title");
+          this.el.addEventListener("click", () => {
+            const value = this.el.dataset.copyValue;
+            navigator.clipboard.writeText(value).catch(() => {});
+
+            this.el.classList.add("border-success/40", "text-success");
+            this.el.setAttribute("title", "Copied!");
+            clearTimeout(this._resetTimer);
+            this._resetTimer = setTimeout(() => {
+              this.el.classList.remove("border-success/40", "text-success");
+              this.el.setAttribute("title", this.originalTitle);
+            }, 1200);
+          });
+        }
+      }
+    </script>
+    """
+  end
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do

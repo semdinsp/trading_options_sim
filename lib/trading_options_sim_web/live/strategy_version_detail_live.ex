@@ -169,7 +169,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       )
       |> Enum.sort_by(& &1.member.symbol)
 
-    is_active? = open_runs != []
+    is_active? = not is_nil(version.activated_at) and is_nil(version.deactivated_at)
 
     socket
     |> assign(:version, version)
@@ -313,6 +313,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
         <span class="font-data text-xs text-base-content/40" title={@version.id}>
           {@version.id}
         </span>
+        <.copy_uuid_button id="copy-version-id" value={@version.id} title="Copy version ID" />
 
         <button
           :if={not @is_active?}

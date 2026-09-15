@@ -127,6 +127,53 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.update()
   end
 
+  @doc """
+  Marks `version` as durably active — sets `activated_at` to now,
+  clears `deactivated_at`. Called by `SimActivator.activate/1` on every
+  call (even a no-op re-activation against an already-running monitor),
+  so `activated_at` always reflects the most recent activation. See
+  `StrategyVersion.activated_at`'s own doc for why this exists as a
+  persistent field rather than being derived from `SimRun` state.
+
+  Re-fetches `version` by id before building the changeset rather than
+  trusting the caller's own (possibly stale) struct — confirmed via a
+  real bug: `Ecto.Repo.update/2` only emits SQL for fields that differ
+  from the struct's own in-memory value, so a caller re-activating with
+  a `version` struct loaded before an earlier `deactivate/1` call (which
+  writes `deactivated_at` straight to the DB, not to that in-memory
+  struct) produced a changeset where `deactivated_at: nil` looked like
+  "no change" (`nil -> nil` in memory) and silently never reached the
+  UPDATE statement, leaving the DB row's stale `deactivated_at`
+  unchanged even though `activated_at` was written correctly.
+  """
+  @spec mark_activated(StrategyVersion.t()) ::
+          {:ok, StrategyVersion.t()} | {:error, Ecto.Changeset.t()}
+  def mark_activated(%StrategyVersion{id: id}) do
+    id
+    |> get_strategy_version!()
+    |> StrategyVersion.activation_changeset(%{
+      activated_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      deactivated_at: nil
+    })
+    |> Repo.update()
+  end
+
+  @doc """
+  Marks `version` as durably deactivated — sets `deactivated_at` to
+  now. Called by `SimActivator.deactivate/1` unconditionally (even for
+  a version with zero running monitors to stop), so "deactivated" is
+  never left stale after an explicit deactivate action.
+  """
+  @spec mark_deactivated(StrategyVersion.t()) ::
+          {:ok, StrategyVersion.t()} | {:error, Ecto.Changeset.t()}
+  def mark_deactivated(%StrategyVersion{} = version) do
+    version
+    |> StrategyVersion.activation_changeset(%{
+      deactivated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+    |> Repo.update()
+  end
+
   # --- Lifecycle --------------------------------------------------------------
   #
   # Three stages: discovery -> quarantine -> test_portfolio, plus terminal
@@ -735,47 +782,45 @@ defmodule TradingOptionsSim.Sim do
   defp maybe_filter_status(query, status), do: where(query, [r], r.status == ^status)
 
   @doc """
-  Every `StrategyVersion` with at least one currently-open `SimRun`,
-  preloaded with `:strategy` and its own open runs (via the
-  `:sim_runs` association, `:where`-scoped in the preload query rather
-  than a second `list_open_sim_runs/1` round trip per version) — the
-  Active Strategies page's data source. A version's open runs are
-  exactly the contracts with a live `ContractMonitor` running
-  (`SimActivator.start_or_find_monitor/3` never opens a run without
-  also starting, or finding already running, its monitor) — so this
-  list doubles as "which strategies currently have a running monitor,"
-  without touching the process `Registry` directly (a DB-backed view
-  stays correct even mid-monitor-restart, where a Registry lookup
-  could show a brief gap).
+  Every currently-active `StrategyVersion` (`activated_at` set,
+  `deactivated_at` nil — see those fields' own doc for why this is a
+  durable flag rather than derived from `SimRun` state), preloaded with
+  `:strategy` and its own currently-open runs (via the `:sim_runs`
+  association, `:where`-scoped in the preload query rather than a
+  second `list_open_sim_runs/1` round trip per version) — the Active
+  Strategies page's data source.
+
+  **Not** "has an open `SimRun`" — a version stays in this list while
+  flat (its last position closed via a rule-triggered exit, watching
+  for the next entry) exactly as long as while it holds an open
+  position; `sim_runs` is simply `[]` for a flat-but-active version.
+  Confirmed live 2026-09-15 this distinction matters: under the old
+  "has an open run" definition, a version that went flat right before
+  an app restart had its monitor silently and permanently lost (nothing
+  marked it "still active" for `SimReactivator` to find), even though
+  the operator never deactivated it.
   """
   @spec list_active_strategy_versions() :: [StrategyVersion.t()]
   def list_active_strategy_versions do
-    open_run_version_ids =
-      SimRun
-      |> where([r], r.status == "open")
-      |> select([r], r.strategy_version_id)
-      |> distinct(true)
-
     StrategyVersion
-    |> where([v], v.id in subquery(open_run_version_ids))
+    |> where([v], not is_nil(v.activated_at) and is_nil(v.deactivated_at))
     |> preload([:strategy, sim_runs: ^from(r in SimRun, where: r.status == "open")])
     |> Repo.all()
   end
 
   @doc """
-  A `MapSet` of every `StrategyVersion.id` with at least one currently
-  open `SimRun` — the cheap, single-query membership check
-  `StrategyVersionsLive`'s activate/deactivate button needs per row
-  (whether a version currently has running monitors), without paying
-  `list_active_strategy_versions/0`'s own full preload cost when only a
-  yes/no per row is needed.
+  A `MapSet` of every currently-active `StrategyVersion.id` (same
+  `activated_at`/`deactivated_at` definition as
+  `list_active_strategy_versions/0`) — the cheap, single-query
+  membership check `StrategyVersionsLive`'s activate/deactivate button
+  needs per row, without paying `list_active_strategy_versions/0`'s own
+  full preload cost when only a yes/no per row is needed.
   """
   @spec active_strategy_version_ids() :: MapSet.t(String.t())
   def active_strategy_version_ids do
-    SimRun
-    |> where([r], r.status == "open")
-    |> select([r], r.strategy_version_id)
-    |> distinct(true)
+    StrategyVersion
+    |> where([v], not is_nil(v.activated_at) and is_nil(v.deactivated_at))
+    |> select([v], v.id)
     |> Repo.all()
     |> MapSet.new()
   end
