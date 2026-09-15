@@ -174,8 +174,6 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
   defp load_version(socket, id) do
     version = Sim.get_strategy_version_detail!(id)
-    open_runs = Sim.list_open_sim_runs(version)
-    runs_by_symbol = Map.new(open_runs, &{&1.symbol, &1})
     contract_template = SimActivator.resolve_contract_template(version.option_leg_config)
 
     members =
@@ -184,9 +182,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
         nil -> []
         pool -> pool.target_pool_members
       end
-      |> Enum.map(
-        &build_member_entry(version, contract_template, &1, Map.get(runs_by_symbol, &1.symbol))
-      )
+      |> Enum.map(&build_member_entry(version, contract_template, &1))
       |> Enum.sort_by(& &1.member.symbol)
 
     is_active? = not is_nil(version.activated_at) and is_nil(version.deactivated_at)
@@ -198,17 +194,27 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     |> assign(:recent_fills, Sim.list_recent_fills_for_version(version))
   end
 
-  # No open run for this member — never activated, activated then
-  # closed, or genuinely flat right now. `whereis/2` is keyed by
+  # Always derives this member's state from ONE live read
+  # (ContractMonitor.snapshot/1) rather than trusting a `SimRun` fetched
+  # earlier in `load_version/2` — `whereis/2` is keyed by
   # `{strategy_version_id, contract_key}` (see ContractMonitor's own
   # doc on why), so a still-alive, still-watching monitor for this
-  # member's resolved contract stays discoverable even with no open
-  # run — this is what actually distinguishes "flat but running" from
-  # "never activated"/"closed and gone" here, since there's no run to
-  # read the monitor's identity from otherwise. Falls back to `nil`
-  # (never activated look) when option_leg_config isn't resolvable —
-  # same "don't guess a contract" posture SimActivator.activate/1 takes.
-  defp build_member_entry(version, contract_template, member, nil) do
+  # member's resolved contract stays discoverable whether or not it
+  # currently has an open run, and its own `position_open?` is the
+  # single source of truth for whether a run should exist right now.
+  #
+  # Confirmed live 2026-09-15: an earlier version of this function took
+  # `run` as a pre-fetched, separately-queried argument (from a
+  # `list_open_sim_runs/1` call made before this one ran) — a version
+  # whose entry/exit rules sit close together on an oscillating signal
+  # can flip position_open? several times across a handful of 2-second
+  # poll cycles, and a stale `run` fetched on an earlier cycle stayed
+  # attached to a `nil`-run "Position open — details refreshing…"
+  # placeholder for multiple cycles rather than resolving on the very
+  # next one. Fetching the run fresh, only when the monitor's own
+  # snapshot says a position is actually open, keeps both reads from
+  # ever describing two different points in time.
+  defp build_member_entry(version, contract_template, member) do
     pid =
       case contract_template do
         {:ok, template} ->
@@ -221,22 +227,12 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
     snapshot = pid && fetch_monitor_snapshot(pid)
 
-    # Snapshot.position_open? can be true here despite the caller's own
-    # runs_by_symbol lookup finding nothing — a real race, not a bug in
-    # that lookup: it reads Sim.list_open_sim_runs/1 and this reads
-    # ContractMonitor.snapshot/1 as two separate calls, so an entry that
-    # fires in between sees this branch (no run was open when the first
-    # read happened) with a snapshot that now says otherwise. Re-reads
-    # list_open_sim_runs/1 right here rather than rendering "position
-    # open" with no run to describe it (was rendering neither the
-    # "Flat" message nor the position table — a blank gap — confirmed
-    # live 2026-09-15).
     run =
       if snapshot && snapshot.position_open? do
         version |> Sim.list_open_sim_runs() |> Enum.find(&(&1.symbol == member.symbol))
       end
 
-    entry_fill = if run && snapshot.position_open?, do: entry_fill(run)
+    entry_fill = if run, do: entry_fill(run)
 
     %{
       member: member,
@@ -244,23 +240,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       running?: not is_nil(snapshot),
       snapshot: snapshot,
       entry_fill: entry_fill,
-      last_closed_run: if(is_nil(snapshot), do: Sim.last_closed_sim_run(version, member.symbol))
-    }
-  end
-
-  defp build_member_entry(version, _contract_template, member, run) do
-    contract_key = {run.symbol, run.expiry, run.strike, run.right}
-    pid = ContractMonitor.whereis(version.id, contract_key)
-    snapshot = pid && fetch_monitor_snapshot(pid)
-    entry_fill = if snapshot && snapshot.position_open?, do: entry_fill(run)
-
-    %{
-      member: member,
-      run: run,
-      running?: not is_nil(snapshot),
-      snapshot: snapshot,
-      entry_fill: entry_fill,
-      last_closed_run: nil
+      last_closed_run: if(is_nil(run), do: Sim.last_closed_sim_run(version, member.symbol))
     }
   end
 
@@ -525,9 +505,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
           </p>
         </div>
 
-        <.recent_fills_panel fills={@recent_fills} />
-
         <.member_card :for={entry <- @members} entry={entry} />
+
+        <.recent_fills_panel fills={@recent_fills} />
       </div>
     </Layouts.app>
     """
