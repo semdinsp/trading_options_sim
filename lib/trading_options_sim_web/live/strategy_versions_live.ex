@@ -4,8 +4,12 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
   `lifecycle_stage` — the one list that also serves as the
   retired-strategies view (a `?stage=retired` filter, not a separate
   screen — `Sim.list_strategy_versions/1` already covers every stage
-  through one query). Each row shows its tag chips and an inline
-  add/remove tag control, per `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §3a —
+  through one query). "All" (no `stage` param) is retired-versions-
+  excluded by default — retired versions are opt-in, only shown by
+  explicitly clicking the "Retired" filter — so they don't clutter the
+  default landing view; see `list_versions/1`. Each row shows its tag
+  chips and an inline add/remove tag control, per
+  `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §3a —
   and an Activate/Deactivate button (`SimActivator.activate/1` /
   `.deactivate/1`), independent of `lifecycle_stage`: "activated" means
   "has running monitors," not a stage transition, so a version can be
@@ -132,10 +136,21 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
 
   defp load_versions(socket) do
     socket
-    |> assign(:versions, Sim.list_strategy_versions(socket.assigns.stage_filter))
+    |> assign(:versions, list_versions(socket.assigns.stage_filter))
     |> assign(:active_version_ids, Sim.active_strategy_version_ids())
     |> assign(:stage_counts, Sim.strategy_version_stage_counts())
   end
+
+  # "All" (stage_filter nil) deliberately excludes retired versions —
+  # retired is opt-in via the explicit "Retired" filter button, not
+  # something that should clutter the default landing view. Any other
+  # explicit stage_filter (including "retired" itself) passes straight
+  # through to Sim.list_strategy_versions/1 unchanged.
+  defp list_versions(nil) do
+    Sim.list_strategy_versions(nil) |> Enum.reject(&(&1.lifecycle_stage == "retired"))
+  end
+
+  defp list_versions(stage_filter), do: Sim.list_strategy_versions(stage_filter)
 
   @impl true
   def render(assigns) do
