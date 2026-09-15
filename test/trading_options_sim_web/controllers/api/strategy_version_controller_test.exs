@@ -342,4 +342,31 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert json_response(conn, 403)
     end
   end
+
+  describe "PATCH /api/v1/versions/:id/notes" do
+    test "sets notes", %{conn: conn} do
+      version = version_fixture()
+
+      conn =
+        conn
+        |> token_conn(["strategies:write"])
+        |> patch(~p"/api/v1/versions/#{version.id}/notes", %{
+          "notes" => "Exit on delta decay below 0.30"
+        })
+
+      body = json_response(conn, 200)
+      assert body["strategy_version"]["notes"] == "Exit on delta decay below 0.30"
+    end
+
+    test "403s with strategies:read only", %{conn: conn} do
+      version = version_fixture()
+
+      conn =
+        conn
+        |> token_conn(["strategies:read"])
+        |> patch(~p"/api/v1/versions/#{version.id}/notes", %{"notes" => "nope"})
+
+      assert json_response(conn, 403)
+    end
+  end
 end

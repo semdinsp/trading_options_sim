@@ -18,7 +18,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
               :deactivate,
               :link_live_strategy,
               :unlink_live_strategy,
-              :update_trading_hours
+              :update_trading_hours,
+              :update_notes
             ]
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
@@ -136,6 +137,23 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
     attrs = Map.take(params, ["trading_hours_policy", "overnight_hold"])
 
     with {:ok, version} <- Sim.update_trading_hours_settings(version, attrs) do
+      json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
+    end
+  end
+
+  @doc """
+  PATCH /api/v1/versions/:id/notes {"notes": "..."}
+
+  Same "deliberate exception, revisable commentary" changeset
+  `StrategyVersionDetailLive`'s own notes editor already uses
+  (`Sim.set_strategy_version_notes/2`/`StrategyVersion.notes_changeset/2`)
+  — this was a real gap before this endpoint existed: notes could be
+  set from the UI but not from REST or MCP at all.
+  """
+  def update_notes(conn, %{"id" => id, "notes" => notes}) do
+    version = Sim.get_strategy_version!(id)
+
+    with {:ok, version} <- Sim.set_strategy_version_notes(version, notes) do
       json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
     end
   end
