@@ -3,8 +3,17 @@ defmodule TradingOptionsSim.Sim.SimFill do
   One simulated entry or exit fill for a `SimRun` — see
   `OPTIONS_SIM_ARCHITECTURE_PLAN.md` §6. `pricing_snapshot` records the
   pricer's own inputs/greeks at fill time (implied vol assumption,
-  slippage applied, delta/gamma) for later review — this is a simulator,
+  delta/gamma) for later review — this is a simulator,
   so "what was the fill actually based on" is worth keeping.
+
+  It also records how the fill price itself was chosen, via
+  `ContractMonitor`'s own `fill_price_for/4`: `fill_basis` is `"quote"`
+  (filled against a real two-sided bid/ask) or `"model_price"` (no
+  usable quote -- the Black-Scholes backend, or an IBKR contract with no
+  quote tick yet), plus `fill_bid`/`fill_ask`/`fill_spread_fraction` and
+  the `fill_slippage` actually given up versus the model mid. Before
+  2026-09-16 no slippage was applied at all and every fill was a model
+  mid, which flattered any exit that had to cross a wide spread.
 
   `commission` is an estimate from `TradingCore.Costs.IBKR.option_cost/5`
   (IBKR's published options schedule, Fixed plan — see that module's own
