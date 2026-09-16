@@ -71,7 +71,14 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   use GenServer
   require Logger
 
-  defstruct [:occ_symbol, :contract, depend_count: 0, subscribed?: false, last_tick: nil]
+  defstruct [
+    :occ_symbol,
+    :contract,
+    depend_count: 0,
+    subscribed?: false,
+    last_tick: nil,
+    last_quote: nil
+  ]
 
   @type occ_symbol :: String.t()
 
@@ -139,11 +146,17 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   end
 
   @doc """
-  The last-received tick for `occ_symbol`, or `{:error, :no_data}` if
-  none has arrived yet (either no listener is running, or one is running
-  but `trading_hub` hasn't broadcast anything for it) — never fabricates
-  a value, matching `BlackScholes.compute/1`'s own contract shape so
-  `ContractMonitor` can treat both backends identically.
+  The last-received greeks tick for `occ_symbol`, or `{:error, :no_data}`
+  if none has arrived yet (either no listener is running, or one is
+  running but `trading_hub` hasn't broadcast anything for it) — never
+  fabricates a value, matching `BlackScholes.compute/1`'s own contract
+  shape so `ContractMonitor` can treat both backends identically.
+
+  The returned map also carries `:quote` — the last two-sided
+  `%{bid:, ask:, ...}` seen for this same contract, or `nil` if no quote
+  tick has arrived. `nil` is a real state, not an error: greeks and
+  quotes arrive as independent broadcasts, so a contract can have priced
+  greeks and no quote yet (or, on an illiquid contract, indefinitely).
   """
   @spec latest(occ_symbol()) :: {:ok, map()} | {:error, :no_data}
   def latest(occ_symbol) do
@@ -206,24 +219,55 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     {:reply, {:error, :no_data}, state}
   end
 
+  # The quote rides along on the greeks tick rather than being a
+  # separate call: ContractMonitor prices and fills from one consistent
+  # read, and a nil `quote` (no bid/ask received yet) is a real state it
+  # already has to handle — see its own fill_quote/2 fallback to the
+  # model mid.
   def handle_call(:latest, _from, %{last_tick: tick} = state) do
-    {:reply, {:ok, tick}, state}
+    {:reply, {:ok, Map.put(tick, :quote, state.last_quote)}, state}
   end
 
   # A %TradingHub.Message{type: :price} broadcast — recognized
   # structurally, same as ContractMonitor/PriceRelay (see
   # IbPortfolio.Message's own moduledoc for why this app has no
-  # compile-time TradingHub dependency). Only a message carrying at
-  # least one greeks key is treated as a real option computation tick —
-  # a plain stock-shaped %{bid:, ask:, last:} broadcast on the same
-  # topic (which shouldn't happen if the OCC symbol convention is
-  # respected, but this module doesn't enforce that itself) is ignored
-  # rather than fabricating greeks from it.
+  # compile-time TradingHub dependency).
+  #
+  # Two genuinely different shapes arrive on this one topic, for the
+  # same subscribed contract, and each is kept separately:
+  #
+  #   * a greeks/computation tick (`opt_price`, `delta`, ...) from
+  #     trading_hub's TickOptionComputation handler -> `last_tick`
+  #   * a plain quote tick (`%{bid:, bid_size:}` / `%{ask:, ask_size:}`)
+  #     from its TickPrice handler -> `last_quote`
+  #
+  # An earlier version of this clause discarded the quote shape, calling
+  # it something that "shouldn't happen if the OCC symbol convention is
+  # respected." That was wrong: trading_hub's own message_handler.ex
+  # documents (at its TickOptionComputation clause) that "plain
+  # TickPrice/TickSize still carry bid/ask/last on the option contract
+  # itself — greeks only ever arrive via this message," i.e. both shapes
+  # are expected on exactly this contract's topic. The quote is the only
+  # two-sided price this app ever sees, so it's what ContractMonitor
+  # needs to fill at the touch instead of at an untradeable model mid.
+  #
+  # Bid and ask arrive as separate ticks, so each is merged into the
+  # existing quote rather than replacing it — an ask tick must not
+  # erase the bid that came before it.
   @impl true
   def handle_info(%{__struct__: TradingHub.Message, type: :price, data: data}, state) do
-    case greeks_tick(data) do
-      nil -> {:noreply, state}
-      tick -> {:noreply, %{state | last_tick: tick}}
+    state =
+      case greeks_tick(data) do
+        nil -> state
+        tick -> %{state | last_tick: tick}
+      end
+
+    case quote_tick(data) do
+      nil ->
+        {:noreply, state}
+
+      quote_fields ->
+        {:noreply, %{state | last_quote: merge_quote(state.last_quote, quote_fields)}}
     end
   end
 
@@ -343,4 +387,26 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   end
 
   defp greeks_tick(_data), do: nil
+
+  @quote_keys [:bid, :ask, :bid_size, :ask_size]
+
+  # A plain TickPrice-derived quote broadcast. `delayed: true` is
+  # carried through rather than filtered: trading_hub sets it when TWS
+  # falls back to delayed ticks (no real-time entitlement, or outside
+  # market hours — see its own TickPrice handler), and a delayed quote
+  # is still a real two-sided market, just a stale one. Recording the
+  # flag lets a consumer decide; silently dropping the quote would send
+  # this app back to model-mid fills exactly when spreads matter most.
+  defp quote_tick(data) when is_map(data) do
+    if Enum.any?(@quote_keys, &Map.has_key?(data, &1)) do
+      data
+      |> Map.take(@quote_keys ++ [:delayed])
+      |> Map.put(:received_at, DateTime.utc_now())
+    end
+  end
+
+  defp quote_tick(_data), do: nil
+
+  defp merge_quote(nil, quote_fields), do: quote_fields
+  defp merge_quote(existing, quote_fields), do: Map.merge(existing, quote_fields)
 end
