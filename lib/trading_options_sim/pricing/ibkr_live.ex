@@ -81,7 +81,13 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   with for this contract — NOT the plain underlying ticker; see this
   module's own moduledoc on why identity is symbol-string-only today).
   `contract` is the plain map `TradingHub.MarketData.Manager.subscribe_symbol/3`
-  expects (`%{sec_type: "OPT", expiry:, strike:, right:}`).
+  expects (`%{sec_type: "OPT", underlying_symbol:, expiry:, strike:, right:}`)
+  — `underlying_symbol` (the plain ticker, e.g. `"SPY"`) is required
+  alongside the others: it's what actually gets sent as the wire
+  `Contract.symbol` field, since `occ_symbol` above is purely
+  `trading_hub`'s own tracking key/PubSub topic, not something TWS
+  resolves an OPT contract from (confirmed via `trading_hub`'s own
+  PR #105).
   """
   def start_link(opts) do
     occ_symbol = Keyword.fetch!(opts, :occ_symbol)

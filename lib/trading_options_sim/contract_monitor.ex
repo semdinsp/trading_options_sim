@@ -273,7 +273,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{symbol}")
 
     ibkr_live_subscribed? =
-      maybe_start_ibkr_live(pricing_backend, occ_symbol, expiry, strike, right)
+      maybe_start_ibkr_live(pricing_backend, occ_symbol, symbol, expiry, strike, right)
 
     rules = strategy_version.rules || %{}
     entry_rule = Map.get(rules, "entry")
@@ -344,10 +344,25 @@ defmodule TradingOptionsSim.ContractMonitor do
   # handler, ultimately SimActivator.activate/1 and the UI) is
   # responsible for surfacing that to an operator rather than leaving
   # it a silent log line.
-  defp maybe_start_ibkr_live(:black_scholes, _occ_symbol, _expiry, _strike, _right), do: true
+  defp maybe_start_ibkr_live(:black_scholes, _occ_symbol, _symbol, _expiry, _strike, _right),
+    do: true
 
-  defp maybe_start_ibkr_live(:ibkr_live, occ_symbol, expiry, strike, right) do
-    contract = %{sec_type: "OPT", expiry: expiry, strike: Decimal.to_float(strike), right: right}
+  defp maybe_start_ibkr_live(:ibkr_live, occ_symbol, symbol, expiry, strike, right) do
+    # underlying_symbol is required alongside sec_type/expiry/strike/right
+    # — this is what trading_hub actually sends as the wire Contract.symbol
+    # field; occ_symbol is purely trading_hub's own tracking key/PubSub
+    # topic, not something TWS can resolve an OPT contract from. Confirmed
+    # via trading_hub's own PR #105 (subscribe_symbol/3 now returns
+    # {:error, {:sec_type_mismatch, ...}} if a bare underlying ticker is
+    # reused as the tracking symbol for an option while already subscribed
+    # as a stock — this field is what avoids relying on that at all).
+    contract = %{
+      sec_type: "OPT",
+      underlying_symbol: symbol,
+      expiry: expiry,
+      strike: Decimal.to_float(strike),
+      right: right
+    }
 
     pid =
       case IBKRLive.whereis(occ_symbol) do
