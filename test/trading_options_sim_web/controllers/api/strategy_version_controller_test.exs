@@ -444,5 +444,18 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
 
       assert json_response(conn, 403)
     end
+
+    test "422s (not 500) when notes exceed 255 characters", %{conn: conn} do
+      version = version_fixture()
+      too_long = String.duplicate("a", 256)
+
+      conn =
+        conn
+        |> token_conn(["strategies:write"])
+        |> patch(~p"/api/v1/versions/#{version.id}/notes", %{"notes" => too_long})
+
+      body = json_response(conn, 422)
+      assert body["errors"]["notes"]
+    end
   end
 end

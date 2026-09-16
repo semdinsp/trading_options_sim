@@ -199,9 +199,18 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     |> validate_number(:rating, greater_than_or_equal_to: 1, less_than_or_equal_to: 5)
   end
 
-  @doc "Same deliberate-exception shape as `rating_changeset/2` — notes are revisable commentary."
+  @doc """
+  Same deliberate-exception shape as `rating_changeset/2` — notes are
+  revisable commentary. `notes` is a `:string` column (`varchar(255)`
+  in Postgres — see this schema's own migration); without this length
+  validation, exceeding it raises an unhandled `Postgrex.Error`
+  (`string_data_right_truncation`) instead of failing the changeset,
+  turning a normal validation case into a 500.
+  """
   def notes_changeset(strategy_version, attrs) do
-    cast(strategy_version, attrs, [:notes])
+    strategy_version
+    |> cast(attrs, [:notes])
+    |> validate_length(:notes, max: 255)
   end
 
   @doc """

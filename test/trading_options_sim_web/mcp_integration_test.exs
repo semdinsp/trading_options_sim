@@ -585,4 +585,35 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
 
     assert conn.resp_body =~ "no strategy version with id"
   end
+
+  test "update_strategy_version_notes returns an MCP error (not a crash) over 255 chars", %{
+    conn: conn
+  } do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Notes Too Long Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-22", ["mcp:write"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    too_long = String.duplicate("a", 256)
+
+    conn =
+      call_tool(
+        raw,
+        session,
+        "update_strategy_version_notes",
+        %{"version_id" => version.id, "notes" => too_long},
+        2
+      )
+
+    assert conn.resp_body =~ "failed to update notes"
+    assert Sim.get_strategy_version!(version.id).notes != too_long
+  end
 end
