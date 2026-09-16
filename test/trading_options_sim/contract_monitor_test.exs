@@ -1,6 +1,8 @@
 defmodule TradingOptionsSim.ContractMonitorTest do
   use TradingOptionsSim.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.SignalBus.Test, as: SignalBusTest
@@ -692,6 +694,34 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       fills = Sim.list_sim_fills(run)
       assert length(fills) == 1
       assert Decimal.equal?(hd(fills).fill_price, Decimal.new("6.25"))
+    end
+
+    test "subscribes with underlying_symbol set to the plain ticker, not just occ_symbol" do
+      # trading_hub's subscribe_symbol/3 sends `contract` straight through
+      # as the wire Contract fields — occ_symbol is purely trading_hub's
+      # own tracking key/PubSub topic, never resolvable by TWS as an OPT
+      # symbol on its own (confirmed via trading_hub's own PR #105, which
+      # now rejects a bare-ticker occ_symbol reused across sec_types).
+      # HubClient isn't started in test env, so the RPC itself always
+      # fails and logs its own attempted args — asserting on that log line
+      # is the only way to see the contract map this monitor actually
+      # tried to send without a live trading_hub connection.
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "IBKRLIVE5"
+      occ_symbol = "IBKRLIVE5_OCC"
+      key = contract_key(symbol)
+
+      log =
+        capture_log(fn ->
+          start_monitor(version, key, pricing_backend: :ibkr_live, occ_symbol: occ_symbol)
+          Process.sleep(50)
+        end)
+
+      assert log =~ "underlying_symbol: \"#{symbol}\""
     end
 
     test "snapshot reports ibkr_live_subscribed?: false when the real subscribe RPC fails, without crashing the monitor" do
