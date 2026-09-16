@@ -144,7 +144,7 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
     assert html =~ "n_closes"
   end
 
-  test "clicking the r_per_capital_hour column header re-sorts without crashing", %{conn: conn} do
+  test "clicking the final_score column header re-sorts without crashing", %{conn: conn} do
     strategy = strategy_fixture()
     version = version_fixture(strategy)
 
@@ -159,10 +159,10 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
 
     html =
       view
-      |> element("th[phx-value-sort_by='r_per_capital_hour']")
+      |> element("th[phx-value-sort_by='final_score']")
       |> render_click()
 
-    assert html =~ "cap-hr"
+    assert html =~ "final_score"
   end
 
   test "toggling near-miss filters to rows failing exactly 1-2 gates", %{conn: conn} do

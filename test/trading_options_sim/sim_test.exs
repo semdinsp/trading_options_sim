@@ -1093,7 +1093,7 @@ defmodule TradingOptionsSim.SimTest do
       assert row.exit_reason_histogram == %{"rule_exit" => 1, "expiry" => 1}
     end
 
-    test "computes capital_hours/avg_hold_seconds/r_per_capital_hour, long and short alike" do
+    test "computes capital_hours/avg_hold_seconds/total_net_r/final_score, long and short alike" do
       strategy = strategy_fixture()
       version = version_fixture(strategy, %{version: 1})
 
@@ -1125,11 +1125,14 @@ defmodule TradingOptionsSim.SimTest do
       assert Decimal.equal?(Decimal.round(row.capital_hours, 2), Decimal.new("1500.00"))
       assert_in_delta Decimal.to_float(row.avg_hold_seconds), 5400.0, 0.5
 
-      # r_per_capital_hour = total realized_pnl / total capital_hours = 150/1500 = 0.1
-      assert Decimal.equal?(Decimal.round(row.r_per_capital_hour, 4), Decimal.new("0.1000"))
+      # total_net_r = sum of per-run R-multiples = 100/500 + 50/500 = 0.3
+      assert Decimal.equal?(Decimal.round(row.total_net_r, 4), Decimal.new("0.3000"))
+
+      # final_score = total_net_r / capital_hours = 0.3/1500 = 0.0002
+      assert Decimal.equal?(Decimal.round(row.final_score, 6), Decimal.new("0.000200"))
     end
 
-    test "r_per_capital_hour is nil (not a huge number) when capital_hours is near zero" do
+    test "final_score is nil (not a huge number) when capital_hours is near zero" do
       strategy = strategy_fixture()
       version = version_fixture(strategy, %{version: 1})
 
@@ -1145,7 +1148,7 @@ defmodule TradingOptionsSim.SimTest do
         |> Enum.filter(&(&1.strategy_version_id == version.id))
 
       assert Decimal.equal?(row.capital_hours, Decimal.new(0))
-      assert is_nil(row.r_per_capital_hour)
+      assert is_nil(row.final_score)
     end
   end
 

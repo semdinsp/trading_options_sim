@@ -347,10 +347,10 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               </th>
               <th
                 phx-click="sort_by"
-                phx-value-sort_by="r_per_capital_hour"
-                class={sort_link_class(@sort_by, "r_per_capital_hour")}
+                phx-value-sort_by="final_score"
+                class={sort_link_class(@sort_by, "final_score")}
               >
-                $/cap-hr
+                final_score
               </th>
               <th>Avg hold</th>
               <th>Exits</th>
@@ -405,7 +405,7 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               <td class={["text-right tabular-nums", gate_cell_class(row.gates.dollars_agree)]}>
                 {format_price(row.realized_pnl)}
               </td>
-              <td class="text-right tabular-nums">{format_r(row.r_per_capital_hour)}</td>
+              <td class="text-right tabular-nums">{format_r(row.final_score)}</td>
               <td class="text-right tabular-nums">{format_hold_seconds(row.avg_hold_seconds)}</td>
               <td class={["normal-case", gate_cell_class(row.gates.exit_logic)]}>
                 {exit_histogram_label(row.exit_reason_histogram)}
