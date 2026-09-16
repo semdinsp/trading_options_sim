@@ -45,6 +45,7 @@ defmodule TradingOptionsSimWeb.Router do
     post "/strategies/:id/versions", StrategyController, :create_version
 
     get "/versions", StrategyVersionController, :index
+    get "/versions/metrics", StrategyVersionController, :metrics
     get "/versions/:id", StrategyVersionController, :show
     post "/versions/:id/promote", StrategyVersionController, :promote
     post "/versions/:id/downgrade", StrategyVersionController, :downgrade

@@ -131,6 +131,59 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
     %{"id" => tag.id, "name" => tag.name, "description" => tag.description}
   end
 
+  @doc """
+  One `Sim.full_universe_version_metrics/0` row plus its
+  `CandidateGates.evaluate/2` verdicts — the same data
+  `CandidatesLive` renders, for `GET /api/v1/versions/metrics` and the
+  `list_candidate_metrics` MCP tool. Field names
+  (`capital_hours`/`total_net_r`/`final_score`, alongside
+  `expectancy_r`/`lcb95`/`ucb95`/`realized_pnl`/`cost_margin`/`n_closes`/
+  `exit_reason_histogram`/`gates`) match `TradingSystem`'s own
+  equivalent `full_universe_version_metrics/2` payload (confirmed by
+  reading that app's serializer directly) so an operator moving
+  between the two apps' `/candidates` pages and MCP tools reads one
+  vocabulary. `avg_hold_seconds` has no `trading_system` counterpart —
+  this app's own addition.
+
+  This row's Decimal fields are converted to native JSON numbers via
+  `decimal_or_float/1`, not the module's usual `str/1` — matching
+  `trading_system`'s own metrics-row serializer, which does the same
+  for this specific payload (unlike every other function in this
+  module, which stringifies Decimals).
+  """
+  def candidate_metrics(row) do
+    %{
+      "strategy_version_id" => row.strategy_version_id,
+      "strategy_id" => row.strategy_id,
+      "strategy_name" => row.strategy_name,
+      "version" => row.version,
+      "lifecycle_stage" => row.lifecycle_stage,
+      "direction" => row.direction,
+      "rules" => row.rules,
+      "rating" => row.rating,
+      "tags" => tags(row.tags),
+      "target_pool_id" => row.target_pool_id,
+      "target_pool_name" => row.target_pool_name,
+      "quarantine_trading_days" => row.quarantine_trading_days,
+      "n_closes" => row.n_closes,
+      "expectancy_r" => decimal_or_float(row.expectancy_r),
+      "lcb95" => row.lcb95,
+      "ucb95" => row.ucb95,
+      "realized_pnl" => decimal_or_float(row.realized_pnl),
+      "avg_commission" => str(row.avg_commission),
+      "cost_margin" => decimal_or_float(row.cost_margin),
+      "capital_hours" => decimal_or_float(row.capital_hours),
+      "avg_hold_seconds" => str(row.avg_hold_seconds),
+      "total_net_r" => decimal_or_float(row.total_net_r),
+      "final_score" => decimal_or_float(row.final_score),
+      "exit_reason_histogram" => row.exit_reason_histogram,
+      "excluded_count" => row.excluded_count,
+      "excluded_pnl" => decimal_or_float(row.excluded_pnl),
+      "last_traded_on" => str(row.last_traded_on),
+      "gates" => TradingOptionsSim.CandidateGates.evaluate(row)
+    }
+  end
+
   defp tags(tags) when is_list(tags), do: Enum.map(tags, &tag/1)
 
   defp str(nil), do: nil
@@ -138,4 +191,12 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
   defp str(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp str(%Date{} = d), do: Date.to_iso8601(d)
   defp str(other), do: other
+
+  # candidate_metrics/1's own exception to this module's usual str/1
+  # (Decimal -> string) convention — matches trading_system's own
+  # metrics-row serializer, which converts this specific payload's
+  # Decimal fields to native JSON floats instead.
+  defp decimal_or_float(nil), do: nil
+  defp decimal_or_float(%Decimal{} = d), do: Decimal.to_float(d)
+  defp decimal_or_float(value) when is_float(value), do: value
 end

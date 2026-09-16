@@ -1168,7 +1168,11 @@ defmodule TradingOptionsSim.Sim do
           expectancy_r: nil,
           lcb95: nil,
           ucb95: nil,
-          realized_pnl: nil
+          realized_pnl: nil,
+          capital_hours: nil,
+          avg_hold_seconds: nil,
+          total_net_r: nil,
+          final_score: nil
         })
 
       excluded = Map.get(excluded_by_id, version.id, %{count: 0, pnl: Decimal.new(0)})
@@ -1194,6 +1198,10 @@ defmodule TradingOptionsSim.Sim do
         realized_pnl: stats.realized_pnl,
         avg_commission: avg_commission,
         cost_margin: cost_margin(stats.expectancy_r, avg_commission, stats.n_closes),
+        capital_hours: stats.capital_hours,
+        avg_hold_seconds: stats.avg_hold_seconds,
+        total_net_r: stats.total_net_r,
+        final_score: stats.final_score,
         exit_reason_histogram: Map.get(exit_histogram_by_id, version.id, %{}),
         excluded_count: excluded.count,
         excluded_pnl: excluded.pnl,
@@ -1202,12 +1210,33 @@ defmodule TradingOptionsSim.Sim do
     end)
   end
 
-  # n/expectancy_r/lcb95/ucb95/realized_pnl, grouped by strategy_version_id
-  # — excludes is_churn runs and any run missing risk_at_entry (a run
+  # n/expectancy_r/lcb95/ucb95/realized_pnl/capital_hours/total_net_r/
+  # final_score/avg_hold_seconds, grouped by strategy_version_id —
+  # excludes is_churn runs and any run missing risk_at_entry (a run
   # closed via close_run_without_entry/2 never received an entry fill,
   # so it has no risk_at_entry, no entry_price, nothing to divide by;
   # same "closed but never traded" case this app already models
   # elsewhere).
+  #
+  # Field names/shape (capital_hours, total_net_r, final_score) match
+  # trading_system's own equivalent (Trading.full_universe_version_metrics/2,
+  # confirmed by reading that app's code directly — same names, same
+  # "final_score = Σ total_net_r ÷ Σ capital_hours" definition, not a
+  # mean of daily/per-run ratios) so an operator moving between the two
+  # apps' /candidates pages and MCP tools sees one vocabulary.
+  # total_net_r is a SUM of per-run R-multiples (realized_pnl_net /
+  # risk_at_entry) — a different quantity from realized_pnl (summed
+  # dollars); final_score divides through capital_hours, not dollars.
+  #
+  # capital_hours/total_net_r/avg_hold_seconds are computed from this
+  # SAME query/population as expectancy_r — one grouped SQL call —
+  # deliberately, so final_score's numerator and denominator can never
+  # drift onto different run populations the way summing them in two
+  # separate passes would risk. risk_at_entry itself is this app's one,
+  # already-settled "capital consumed" figure (premium-at-risk — see
+  # compute_risk_at_entry/3's own doc), so unlike trading_system's
+  # options-notional ambiguity there is no second convention to pick
+  # here.
   defp expectancy_r_stats_by_version(version_ids) do
     SimRun
     |> where([r], r.strategy_version_id in ^version_ids)
@@ -1215,13 +1244,25 @@ defmodule TradingOptionsSim.Sim do
     |> where([r], not r.is_churn)
     |> where([r], not is_nil(r.realized_pnl_net))
     |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
+    |> where([r], not is_nil(r.entry_at) and not is_nil(r.exit_at))
     |> group_by([r], r.strategy_version_id)
     |> select([r], %{
       strategy_version_id: r.strategy_version_id,
       n: count(r.id),
       mean: avg(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
       stddev: fragment("stddev_samp(? / ?)", r.realized_pnl_net, r.risk_at_entry),
-      realized_pnl: sum(r.realized_pnl_net)
+      realized_pnl: sum(r.realized_pnl_net),
+      total_net_r: sum(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
+      capital_hours:
+        sum(
+          fragment(
+            "? * EXTRACT(EPOCH FROM (? - ?)) / 3600",
+            r.risk_at_entry,
+            r.exit_at,
+            r.entry_at
+          )
+        ),
+      avg_hold_seconds: avg(fragment("EXTRACT(EPOCH FROM (? - ?))", r.exit_at, r.entry_at))
     })
     |> Repo.all()
     |> Map.new(fn row ->
@@ -1239,9 +1280,35 @@ defmodule TradingOptionsSim.Sim do
           %{expectancy_r: row.mean, lcb95: nil, ucb95: nil}
         end
 
-      stats = Map.merge(stats, %{n_closes: row.n, realized_pnl: row.realized_pnl})
+      stats =
+        Map.merge(stats, %{
+          n_closes: row.n,
+          realized_pnl: row.realized_pnl,
+          capital_hours: row.capital_hours,
+          avg_hold_seconds: row.avg_hold_seconds,
+          total_net_r: row.total_net_r,
+          final_score: final_score(row.total_net_r, row.capital_hours)
+        })
+
       {row.strategy_version_id, stats}
     end)
+  end
+
+  # Guards the divisor: near-zero capital_hours (a handful of seconds of
+  # dollar-hours) with non-zero total_net_r can otherwise produce an
+  # enormous, meaningless ratio that sorts to one end of /candidates and
+  # looks like a signal. nil renders as "—", not a number to rank on.
+  # Matches trading_system's own guard on the same divisor.
+  @min_capital_hours Decimal.new("0.01")
+
+  defp final_score(_total_net_r, nil), do: nil
+
+  defp final_score(total_net_r, capital_hours) do
+    if Decimal.compare(capital_hours, @min_capital_hours) == :lt do
+      nil
+    else
+      Decimal.div(total_net_r, capital_hours)
+    end
   end
 
   # This app's own cost basis for gate E/cost_margin — average REAL

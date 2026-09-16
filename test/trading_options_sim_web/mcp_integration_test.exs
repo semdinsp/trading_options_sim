@@ -368,6 +368,44 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     assert conn.resp_body =~ "total_count"
   end
 
+  test "list_candidate_metrics requires strategies:read scope", %{conn: conn} do
+    {:ok, {raw, _token}} =
+      Sim.create_api_token("mcp-integration-test-candidate-metrics-1", [
+        "mcp:read"
+      ])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "list_candidate_metrics", %{}, 2)
+    assert conn.resp_body =~ "insufficient_scope"
+  end
+
+  test "list_candidate_metrics returns capital_hours/total_net_r/final_score fields matching REST",
+       %{conn: conn} do
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Candidate Metrics Test"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, {raw, _token}} =
+      Sim.create_api_token("mcp-integration-test-candidate-metrics-2", ["strategies:read"])
+
+    conn = initialize(conn, raw)
+    session = session_id(conn)
+
+    conn = call_tool(raw, session, "list_candidate_metrics", %{}, 2)
+
+    assert conn.resp_body =~ "capital_hours"
+    assert conn.resp_body =~ "avg_hold_seconds"
+    assert conn.resp_body =~ "total_net_r"
+    assert conn.resp_body =~ "final_score"
+    assert conn.resp_body =~ version.id
+  end
+
   test "create_strategy_version requires mcp:write scope", %{conn: conn} do
     {:ok, strategy} = Sim.create_strategy(%{name: "MCP Create Version Scope Test"})
     {:ok, {raw, _token}} = Sim.create_api_token("mcp-integration-test-15", ["mcp:read"])

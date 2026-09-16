@@ -183,6 +183,13 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   defp format_price(nil), do: "—"
   defp format_price(%Decimal{} = value), do: "$#{Decimal.round(value, 2)}"
 
+  defp format_hold_seconds(nil), do: "—"
+
+  defp format_hold_seconds(%Decimal{} = seconds) do
+    hours = Decimal.div(seconds, 3600) |> Decimal.round(1)
+    "#{hours}h"
+  end
+
   defp exit_histogram_label(histogram) when map_size(histogram) == 0, do: "—"
 
   defp exit_histogram_label(histogram) do
@@ -338,6 +345,14 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               >
                 realized_pnl
               </th>
+              <th
+                phx-click="sort_by"
+                phx-value-sort_by="final_score"
+                class={sort_link_class(@sort_by, "final_score")}
+              >
+                final_score
+              </th>
+              <th>Avg hold</th>
               <th>Exits</th>
               <th>Churn</th>
               <th>Last traded</th>
@@ -390,6 +405,8 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               <td class={["text-right tabular-nums", gate_cell_class(row.gates.dollars_agree)]}>
                 {format_price(row.realized_pnl)}
               </td>
+              <td class="text-right tabular-nums">{format_r(row.final_score)}</td>
+              <td class="text-right tabular-nums">{format_hold_seconds(row.avg_hold_seconds)}</td>
               <td class={["normal-case", gate_cell_class(row.gates.exit_logic)]}>
                 {exit_histogram_label(row.exit_reason_histogram)}
               </td>

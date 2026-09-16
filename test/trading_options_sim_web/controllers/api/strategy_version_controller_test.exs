@@ -163,6 +163,82 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
     end
   end
 
+  describe "GET /api/v1/versions/metrics" do
+    test "returns one row per discovery/quarantine version with gates", %{conn: conn} do
+      version = version_fixture()
+
+      conn = conn |> token_conn(["strategies:read"]) |> get(~p"/api/v1/versions/metrics")
+      body = json_response(conn, 200)
+
+      assert [row] =
+               Enum.filter(
+                 body["candidate_metrics"],
+                 &(&1["strategy_version_id"] == version.id)
+               )
+
+      assert row["n_closes"] == 0
+      assert Map.has_key?(row, "capital_hours")
+      assert Map.has_key?(row, "avg_hold_seconds")
+      assert Map.has_key?(row, "total_net_r")
+      assert Map.has_key?(row, "final_score")
+      assert row["gates"]["sample_floor"] in ["pass", "fail", "not_computed", "not_applicable"]
+    end
+
+    test "capital_hours/total_net_r/final_score serialize as native JSON numbers, not strings",
+         %{conn: conn} do
+      pool = pool_fixture(["METRICNUM1"])
+      version = version_fixture(%{target_pool_id: pool.id})
+
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: "METRICNUM1",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      entry_price = Decimal.new("5.00")
+      risk_at_entry = Sim.compute_risk_at_entry(entry_price, 100, 1)
+      now = DateTime.utc_now()
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: entry_price, filled_at: now},
+          %{entry_at: now, entry_price: entry_price, risk_at_entry: risk_at_entry}
+        )
+
+      {:ok, {_fill, _run}} =
+        Sim.record_exit_fill(
+          run,
+          %{action: "sell", quantity: 1, fill_price: Decimal.new("6.00"), filled_at: now},
+          %{
+            exit_at: now,
+            exit_price: Decimal.new("6.00"),
+            exit_reason: "target_hit",
+            realized_pnl: Decimal.new("100.00"),
+            realized_pnl_net: Decimal.new("100.00")
+          }
+        )
+
+      conn = conn |> token_conn(["strategies:read"]) |> get(~p"/api/v1/versions/metrics")
+      body = json_response(conn, 200)
+
+      [row] = Enum.filter(body["candidate_metrics"], &(&1["strategy_version_id"] == version.id))
+
+      assert is_number(row["total_net_r"])
+      assert is_float(row["expectancy_r"])
+      assert is_float(row["realized_pnl"])
+    end
+
+    test "403s without strategies:read scope", %{conn: conn} do
+      conn = conn |> token_conn(["tags:write"]) |> get(~p"/api/v1/versions/metrics")
+      assert json_response(conn, 403)
+    end
+  end
+
   describe "POST /api/v1/versions/:id/promote" do
     test "422s with the invalid-transition error shape when there's no target pool", %{
       conn: conn
