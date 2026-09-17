@@ -48,3 +48,6 @@ npm-debug.log
 *.swp
 
 .gstack/
+
+# Dev/prod log files written by Logger's :default_handler (config/dev.exs).
+/log/

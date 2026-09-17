@@ -77,8 +77,43 @@ config :trading_options_sim, :hub_node, :"trading_hub@Scotts-Mac-mini.local"
 # :signal_node config.
 config :trading_options_sim, :signal_node, :"trading_signal@Scotts-Mac-mini.local"
 
-# Do not include metadata nor timestamps in development logs
-config :logger, :default_formatter, format: "[$level] $message\n"
+# Timestamped (local time, no UTC offset shown -- see :utc_log below) but no
+# other metadata. Dev logs go to a file, not the terminal (see
+# :default_handler below), so a bare "[level] message" with no timestamp made
+# tracing anything across a long-running session (e.g. a monitor's reconnect
+# loop, or reconstructing the order of fills across ten ContractMonitors)
+# impractical -- every line looked identical with no way to tell how far
+# apart they actually were. Matches every sibling app's own dev formatter.
+config :logger, :default_formatter, format: "$time [$level] $message\n"
+
+# Timestamps above are local time by default; flip to true for UTC instead.
+# Note the sim's own DB timestamps are UTC, so a cross-reference between a
+# log line and a sim_runs row needs the offset applied by hand.
+config :logger, utc_log: false
+
+# Route logs to a rotating file instead of the terminal. Filename is unique
+# per app (trading_options_sim_dev.log) so tailing several sibling apps' logs
+# at once stays self-identifying.
+#
+# Why this matters here specifically: the default terminal handler buffers
+# under burst load, and in an `iex -S mix phx.server` session the terminal's
+# own scrollback retains every line for the life of the process. This app
+# emits a log line per tick per monitor -- with ten monitors on live IBKR
+# data that is a sustained burst, and it was observed chewing memory. The
+# file handler bounds it instead: max_no_bytes x max_no_files caps total log
+# size at 50MB with rotation, and nothing is retained in memory.
+#
+# This was the last app in the workspace still logging to the terminal; every
+# sibling (trading_hub, trading_dashboard, trading_live, trading_signal,
+# trading_system, trading_risk) already uses this exact shape.
+config :logger, :default_handler,
+  config: [
+    file: ~c"log/trading_options_sim_dev.log",
+    filesync_repeat_interval: 5_000,
+    file_check: 1_000,
+    max_no_bytes: 10_000_000,
+    max_no_files: 5
+  ]
 
 # Set a higher stacktrace during development. Avoid configuring such
 # in production as building large stacktraces may be expensive.
