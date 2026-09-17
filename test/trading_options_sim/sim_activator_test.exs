@@ -55,6 +55,48 @@ defmodule TradingOptionsSim.SimActivatorTest do
       assert {:error, :unsupported_leg_config} = SimActivator.activate(version)
     end
 
+    # Regression test for a real deadlock, observed live 2026-09-17 on
+    # the first restart after :ibkr_live was wired into SimActivator.
+    #
+    # ContractMonitor and IBKRLive are both children of the same
+    # DynamicSupervisor, which serves one start_child/2 at a time.
+    # Starting IBKRLive from inside ContractMonitor.init/1 therefore
+    # deadlocked: the supervisor waited for init to return while init
+    # waited for the supervisor. The monitor sat alive-but-hung
+    # (status :waiting, 56-message queue), so supervision saw a healthy
+    # child and never retried, and every subsequent monitor queued
+    # behind it never started -- 1 running monitor instead of 10.
+    #
+    # Nothing caught it because every :ibkr_live test drove
+    # ContractMonitor directly via start_supervised; this is the only
+    # test that goes through SimActivator -> DynamicSupervisor, which
+    # is the path that deadlocks. It fails by TIMEOUT on the old code,
+    # not by assertion.
+    @tag :ibkr_live_activation
+    test "activates through the real supervisor without deadlocking on :ibkr_live" do
+      Application.put_env(:trading_options_sim, :pricing_backend, :ibkr_live)
+      on_exit(fn -> Application.delete_env(:trading_options_sim, :pricing_backend) end)
+
+      pool = pool_fixture(["DEADLK1", "DEADLK2", "DEADLK3"])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config()
+        })
+
+      # The assertion that matters is that this returns at all. Each
+      # monitor must start, and each must answer :snapshot -- a hung
+      # init/1 is alive but never replies, so snapshot/1 times out.
+      assert {:ok, pids, _unsubscribed} = SimActivator.activate(version)
+      assert length(pids) == 3
+
+      Enum.each(pids, fn pid ->
+        snap = ContractMonitor.snapshot(pid)
+        assert snap.symbol in ["DEADLK1", "DEADLK2", "DEADLK3"]
+      end)
+    end
+
     test "starts one monitor per pool member with fixed_strike selection" do
       pool = pool_fixture(["AAPLSA1", "MSFTSA1"])
 

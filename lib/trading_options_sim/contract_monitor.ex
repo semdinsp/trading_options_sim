@@ -300,9 +300,6 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{symbol}")
 
-    ibkr_live_subscribed? =
-      maybe_start_ibkr_live(pricing_backend, occ_symbol, symbol, expiry, strike, right)
-
     rules = strategy_version.rules || %{}
     entry_rule = Map.get(rules, "entry")
     exit_rule = Map.get(rules, "exit")
@@ -338,14 +335,48 @@ defmodule TradingOptionsSim.ContractMonitor do
       occ_symbol: occ_symbol,
       exchange: Keyword.get(opts, :exchange),
       pricing_backend: pricing_backend,
-      ibkr_live_subscribed?: ibkr_live_subscribed?,
+      ibkr_live_subscribed?: pricing_backend != :ibkr_live,
       position_open?: Keyword.get(opts, :position_open?, false),
       signal_names: signal_names,
       canonical_names: canonical_names
     }
 
-    {:ok, state}
+    {:ok, state, {:continue, :start_ibkr_live}}
   end
+
+  # Starting the shared IBKRLive listener is deliberately NOT done in
+  # init/1. ContractMonitor and IBKRLive are both children of the same
+  # DynamicSupervisor (TradingOptionsSim.MonitorSupervisor), and a
+  # DynamicSupervisor serves one start_child/2 at a time -- so calling
+  # start_child from inside ContractMonitor.init/1 deadlocks: the
+  # supervisor is blocked waiting for this init to return, and this init
+  # is blocked waiting for the supervisor to start IBKRLive.
+  #
+  # Observed live 2026-09-17 on the first restart after :ibkr_live was
+  # wired up: one monitor sat in `status: :waiting` with a 56-message
+  # queue, `Process.alive?` true (so supervision saw a healthy child and
+  # nothing ever retried), and monitors 2..10 never started because they
+  # were queued behind it on the same supervisor. The stack was exactly
+  # gen.do_call -> maybe_start_ibkr_live -> init/1.
+  #
+  # handle_continue/2 runs immediately after init/1 returns, before any
+  # other message is processed, so the listener is still attached before
+  # the first tick can arrive -- but the supervisor is free by then.
+  @impl true
+  def handle_continue(:start_ibkr_live, %{pricing_backend: :ibkr_live} = state) do
+    subscribed? =
+      start_ibkr_live(
+        state.occ_symbol,
+        state.symbol,
+        state.expiry,
+        state.strike,
+        state.right
+      )
+
+    {:noreply, %{state | ibkr_live_subscribed?: subscribed?}}
+  end
+
+  def handle_continue(:start_ibkr_live, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, %{pricing_backend: :ibkr_live, occ_symbol: occ_symbol}) do
@@ -372,15 +403,15 @@ defmodule TradingOptionsSim.ContractMonitor do
   #
   # Never fatal — a failed real subscribe RPC (see IBKRLive's own
   # moduledoc for why: matches trading_live's StrategyStockMonitor
-  # precedent) means this returns false rather than stopping
-  # ContractMonitor.init/1; the caller (this module's own :snapshot
-  # handler, ultimately SimActivator.activate/1 and the UI) is
-  # responsible for surfacing that to an operator rather than leaving
-  # it a silent log line.
-  defp maybe_start_ibkr_live(:black_scholes, _occ_symbol, _symbol, _expiry, _strike, _right),
-    do: true
-
-  defp maybe_start_ibkr_live(:ibkr_live, occ_symbol, symbol, expiry, strike, right) do
+  # precedent) means this returns false rather than crashing the
+  # monitor; the caller (this module's own :snapshot handler, ultimately
+  # SimActivator.activate/1 and the UI) is responsible for surfacing
+  # that to an operator rather than leaving it a silent log line.
+  #
+  # Only ever called from handle_continue/2's :ibkr_live clause, never
+  # from init/1 — see that callback for the DynamicSupervisor deadlock
+  # this ordering avoids.
+  defp start_ibkr_live(occ_symbol, symbol, expiry, strike, right) do
     # underlying_symbol is required alongside sec_type/expiry/strike/right
     # — this is what trading_hub actually sends as the wire Contract.symbol
     # field; occ_symbol is purely trading_hub's own tracking key/PubSub

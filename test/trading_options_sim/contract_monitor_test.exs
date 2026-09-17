@@ -670,6 +670,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} =
         start_monitor(version, key, pricing_backend: :ibkr_live, occ_symbol: occ_symbol)
 
+      await_ibkr_live(occ_symbol)
+
       broadcast_option_greeks(occ_symbol, %{
         implied_vol: 0.30,
         delta: 0.55,
@@ -704,6 +706,39 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{occ_symbol}", message)
     end
 
+    # IBKRLive is started from ContractMonitor's handle_continue/2, not
+    # its init/1 (see that callback for the DynamicSupervisor deadlock
+    # that ordering avoids), so start_monitor/3 can return before the
+    # listener exists and has subscribed to the contract's price topic.
+    # A tick broadcast in that window is delivered to nobody and lost.
+    # Every :ibkr_live test therefore syncs on the listener being up
+    # before broadcasting -- a real readiness handshake, not a sleep.
+    defp await_ibkr_live(occ_symbol) do
+      pid =
+        Enum.reduce_while(1..400, nil, fn _i, _acc ->
+          case TradingOptionsSim.Pricing.IBKRLive.whereis(occ_symbol) do
+            nil -> Process.sleep(5) && {:cont, nil}
+            pid -> {:halt, pid}
+          end
+        end) || flunk("IBKRLive listener for #{occ_symbol} never started")
+
+      # whereis/1 is NOT sufficient on its own: the listener registers
+      # via :via BEFORE its own init/1 runs, and that init does a
+      # blocking subscribe_to_hub RPC (5s timeout, and in :test there is
+      # no hub so it always runs to failure) before it subscribes to the
+      # contract's price topic. A greeks tick broadcast in that window
+      # reaches nobody.
+      #
+      # Any GenServer.call is the handshake that proves init/1 finished
+      # -- a call cannot be served until then. :latest is used rather
+      # than :attach precisely because it is read-only: :attach would
+      # increment the listener's depend_count and keep it alive past its
+      # last real ContractMonitor's detach, leaking the listener (and
+      # its hub subscription) for the rest of the test run.
+      _ = TradingOptionsSim.Pricing.IBKRLive.latest(occ_symbol)
+      pid
+    end
+
     defp enter_with_quote(symbol, occ_symbol, opts) do
       version =
         version_fixture(%{
@@ -719,6 +754,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
           key,
           Keyword.merge([pricing_backend: :ibkr_live, occ_symbol: occ_symbol], opts)
         )
+
+      await_ibkr_live(occ_symbol)
 
       broadcast_option_greeks(occ_symbol, %{
         implied_vol: 0.30,
@@ -831,6 +868,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
           occ_symbol: occ_symbol
         )
 
+      await_ibkr_live(occ_symbol)
+
       broadcast_option_greeks(occ_symbol, %{
         implied_vol: 0.30,
         delta: 0.55,
@@ -864,6 +903,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
           pricing_backend: :ibkr_live,
           occ_symbol: occ_symbol
         )
+
+      await_ibkr_live(occ_symbol)
 
       broadcast_option_greeks(occ_symbol, %{
         implied_vol: 0.30,
