@@ -1,7 +1,8 @@
 defmodule TradingOptionsSim.PriceRelay do
   @moduledoc """
   Receives underlying-price ticks forwarded by `IbPortfolio.HubClient`
-  (subscribed to `trading_hub`'s `"prices:*"` fan-out topic) and
+  (subscribed to `trading_hub`'s fan-out topic, named by
+  `TradingContract.Topics.prices_all/0`) and
   re-broadcasts each one onto this app's own **local**
   `TradingOptionsSim.PubSub` as `"prices:" <> symbol` — what
   `ContractMonitor` (§5) actually subscribes to.
@@ -56,8 +57,8 @@ defmodule TradingOptionsSim.PriceRelay do
   # HubClient forwarded verbatim from trading_hub's distributed bus —
   # only a %TradingHub.Message{type: :price} carries anything this app
   # cares about (an underlying tick); everything else (volume, orders,
-  # positions, etc., all fanned out on the same "prices:*"-adjacent
-  # wildcard-expanded topics HubClient subscribes to) is ignored.
+  # positions, etc., fanned out on the other per-domain topics HubClient
+  # can be configured to subscribe to) is ignored.
   def handle_info(message, state) do
     if IbPortfolio.Message.is_message?(message) and match?(%{type: :price}, message) do
       relay_price(message)
@@ -70,7 +71,7 @@ defmodule TradingOptionsSim.PriceRelay do
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{symbol}", message)
   end
 
-  # A pair-symbol price ({a, b}) or the "prices:all" fan-out marker
+  # A pair-symbol price ({a, b}) or the fan-out topic marker
   # itself — neither identifies a single equity underlying this app's
   # own TargetPoolMember.symbol could match against, so there's nothing
   # useful to relay onto a per-symbol local topic.

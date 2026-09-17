@@ -126,13 +126,21 @@ defmodule TradingOptionsSim.Application do
   # rather than through a live distributed-Erlang connection (same
   # posture trading_live's own reactivator_child/0 takes for its own
   # test-only skip).
+  #
+  # Subscribes to trading_hub's fan-out topic by its contract name
+  # rather than the "prices:*" wildcard this used to pass. Phoenix.PubSub
+  # has no wildcard subscriptions -- IbPortfolio.HubClient was expanding
+  # the pattern through a private lookup table to "prices:all" before
+  # subscribing, so naming that topic directly is the same subscription,
+  # just compile-checked against TradingContract instead of matching a
+  # string literal the hub could rename out from under us.
   defp hub_client_children do
     if Application.get_env(:trading_options_sim, :start_hub_client, true) do
       [
         {IbPortfolio.HubClient,
          name: TradingOptionsSim.HubClient,
          hub_node: Application.fetch_env!(:trading_options_sim, :hub_node),
-         topics: ["prices:*"],
+         topics: [TradingContract.Topics.prices_all()],
          forward_to: TradingOptionsSim.PriceRelay}
       ]
     else
