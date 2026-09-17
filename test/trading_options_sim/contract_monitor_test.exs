@@ -696,6 +696,198 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Decimal.equal?(hd(fills).fill_price, Decimal.new("6.25"))
     end
 
+    defp broadcast_option_quote(occ_symbol, data) do
+      message =
+        %{type: :price, symbol: occ_symbol, source: :ibkr, data: data}
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{occ_symbol}", message)
+    end
+
+    defp enter_with_quote(symbol, occ_symbol, opts) do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 200}
+        })
+
+      key = contract_key(symbol)
+
+      {pid, run} =
+        start_monitor(
+          version,
+          key,
+          Keyword.merge([pricing_backend: :ibkr_live, occ_symbol: occ_symbol], opts)
+        )
+
+      broadcast_option_greeks(occ_symbol, %{
+        implied_vol: 0.30,
+        delta: 0.55,
+        opt_price: 6.00,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        und_price: 150.0
+      })
+
+      # Bid and ask arrive as separate TickPrice broadcasts, exactly as
+      # trading_hub's own handler emits them.
+      broadcast_option_quote(occ_symbol, %{bid: 5.00, bid_size: 10})
+      broadcast_option_quote(occ_symbol, %{ask: 7.00, ask_size: 10})
+      Process.sleep(50)
+
+      broadcast_underlying_price(symbol, 150.0)
+      Process.sleep(50)
+
+      {pid, run}
+    end
+
+    test "a separate ask tick does not erase the bid that preceded it" do
+      {_pid, run} = enter_with_quote("IBKRQ1", "IBKRQ1_OCC", [])
+
+      [fill] = Sim.list_sim_fills(run)
+
+      # Both sides survived as one quote: a long entry buys, crossing
+      # 0.25 of the 2.00 spread up from the 6.00 mid.
+      assert Decimal.equal?(fill.fill_price, Decimal.new("6.50"))
+      assert fill.pricing_snapshot["fill_basis"] == "quote"
+      assert fill.pricing_snapshot["fill_bid"] == "5.0"
+      assert fill.pricing_snapshot["fill_ask"] == "7.0"
+    end
+
+    test "a worked rule exit crosses only the configured spread fraction" do
+      {pid, run} = enter_with_quote("IBKRQ2", "IBKRQ2_OCC", [])
+
+      # Drive the exit rule (underlying > 200). The :ibkr_live snapshot
+      # prefers the computation tick's own und_price over the stock
+      # tick's spot (see build_ibkr_live_snapshot/3), so the greeks tick
+      # is what has to move -- the quote is deliberately left unchanged
+      # so the exit prices off the same 5.00/7.00 book as the entry.
+      broadcast_option_greeks("IBKRQ2_OCC", %{
+        implied_vol: 0.30,
+        delta: 0.55,
+        opt_price: 6.00,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        und_price: 250.0
+      })
+
+      Process.sleep(50)
+      broadcast_underlying_price("IBKRQ2", 250.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+
+      exit_fill = Enum.find(Sim.list_sim_fills(run), &(&1.kind == "exit"))
+      assert exit_fill.action == "sell"
+      # Sells 0.25 of the spread below the 6.00 mid.
+      assert Decimal.equal?(exit_fill.fill_price, Decimal.new("5.50"))
+      assert exit_fill.pricing_snapshot["fill_slippage"] == "0.50"
+    end
+
+    test "a forced expiry close crosses the full spread, selling the bid" do
+      {pid, run} = enter_with_quote("IBKRQ3", "IBKRQ3_OCC", [])
+
+      send(pid, {:force_close_eod, :expiry})
+      Process.sleep(50)
+
+      exit_fill = Enum.find(Sim.list_sim_fills(run), &(&1.kind == "exit"))
+      # A deadline flatten can't be worked — it hits the 5.00 bid, not
+      # the 6.00 model mid the sim used to assume.
+      assert Decimal.equal?(exit_fill.fill_price, Decimal.new("5.00"))
+      assert exit_fill.pricing_snapshot["fill_spread_fraction"] == "0.5"
+      assert exit_fill.pricing_snapshot["fill_slippage"] == "1.00"
+    end
+
+    test "a short position fills on the opposite side of the book" do
+      {pid, run} = enter_with_quote("IBKRQ6", "IBKRQ6_OCC", direction: "short")
+
+      # A short sells to open, so the entry gives up toward the bid...
+      entry_fill = Enum.find(Sim.list_sim_fills(run), &(&1.kind == "entry"))
+      assert entry_fill.action == "sell"
+      assert Decimal.equal?(entry_fill.fill_price, Decimal.new("5.50"))
+
+      # ...and a forced close buys to cover, paying the full 7.00 ask.
+      send(pid, {:force_close_eod, :expiry})
+      Process.sleep(50)
+
+      exit_fill = Enum.find(Sim.list_sim_fills(run), &(&1.kind == "exit"))
+      assert exit_fill.action == "buy"
+      assert Decimal.equal?(exit_fill.fill_price, Decimal.new("7.00"))
+    end
+
+    test "falls back to the model price when no quote has arrived" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      occ_symbol = "IBKRQ4_OCC"
+
+      {_pid, run} =
+        start_monitor(version, contract_key("IBKRQ4"),
+          pricing_backend: :ibkr_live,
+          occ_symbol: occ_symbol
+        )
+
+      broadcast_option_greeks(occ_symbol, %{
+        implied_vol: 0.30,
+        delta: 0.55,
+        opt_price: 6.25,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        und_price: 150.0
+      })
+
+      Process.sleep(50)
+      broadcast_underlying_price("IBKRQ4", 150.0)
+      Process.sleep(50)
+
+      [fill] = Sim.list_sim_fills(run)
+      assert Decimal.equal?(fill.fill_price, Decimal.new("6.25"))
+      assert fill.pricing_snapshot["fill_basis"] == "model_price"
+      assert fill.pricing_snapshot["fill_slippage"] == "0"
+    end
+
+    test "ignores an inverted quote rather than filling at a nonsense price" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      occ_symbol = "IBKRQ5_OCC"
+
+      {_pid, run} =
+        start_monitor(version, contract_key("IBKRQ5"),
+          pricing_backend: :ibkr_live,
+          occ_symbol: occ_symbol
+        )
+
+      broadcast_option_greeks(occ_symbol, %{
+        implied_vol: 0.30,
+        delta: 0.55,
+        opt_price: 6.25,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        und_price: 150.0
+      })
+
+      # Crossed book: ask below bid. Must not be used.
+      broadcast_option_quote(occ_symbol, %{bid: 7.00, bid_size: 10})
+      broadcast_option_quote(occ_symbol, %{ask: 5.00, ask_size: 10})
+      Process.sleep(50)
+
+      broadcast_underlying_price("IBKRQ5", 150.0)
+      Process.sleep(50)
+
+      [fill] = Sim.list_sim_fills(run)
+      assert fill.pricing_snapshot["fill_basis"] == "model_price"
+      assert Decimal.equal?(fill.fill_price, Decimal.new("6.25"))
+    end
+
     test "subscribes with underlying_symbol set to the plain ticker, not just occ_symbol" do
       # trading_hub's subscribe_symbol/3 sends `contract` straight through
       # as the wire Contract fields — occ_symbol is purely trading_hub's

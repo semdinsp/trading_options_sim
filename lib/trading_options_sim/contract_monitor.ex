@@ -45,6 +45,19 @@ defmodule TradingOptionsSim.ContractMonitor do
   fallback to the synthetic pricer (mixing real and synthetic prices for
   the same contract would be worse than waiting).
 
+  ## Fill pricing
+
+  A fill takes the near touch of the contract's own two-sided quote
+  (sell the bid, buy the ask) whenever `IBKRLive` has one, rather than
+  the untradeable model mid. A forced close (`"expiry"`, `"eod_flatten"`
+  -- see `@forced_exit_reasons`) crosses the full spread, since a
+  deadline flatten can't be worked; a rule-triggered fill crosses only
+  `:worked_spread_fraction` of it. With no usable quote (the
+  Black-Scholes backend, or an IBKR contract whose quote ticks haven't
+  arrived) it falls back to the model price. `fill_price_for/4` records
+  which basis was used, and the slippage given up, into the persisted
+  fill snapshot.
+
   ## Expiry handling (plan §5b)
 
   Tracks DTE (days to expiry, computed from `expiry`'s wire-format
@@ -124,6 +137,20 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   @default_risk_free_rate 0.05
 
+  # Reasons this app can never work a limit order for: a deadline close
+  # goes through at whatever the book shows. These fill at the full
+  # touch (sell the bid, buy the ask). Every other fill is a
+  # rule-triggered transition a real desk would work, so it crosses only
+  # @worked_spread_fraction of the spread.
+  @forced_exit_reasons ~w(expiry eod_flatten)
+
+  # Fraction of the bid/ask spread a *worked* (rule-triggered) fill gives
+  # up, measured from the mid. 0.5 would be the full touch; the default
+  # models getting partially filled inside the spread. Overridable
+  # per-monitor via :worked_spread_fraction in start_link/1's opts, same
+  # as :implied_volatility.
+  @default_worked_spread_fraction 0.25
+
   defstruct [
     :sim_run_id,
     :contract_key,
@@ -138,6 +165,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     :implied_volatility,
     :risk_free_rate,
     :expiry_close_dte,
+    :worked_spread_fraction,
     :entry_rule,
     :exit_rule,
     :occ_symbol,
@@ -300,6 +328,11 @@ defmodule TradingOptionsSim.ContractMonitor do
       implied_volatility: Keyword.get(opts, :implied_volatility, @default_implied_volatility),
       risk_free_rate: Keyword.get(opts, :risk_free_rate, @default_risk_free_rate),
       expiry_close_dte: Keyword.get(opts, :expiry_close_dte, @default_expiry_close_dte),
+      worked_spread_fraction:
+        opts
+        |> Keyword.get(:worked_spread_fraction, @default_worked_spread_fraction)
+        |> to_string()
+        |> Decimal.new(),
       entry_rule: entry_rule,
       exit_rule: exit_rule,
       occ_symbol: occ_symbol,
@@ -618,7 +651,14 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Falls back to the stock tick's spot only if IBKR didn't send
   # und_price on this particular computation.
   defp build_ibkr_live_snapshot(tick, spot, signal_values) do
-    Map.merge(signal_values, %{
+    quote_values =
+      case Map.get(tick, :quote) do
+        nil -> %{}
+        q -> %{"run_bid" => q[:bid], "run_ask" => q[:ask], "run_quote_delayed" => q[:delayed]}
+      end
+
+    signal_values
+    |> Map.merge(%{
       "run_current_price" => tick.price,
       "run_underlying_price" => tick.underlying_price || spot,
       "run_delta" => tick.delta,
@@ -627,6 +667,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       "run_vega" => tick.vega,
       "run_implied_vol" => tick.implied_vol
     })
+    |> Map.merge(quote_values)
   end
 
   # signal_values (named trading_signal values, keyed by the rule tree's
@@ -759,9 +800,9 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp submit_entry(state, snapshot) do
-    price = fill_price(snapshot["run_current_price"])
-    now = DateTime.utc_now()
     action = if state.direction == "short", do: "sell", else: "buy"
+    {price, fill_basis} = fill_price_for(state, snapshot, action, "entry")
+    now = DateTime.utc_now()
 
     {run, state} = ensure_open_run(state)
 
@@ -772,13 +813,14 @@ defmodule TradingOptionsSim.ContractMonitor do
              quantity: state.quantity,
              fill_price: price,
              filled_at: now,
-             commission: estimate_commission(state, price, action)
+             commission: estimate_commission(state, price, action),
+             pricing_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis))
            },
            %{
              entry_at: now,
              entry_price: price,
              risk_at_entry: Sim.compute_risk_at_entry(price, state.multiplier, state.quantity),
-             entry_snapshot: jsonify_snapshot(snapshot),
+             entry_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis)),
              context: entry_context(state)
            }
          ) do
@@ -798,9 +840,9 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp submit_exit(state, snapshot, exit_reason) do
-    price = fill_price(snapshot["run_current_price"])
-    now = DateTime.utc_now()
     action = if state.direction == "short", do: "buy", else: "sell"
+    {price, fill_basis} = fill_price_for(state, snapshot, action, exit_reason)
+    now = DateTime.utc_now()
 
     run = Sim.get_sim_run!(state.sim_run_id)
     realized_pnl = realized_pnl(run, price, state)
@@ -827,7 +869,8 @@ defmodule TradingOptionsSim.ContractMonitor do
              quantity: state.quantity,
              fill_price: price,
              filled_at: now,
-             commission: exit_commission
+             commission: exit_commission,
+             pricing_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis))
            },
            %{
              exit_at: now,
@@ -835,7 +878,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              exit_reason: exit_reason,
              realized_pnl: realized_pnl,
              realized_pnl_net: realized_pnl_net,
-             exit_snapshot: jsonify_snapshot(snapshot)
+             exit_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis))
            }
          ) do
       {:ok, {_fill, _run}} ->
@@ -850,6 +893,80 @@ defmodule TradingOptionsSim.ContractMonitor do
         state
     end
   end
+
+  # Chooses this fill's price and records how it was arrived at.
+  #
+  # With a real two-sided quote, fills against the book: the full touch
+  # for a forced close (see @forced_exit_reasons), otherwise mid plus
+  # @worked_spread_fraction of the spread in the direction that hurts.
+  # Without one — the BlackScholes backend, or an IBKR contract whose
+  # quote ticks haven't arrived — falls back to the model price, which
+  # is the pre-existing behavior for every fill in this app.
+  #
+  # The returned map is merged into the persisted entry/exit snapshot,
+  # so `SimFill.pricing_snapshot`'s documented "slippage applied" is a
+  # real recorded number rather than an implicit zero.
+  defp fill_price_for(state, snapshot, action, reason) do
+    model_price = fill_price(snapshot["run_current_price"])
+
+    case quote_from(snapshot) do
+      nil ->
+        {model_price, %{"fill_basis" => "model_price", "fill_slippage" => "0"}}
+
+      {bid, ask} ->
+        fraction = spread_fraction(state, reason)
+        price = touch_price(bid, ask, action, fraction) |> Decimal.round(2)
+
+        {price,
+         %{
+           "fill_basis" => "quote",
+           "fill_bid" => Decimal.to_string(bid),
+           "fill_ask" => Decimal.to_string(ask),
+           "fill_spread_fraction" => Decimal.to_string(fraction),
+           "fill_slippage" =>
+             model_price |> Decimal.sub(price) |> Decimal.abs() |> Decimal.to_string()
+         }}
+    end
+  end
+
+  defp spread_fraction(state, reason) do
+    if reason in @forced_exit_reasons do
+      Decimal.new("0.5")
+    else
+      state.worked_spread_fraction
+    end
+  end
+
+  # Mid, moved `fraction` of the way across the spread against the
+  # trader: a buy pays up toward the ask, a sell gives up toward the
+  # bid. At fraction 0.5 this is exactly the touch.
+  defp touch_price(bid, ask, action, fraction) do
+    mid = bid |> Decimal.add(ask) |> Decimal.div(2)
+    concession = ask |> Decimal.sub(bid) |> Decimal.mult(fraction)
+
+    if action == "buy",
+      do: Decimal.add(mid, concession),
+      else: Decimal.sub(mid, concession)
+  end
+
+  # A quote is only usable if both sides are present and actually
+  # crossed the right way. A zero/negative bid, or an inverted book
+  # (crossed or locked quotes do occur, especially around the open and
+  # at expiry), would produce a nonsense fill — fall back to the model
+  # price rather than inventing one, matching this module's existing
+  # "never fabricate a price" posture.
+  defp quote_from(snapshot) do
+    with bid when is_number(bid) <- snapshot["run_bid"],
+         ask when is_number(ask) <- snapshot["run_ask"],
+         true <- bid > 0 and ask > bid do
+      {to_decimal(bid), to_decimal(ask)}
+    else
+      _ -> nil
+    end
+  end
+
+  defp to_decimal(value) when is_float(value), do: Decimal.from_float(value)
+  defp to_decimal(value) when is_integer(value), do: Decimal.new(value)
 
   # BlackScholes.compute/1 returns a raw float — round to cent precision
   # rather than storing floating-point noise (e.g. 5.1999999999999998) as
