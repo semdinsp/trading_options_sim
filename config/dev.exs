@@ -10,6 +10,14 @@ config :trading_options_sim, TradingOptionsSim.Repo,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
 
+# Price option contracts from trading_hub's real IBKR option ticks
+# rather than the synthetic flat-IV Black-Scholes pricer. This is what
+# gives ContractMonitor a two-sided quote to fill against; under
+# :black_scholes every fill falls back to the model mid with zero
+# slippage (fill_basis: "model_price"), which flatters any exit that
+# would really have had to cross a spread.
+config :trading_options_sim, :pricing_backend, :ibkr_live
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #
