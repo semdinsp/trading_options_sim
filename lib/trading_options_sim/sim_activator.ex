@@ -47,14 +47,17 @@ defmodule TradingOptionsSim.SimActivator do
   whenever one or more came up without a live subscription —
   `unsubscribed_symbols` is `[]` in the common case.
 
-  Note: `start_for_member/3` doesn't pass `pricing_backend`/`occ_symbol`
-  yet — every monitor `activate/1` itself starts today runs
-  `:black_scholes`, so `unsubscribed_symbols` is always `[]` in practice
-  until this module is wired to select `:ibkr_live` (a separate,
-  not-yet-scoped task; OCC symbol resolution already exists via
-  `TradingOptionsSim.OccSymbol.build/4`). The plumbing here is in place
-  ahead of that so switching the backend doesn't also require touching
-  this return shape or its callers.
+  The backend comes from `pricing_opts/1`, driven by the
+  `:pricing_backend` app env (default `:black_scholes`). With
+  `:ibkr_live` configured, each monitor gets a real
+  `TradingOptionsSim.OccSymbol.build/4` symbol and subscribes to
+  trading_hub's option ticks, so `unsubscribed_symbols` reports the
+  contracts whose subscription did not come up. Under `:black_scholes`
+  every monitor prices synthetically, never subscribes, and
+  `unsubscribed_symbols` is therefore always `[]` — that was the only
+  behavior available before 2026-09-17, and it is why a fill recorded
+  then shows `fill_basis: "model_price"`: a synthetic price has no
+  bid/ask for `ContractMonitor.fill_price_for/4` to fill against.
   """
   @spec activate(StrategyVersion.t()) ::
           {:ok, [pid()], [String.t()]}
@@ -307,7 +310,7 @@ defmodule TradingOptionsSim.SimActivator do
                  strategy_version: version,
                  direction: version.direction,
                  quantity: 1
-               ]
+               ] ++ pricing_opts(contract_key)
              ]},
           restart: :transient
         }
@@ -336,6 +339,35 @@ defmodule TradingOptionsSim.SimActivator do
         # function's own doc for the full incident.
         :ok = ContractMonitor.update_sim_run_id(pid, run_id)
         pid
+    end
+  end
+
+  # Selects the pricing backend for a monitor this module starts.
+  #
+  # `:ibkr_live` prices from trading_hub's real option ticks (and is the
+  # only backend that can ever see a two-sided quote, which
+  # `ContractMonitor.fill_price_for/4` needs to fill at the touch rather
+  # than at a model mid). `:black_scholes` is synthetic: a flat-IV
+  # theoretical price with no bid/ask at all.
+  #
+  # Gated on `:pricing_backend` config rather than hardcoded so this can
+  # be rolled back without a code change, and so `:test` keeps using
+  # `:black_scholes` (no trading_hub node exists there — see
+  # `Application.hub_client_children/0`'s own test-env skip).
+  #
+  # `ContractMonitor.init/1` raises if `:ibkr_live` arrives without an
+  # `:occ_symbol`, so the symbol is always built here, never left for
+  # the caller to remember.
+  defp pricing_opts({symbol, expiry, strike, right}) do
+    case Application.get_env(:trading_options_sim, :pricing_backend, :black_scholes) do
+      :ibkr_live ->
+        [
+          pricing_backend: :ibkr_live,
+          occ_symbol: TradingOptionsSim.OccSymbol.build(symbol, expiry, strike, right)
+        ]
+
+      _other ->
+        [pricing_backend: :black_scholes]
     end
   end
 end
