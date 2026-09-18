@@ -12,14 +12,15 @@ defmodule TradingOptionsSim.ContractMonitorTest do
   # "AAPL" from one test could otherwise reach a monitor left running
   # from a concurrently-running test using the same symbol.
 
-  defp version_fixture(rules) do
+  defp version_fixture(rules, params \\ %{}) do
     {:ok, strategy} = Sim.create_strategy(%{name: "Test Strategy"})
 
     {:ok, version} =
       Sim.create_strategy_version(strategy, %{
         version: 1,
         position_sizing: %{"method" => "fixed_qty", "qty" => 1},
-        rules: rules
+        rules: rules,
+        params: params
       })
 
     version
@@ -90,7 +91,16 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         opts
       )
 
-    {:ok, pid} = start_supervised({ContractMonitor, start_opts})
+    # Unique child id per monitor: start_supervised/1 defaults the id to
+    # the module, so a test starting more than one ContractMonitor would
+    # otherwise collide with {:already_started, pid}.
+    child_spec = %{
+      id: {ContractMonitor, System.unique_integer([:positive])},
+      start: {ContractMonitor, :start_link, [start_opts]},
+      restart: :transient
+    }
+
+    {:ok, pid} = start_supervised(child_spec)
     {pid, run}
   end
 
@@ -623,6 +633,154 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       closed_run = Sim.get_sim_run!(run.id)
       assert closed_run.status == "closed"
       assert closed_run.exit_reason == "expiry"
+    end
+  end
+
+  describe "min_hold_seconds guard" do
+    # Entry fires at underlying > 100, exit at > 140 -- so a single tick
+    # at 150 satisfies BOTH, which is the near-mirror-image shape that
+    # produces the sub-minute round trips this gate exists to suppress.
+    defp mirror_rules do
+      %{
+        "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+        "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 140}
+      }
+    end
+
+    test "with no min_hold_seconds configured, behaviour is unchanged" do
+      version = version_fixture(mirror_rules())
+      {pid, run} = start_monitor(version, contract_key("MHNONE1"))
+
+      broadcast_underlying_price("MHNONE1", 130.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      broadcast_underlying_price("MHNONE1", 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Enum.map(Sim.list_sim_fills(run), & &1.kind) == ["entry", "exit"]
+    end
+
+    # 0 is NOT "configured as zero" -- it is the same as absent. Every
+    # already-activated version must keep today's behaviour exactly.
+    test "min_hold_seconds of 0 is the same as no gate" do
+      version = version_fixture(mirror_rules(), %{"min_hold_seconds" => 0})
+      {pid, _run} = start_monitor(version, contract_key("MHZERO1"))
+
+      broadcast_underlying_price("MHZERO1", 130.0)
+      Process.sleep(50)
+      broadcast_underlying_price("MHZERO1", 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+    end
+
+    test "suppresses a rule exit inside the hold window, and allows it after" do
+      version = version_fixture(mirror_rules(), %{"min_hold_seconds" => 3600})
+      {pid, run} = start_monitor(version, contract_key("MHHOLD1"))
+
+      broadcast_underlying_price("MHHOLD1", 130.0)
+      Process.sleep(50)
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.position_open? == true
+      assert snap.min_hold_seconds == 3600
+      assert %DateTime{} = snap.entered_at
+
+      # Exit rule is satisfied, but the hold has not elapsed.
+      broadcast_underlying_price("MHHOLD1", 150.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+      assert Enum.map(Sim.list_sim_fills(run), & &1.kind) == ["entry"]
+
+      # Backdate the entry past the window; the same tick now exits.
+      :sys.replace_state(pid, fn st ->
+        %{st | entered_at: DateTime.add(st.entered_at, -7200, :second)}
+      end)
+
+      broadcast_underlying_price("MHHOLD1", 150.0)
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Enum.map(Sim.list_sim_fills(run), & &1.kind) == ["entry", "exit"]
+    end
+
+    # THE SABOTAGE TEST. Verified to go red when the gate is moved above
+    # the forced-close path: with `if min_hold_elapsed?(state)` wrapped
+    # around do_force_close/2, this test fails. That is the check that
+    # earns its keep -- a gate in front of expiry could carry a position
+    # into assignment mechanics this simulator does not model at all,
+    # which is categorically worse than a delayed exit.
+    test "a forced expiry close still fires inside the hold window" do
+      version = version_fixture(mirror_rules(), %{"min_hold_seconds" => 3600})
+      {pid, run} = start_monitor(version, contract_key("MHEXP1"))
+
+      broadcast_underlying_price("MHEXP1", 130.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      # Well inside the 1h hold. The forced close must not be delayed.
+      send(pid, {:force_close_eod, :expiry})
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      closed = Sim.get_sim_run!(run.id)
+      assert closed.status == "closed"
+      assert closed.exit_reason == "expiry"
+    end
+
+    test "an EOD flatten still fires inside the hold window" do
+      version = version_fixture(mirror_rules(), %{"min_hold_seconds" => 3600})
+      {pid, run} = start_monitor(version, contract_key("MHEOD1"))
+
+      broadcast_underlying_price("MHEOD1", 130.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      send(pid, {:force_close_eod, :eod_flatten})
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.get_sim_run!(run.id).exit_reason == "eod_flatten"
+    end
+
+    test "an operator force_close still fires inside the hold window" do
+      version = version_fixture(mirror_rules(), %{"min_hold_seconds" => 3600})
+      {pid, run} = start_monitor(version, contract_key("MHMAN1"))
+
+      broadcast_underlying_price("MHMAN1", 130.0)
+      Process.sleep(50)
+      assert ContractMonitor.snapshot(pid).position_open? == true
+
+      :ok = ContractMonitor.force_close(pid, :manual)
+
+      assert ContractMonitor.snapshot(pid).position_open? == false
+      assert Sim.get_sim_run!(run.id).exit_reason == "manual"
+    end
+
+    # Fail open on every ambiguous branch: a gate that cannot prove its
+    # precondition must not suppress an exit for a position it knows
+    # nothing about.
+    test "fails open when the precondition cannot be proven" do
+      assert ContractMonitor.min_hold_elapsed?(%{min_hold_seconds: nil})
+      assert ContractMonitor.min_hold_elapsed?(%{min_hold_seconds: 0})
+      assert ContractMonitor.min_hold_elapsed?(%{min_hold_seconds: 60, position_open?: false})
+      assert ContractMonitor.min_hold_elapsed?(%{min_hold_seconds: 60, entered_at: nil})
+      assert ContractMonitor.min_hold_elapsed?(%{unexpected: :shape})
+    end
+
+    # A malformed params value must never silently suppress an exit.
+    # Asserted through a real monitor (not just the private reader) so
+    # this covers the whole path from strategy params to gate state.
+    test "a malformed min_hold_seconds means no gate" do
+      for {bad, label} <- [{"60", "string"}, {60.5, "float"}, {-1, "negative"}] do
+        version = version_fixture(mirror_rules(), %{"min_hold_seconds" => bad})
+        key = contract_key("MHBAD#{System.unique_integer([:positive])}")
+        {pid, _run} = start_monitor(version, key)
+
+        assert ContractMonitor.snapshot(pid).min_hold_seconds == nil,
+               "#{label} value #{inspect(bad)} should mean no gate"
+      end
     end
   end
 
