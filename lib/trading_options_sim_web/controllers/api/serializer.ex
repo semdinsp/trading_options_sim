@@ -135,15 +135,23 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
   One `Sim.full_universe_version_metrics/0` row plus its
   `CandidateGates.evaluate/2` verdicts — the same data
   `CandidatesLive` renders, for `GET /api/v1/versions/metrics` and the
-  `list_candidate_metrics` MCP tool. Field names
-  (`capital_hours`/`total_net_r`/`final_score`, alongside
-  `expectancy_r`/`lcb95`/`ucb95`/`realized_pnl`/`cost_margin`/`n_closes`/
-  `exit_reason_histogram`/`gates`) match `TradingSystem`'s own
-  equivalent `full_universe_version_metrics/2` payload (confirmed by
-  reading that app's serializer directly) so an operator moving
-  between the two apps' `/candidates` pages and MCP tools reads one
-  vocabulary. `avg_hold_seconds` has no `trading_system` counterpart —
-  this app's own addition.
+  `list_candidate_metrics` MCP tool.
+
+  `handoff_prompts/perf_contract/0_SPEC.md` is the authority on every
+  field name, unit and population in this payload. Do not add a field
+  it does not list, and do not restate a definition here — an earlier
+  version of this docstring claimed these names "match TradingSystem's
+  own equivalent ... so an operator reads one vocabulary," and that
+  claim is exactly what let `final_score` mean two things a factor of
+  10^6 apart in the two apps.
+
+  Three fields carry the differences that remain, per row:
+  `r_denominator` and `capital_basis` are both `"premium_at_risk"`
+  here (the equities apps use stop distance and entry notional), and
+  `cost_basis` is `"measured"` because this app derives its cost floor
+  from real per-fill commissions rather than a slippage estimate.
+  `avg_hold_seconds` has no `trading_system` counterpart — this app's
+  own addition.
 
   This row's Decimal fields are converted to native JSON numbers via
   `decimal_or_float/1`, not the module's usual `str/1` — matching
@@ -165,24 +173,67 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "target_pool_id" => row.target_pool_id,
       "target_pool_name" => row.target_pool_name,
       "quarantine_trading_days" => row.quarantine_trading_days,
+
+      # Population
+      "basis" => row.basis,
+      "churn" => row.churn,
+      "r_denominator" => row.r_denominator,
       "n_closes" => row.n_closes,
-      "expectancy_r" => decimal_or_float(row.expectancy_r),
-      "lcb95" => row.lcb95,
-      "ucb95" => row.ucb95,
-      "realized_pnl" => decimal_or_float(row.realized_pnl),
-      "avg_commission" => str(row.avg_commission),
-      "cost_margin" => decimal_or_float(row.cost_margin),
-      "capital_hours" => decimal_or_float(row.capital_hours),
-      "avg_hold_seconds" => str(row.avg_hold_seconds),
-      "total_net_r" => decimal_or_float(row.total_net_r),
-      "final_score" => decimal_or_float(row.final_score),
-      "exit_reason_histogram" => row.exit_reason_histogram,
       "excluded_count" => row.excluded_count,
       "excluded_pnl" => decimal_or_float(row.excluded_pnl),
+      "first_traded_on" => str(row.first_traded_on),
       "last_traded_on" => str(row.last_traded_on),
+
+      # Per-trade
+      "expectancy_r" => decimal_or_float(row.expectancy_r),
+      "sd_r" => decimal_or_float(row.sd_r),
+      "total_r" => decimal_or_float(row.total_r),
+
+      # Per-session
+      "n_sessions" => row.n_sessions,
+      "mean_daily_r" => decimal_or_float(row.mean_daily_r),
+      "sd_daily_r" => decimal_or_float(row.sd_daily_r),
+
+      # Money
+      "realized_pnl" => decimal_or_float(row.realized_pnl),
+      "realized_pnl_gross" => decimal_or_float(row.realized_pnl_gross),
+
+      # Cost
+      "avg_commission" => str(row.avg_commission),
+      "required_r" => decimal_or_float(row.required_r),
+      "cost_basis" => row.cost_basis,
+      "cost_margin" => decimal_or_float(row.cost_margin),
+
+      # Capital
+      "capital_hours" => decimal_or_float(row.capital_hours),
+      "capital_basis" => row.capital_basis,
+      "avg_hold_seconds" => str(row.avg_hold_seconds),
+      "scored_runs" => row.scored_runs,
+      "scored_runs_coverage" => row.scored_runs_coverage,
+      "scored_total_r" => decimal_or_float(row.scored_total_r),
+      "scored_expectancy_r" => decimal_or_float(row.scored_expectancy_r),
+      "final_score" => decimal_or_float(row.final_score),
+      "final_score_scale" => row.final_score_scale,
+
+      # Bounds (ucb95/ucb90 intentionally absent — see 0_SPEC.md)
+      "lcb95" => row.lcb95,
+
+      # Derived
+      "sr_trade" => row.sr_trade,
+      "t_trade" => row.t_trade,
+      "sr_session" => row.sr_session,
+      "sr_annual" => row.sr_annual,
+
+      # Envelope
+      "schema_version" => row.schema_version,
+      "computed_through" => str_datetime(row.computed_through),
+      "exit_reason_histogram" => row.exit_reason_histogram,
       "gates" => TradingOptionsSim.CandidateGates.evaluate(row)
     }
   end
+
+  defp str_datetime(nil), do: nil
+  defp str_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 
   defp tags(tags) when is_list(tags), do: Enum.map(tags, &tag/1)
 

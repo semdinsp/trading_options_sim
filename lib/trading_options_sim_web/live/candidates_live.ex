@@ -22,7 +22,7 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   `PerformanceSnapshot` — that table is a once-daily historical rollup;
   this triage page needs current state.
 
-  `expectancy_r`/`lcb95`/`ucb95` here are dollar-R-multiples using
+  `expectancy_r`/`lcb95` here are dollar-R-multiples using
   `SimRun.risk_at_entry` = entry premium at risk (`entry_price *
   multiplier * quantity`) as the risk denominator — see
   `Sim.compute_risk_at_entry/3`'s own `TODO` for why (no strategy in
@@ -163,7 +163,7 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   # nil (never computed) always sorts last, regardless of direction —
   # matches the source page's own "unrated always sorts last" rule for
   # its `rating` column, generalized to every nullable numeric column
-  # here (lcb95, ucb95, expectancy_r, cost_margin, rating).
+  # here (lcb95, expectancy_r, cost_margin, rating).
   defp sort_value(row, key) do
     case Map.get(row, key) do
       nil -> {1, 0}
@@ -330,7 +330,6 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               >
                 lcb95
               </th>
-              <th>ucb95</th>
               <th
                 phx-click="sort_by"
                 phx-value-sort_by="cost_margin"
@@ -351,6 +350,14 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
                 class={sort_link_class(@sort_by, "final_score")}
               >
                 final_score
+              </th>
+              <th
+                phx-click="sort_by"
+                phx-value-sort_by="sr_annual"
+                class={sort_link_class(@sort_by, "sr_annual")}
+                title="Sharpe in R units (not an account Sharpe) — equals the account Sharpe only where risk per trade is a constant fraction of equity and positions do not overlap. A signal-quality measure."
+              >
+                sr_annual
               </th>
               <th>Avg hold</th>
               <th>Exits</th>
@@ -398,7 +405,6 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               <td class={["text-right tabular-nums font-bold", gate_cell_class(row.gates.statistical)]}>
                 {format_r(row.lcb95)}
               </td>
-              <td class="text-right tabular-nums">{format_r(row.ucb95)}</td>
               <td class={["text-right tabular-nums", gate_cell_class(row.gates.economic)]}>
                 {format_r(row.cost_margin)}
               </td>
@@ -406,6 +412,7 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
                 {format_price(row.realized_pnl)}
               </td>
               <td class="text-right tabular-nums">{format_r(row.final_score)}</td>
+              <td class="text-right tabular-nums">{format_r(row.sr_annual)}</td>
               <td class="text-right tabular-nums">{format_hold_seconds(row.avg_hold_seconds)}</td>
               <td class={["normal-case", gate_cell_class(row.gates.exit_logic)]}>
                 {exit_histogram_label(row.exit_reason_histogram)}

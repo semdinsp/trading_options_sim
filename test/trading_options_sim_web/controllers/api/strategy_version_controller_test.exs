@@ -179,12 +179,64 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert row["n_closes"] == 0
       assert Map.has_key?(row, "capital_hours")
       assert Map.has_key?(row, "avg_hold_seconds")
-      assert Map.has_key?(row, "total_net_r")
+      assert Map.has_key?(row, "scored_total_r")
       assert Map.has_key?(row, "final_score")
       assert row["gates"]["sample_floor"] in ["pass", "fail", "not_computed", "not_applicable"]
     end
 
-    test "capital_hours/total_net_r/final_score serialize as native JSON numbers, not strings",
+    # 0_SPEC.md is the authority on this list. A field silently missing
+    # from the payload is the failure mode the whole contract exists to
+    # prevent -- this app has no MCP server registered on the operator's
+    # machine, so GET /api/v1/versions/metrics is its only external
+    # surface and there is no second place to notice the gap.
+    test "the metrics row ships every field 0_SPEC.md requires", %{conn: conn} do
+      version = version_fixture()
+
+      body =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/metrics")
+        |> json_response(200)
+
+      [row] =
+        Enum.filter(body["candidate_metrics"], &(&1["strategy_version_id"] == version.id))
+
+      required = ~w(
+        strategy_version_id strategy_id version strategy_name lifecycle_stage
+        direction target_pool_id target_pool_name
+        basis churn r_denominator n_closes excluded_count excluded_pnl
+        first_traded_on last_traded_on
+        expectancy_r sd_r total_r
+        n_sessions mean_daily_r sd_daily_r
+        realized_pnl realized_pnl_gross
+        required_r cost_basis cost_margin
+        capital_hours capital_basis scored_runs scored_runs_coverage
+        scored_total_r scored_expectancy_r final_score final_score_scale
+        exit_reason_histogram quarantine_trading_days
+        lcb95
+        schema_version computed_through
+      )
+
+      missing = Enum.reject(required, &Map.has_key?(row, &1))
+      assert missing == [], "metrics row is missing: #{inspect(missing)}"
+
+      # Constant-per-row population labels, not booleans a consumer has
+      # to infer from a docstring.
+      assert row["r_denominator"] == "premium_at_risk"
+      assert row["capital_basis"] == "premium_at_risk"
+      assert row["cost_basis"] == "measured"
+      assert row["basis"] == "net"
+      assert row["churn"] == "excluded"
+      assert row["final_score_scale"] == 1_000_000
+
+      # ucb95/ucb90 are explicitly NOT in the contract -- both are pure
+      # derivations of (expectancy_r, sd_r, n_closes), all of which are
+      # in the row.
+      refute Map.has_key?(row, "ucb95")
+      refute Map.has_key?(row, "ucb90")
+    end
+
+    test "capital_hours/scored_total_r/final_score serialize as native JSON numbers, not strings",
          %{conn: conn} do
       pool = pool_fixture(["METRICNUM1"])
       version = version_fixture(%{target_pool_id: pool.id})
@@ -228,7 +280,7 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
 
       [row] = Enum.filter(body["candidate_metrics"], &(&1["strategy_version_id"] == version.id))
 
-      assert is_number(row["total_net_r"])
+      assert is_number(row["scored_total_r"])
       assert is_float(row["expectancy_r"])
       assert is_float(row["realized_pnl"])
     end

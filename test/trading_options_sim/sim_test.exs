@@ -1093,7 +1093,7 @@ defmodule TradingOptionsSim.SimTest do
       assert row.exit_reason_histogram == %{"rule_exit" => 1, "expiry" => 1}
     end
 
-    test "computes capital_hours/avg_hold_seconds/total_net_r/final_score, long and short alike" do
+    test "computes capital_hours/avg_hold_seconds/scored_total_r/final_score, long and short alike" do
       strategy = strategy_fixture()
       version = version_fixture(strategy, %{version: 1})
 
@@ -1125,11 +1125,67 @@ defmodule TradingOptionsSim.SimTest do
       assert Decimal.equal?(Decimal.round(row.capital_hours, 2), Decimal.new("1500.00"))
       assert_in_delta Decimal.to_float(row.avg_hold_seconds), 5400.0, 0.5
 
-      # total_net_r = sum of per-run R-multiples = 100/500 + 50/500 = 0.3
-      assert Decimal.equal?(Decimal.round(row.total_net_r, 4), Decimal.new("0.3000"))
+      # scored_total_r = sum of per-run R-multiples = 100/500 + 50/500 = 0.3
+      assert Decimal.equal?(Decimal.round(row.scored_total_r, 4), Decimal.new("0.3000"))
 
-      # final_score = total_net_r / capital_hours = 0.3/1500 = 0.0002
-      assert Decimal.equal?(Decimal.round(row.final_score, 6), Decimal.new("0.000200"))
+      # final_score = scored_total_r / capital_hours * 1_000_000
+      #            = 0.3/1500 * 1e6 = 200. The scale is what makes this
+      # eyeball-comparable with trading_system's own final_score; the
+      # raw 0.0002 this used to assert was the same ratio a factor of
+      # 10^6 off the shared vocabulary. See 0_SPEC.md.
+      assert Decimal.equal?(Decimal.round(row.final_score, 4), Decimal.new("200.0000"))
+      assert row.final_score_scale == 1_000_000
+
+      # The population labels that make this row joinable to
+      # trading_system's without silently comparing different
+      # quantities.
+      assert row.r_denominator == "premium_at_risk"
+      assert row.capital_basis == "premium_at_risk"
+      assert row.basis == "net"
+      assert row.churn == "excluded"
+      assert row.cost_basis == "measured"
+
+      # Reconciliation identity: total_r == n_closes * expectancy_r.
+      assert Decimal.equal?(
+               Decimal.round(row.total_r, 4),
+               Decimal.round(Decimal.mult(row.expectancy_r, row.n_closes), 4)
+             )
+    end
+
+    test "session grain: sum(daily_r) reconciles with total_r, per 0_SPEC.md" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      # Two runs, same UTC calendar date of exit -> one session.
+      candidate_run_fixture(version, %{
+        symbol: "CANDS1",
+        exit_price: Decimal.new("6.00"),
+        realized_pnl: Decimal.new("100.00"),
+        hold_seconds: 3600
+      })
+
+      candidate_run_fixture(version, %{
+        symbol: "CANDS1",
+        exit_price: Decimal.new("4.00"),
+        realized_pnl: Decimal.new("50.00"),
+        hold_seconds: 3600
+      })
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      # Both closes land on one date, so one session whose daily_r is
+      # the whole total_r -- which is the identity the spec requires to
+      # hold BECAUSE both grains are computed from the same filtered
+      # population.
+      assert row.n_sessions == 1
+      assert Decimal.equal?(Decimal.round(row.mean_daily_r, 4), Decimal.round(row.total_r, 4))
+
+      # sd_daily_r is nil below 2 sessions, matching the n >= 2 guard
+      # that already governs lcb95.
+      assert is_nil(row.sd_daily_r)
+      assert is_nil(row.sr_session)
     end
 
     test "final_score is nil (not a huge number) when capital_hours is near zero" do

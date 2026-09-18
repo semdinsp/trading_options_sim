@@ -381,7 +381,7 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     assert conn.resp_body =~ "insufficient_scope"
   end
 
-  test "list_candidate_metrics returns capital_hours/total_net_r/final_score fields matching REST",
+  test "list_candidate_metrics returns capital_hours/scored_total_r/final_score fields matching REST",
        %{conn: conn} do
     {:ok, strategy} = Sim.create_strategy(%{name: "MCP Candidate Metrics Test"})
 
@@ -401,7 +401,7 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
 
     assert conn.resp_body =~ "capital_hours"
     assert conn.resp_body =~ "avg_hold_seconds"
-    assert conn.resp_body =~ "total_net_r"
+    assert conn.resp_body =~ "scored_total_r"
     assert conn.resp_body =~ "final_score"
     assert conn.resp_body =~ version.id
   end
