@@ -43,6 +43,26 @@ defmodule TradingOptionsSim.Sim do
 
   # --- Strategy versions ------------------------------------------------------
 
+  # R per $1M capital-hour. The raw ratio is ~1e-4 for a typical options
+  # run, which reads as noise in a table; trading_system applies the same
+  # 1_000_000 scale to its own equivalent, so the two apps' numbers are
+  # eyeball-comparable. The scale travels on the wire as
+  # `final_score_scale` and the genuine remaining difference (this app's
+  # premium-at-risk vs trading_system's entry notional) travels as
+  # `capital_basis` — same name, same scale, explicitly different basis,
+  # never a silent factor of 10^6. See 0_SPEC.md.
+  @final_score_scale 1_000_000
+
+  @doc false
+  def final_score_scale, do: @final_score_scale
+
+  # Bumped whenever a field is added, removed or changes meaning, so a
+  # consumer can tell a stale pull from a real change (0_SPEC.md rule 4).
+  @metrics_schema_version 1
+
+  @doc false
+  def metrics_schema_version, do: @metrics_schema_version
+
   @doc """
   Sets `tags: []` on the freshly-inserted struct rather than preloading —
   a brand-new version can't have any tags yet, and this avoids a wasted
@@ -1158,6 +1178,8 @@ defmodule TradingOptionsSim.Sim do
     stats_by_id = expectancy_r_stats_by_version(version_ids)
     commission_by_id = avg_commission_by_version(version_ids)
     exit_histogram_by_id = exit_reason_histogram_by_version(version_ids)
+    session_by_id = session_stats_by_version(version_ids)
+    computed_through = DateTime.utc_now()
     last_traded_by_id = last_traded_on_by_version(version_ids)
     excluded_by_id = excluded_run_stats_by_version(version_ids)
 
@@ -1167,16 +1189,25 @@ defmodule TradingOptionsSim.Sim do
           n_closes: 0,
           expectancy_r: nil,
           lcb95: nil,
-          ucb95: nil,
+          sd_r: nil,
           realized_pnl: nil,
+          realized_pnl_gross: nil,
           capital_hours: nil,
           avg_hold_seconds: nil,
-          total_net_r: nil,
+          scored_total_r: nil,
+          first_traded_on: nil,
           final_score: nil
         })
 
       excluded = Map.get(excluded_by_id, version.id, %{count: 0, pnl: Decimal.new(0)})
       avg_commission = Map.get(commission_by_id, version.id)
+
+      session =
+        Map.get(session_by_id, version.id, %{
+          n_sessions: 0,
+          mean_daily_r: nil,
+          sd_daily_r: nil
+        })
 
       %{
         strategy_version_id: version.id,
@@ -1191,21 +1222,80 @@ defmodule TradingOptionsSim.Sim do
         target_pool_id: version.target_pool_id,
         target_pool_name: version.target_pool && version.target_pool.name,
         quarantine_trading_days: version.quarantine_trading_days || 0,
+        # Population — what was counted. These four are constant per row
+        # and are the reason the contract exists: a consumer joining
+        # these rows to trading_system's must be able to see, from the
+        # payload alone, that the two expectancy_r columns are not the
+        # same quantity. See 0_SPEC.md.
+        basis: "net",
+        churn: "excluded",
+        r_denominator: "premium_at_risk",
+        capital_basis: "premium_at_risk",
         n_closes: stats.n_closes,
-        expectancy_r: stats.expectancy_r,
-        lcb95: stats.lcb95,
-        ucb95: stats.ucb95,
-        realized_pnl: stats.realized_pnl,
-        avg_commission: avg_commission,
-        cost_margin: cost_margin(stats.expectancy_r, avg_commission, stats.n_closes),
-        capital_hours: stats.capital_hours,
-        avg_hold_seconds: stats.avg_hold_seconds,
-        total_net_r: stats.total_net_r,
-        final_score: stats.final_score,
-        exit_reason_histogram: Map.get(exit_histogram_by_id, version.id, %{}),
         excluded_count: excluded.count,
         excluded_pnl: excluded.pnl,
-        last_traded_on: Map.get(last_traded_by_id, version.id)
+        first_traded_on: stats.first_traded_on,
+        last_traded_on: Map.get(last_traded_by_id, version.id),
+
+        # Per-trade statistics
+        expectancy_r: stats.expectancy_r,
+        sd_r: stats.sd_r,
+        total_r: total_r(stats.n_closes, stats.expectancy_r),
+
+        # Per-session statistics
+        n_sessions: session.n_sessions,
+        mean_daily_r: session.mean_daily_r,
+        sd_daily_r: session.sd_daily_r,
+
+        # Money
+        realized_pnl: stats.realized_pnl,
+        realized_pnl_gross: stats.realized_pnl_gross,
+
+        # Cost. "measured" rather than "estimated": unlike
+        # trading_system's notional-slippage fallback, required_r here
+        # derives from REAL per-fill commissions (avg_commission_by_version/1).
+        # The label is what makes that advantage legible to a consumer
+        # comparing the two apps.
+        avg_commission: avg_commission,
+        required_r: required_r(avg_commission),
+        cost_basis: "measured",
+        cost_margin: cost_margin(stats.expectancy_r, avg_commission, stats.n_closes),
+
+        # Capital
+        capital_hours: stats.capital_hours,
+        avg_hold_seconds: stats.avg_hold_seconds,
+        scored_runs: stats.n_closes,
+        scored_runs_coverage: scored_runs_coverage(stats.n_closes, excluded.count),
+        scored_total_r: stats.scored_total_r,
+        scored_expectancy_r: stats.expectancy_r,
+        final_score: stats.final_score,
+        final_score_scale: @final_score_scale,
+
+        # Gates
+        exit_reason_histogram: Map.get(exit_histogram_by_id, version.id, %{}),
+
+        # Envelope (0_SPEC.md rule 4) -- lets a consumer tell a stale
+        # pull from a real change.
+        schema_version: @metrics_schema_version,
+        computed_through: computed_through,
+
+        # Derived. All four are divisions of fields already in this row;
+        # shipped from one place rather than letting four consumers each
+        # implement them. sr_annual is a Sharpe in R UNITS, not an
+        # account Sharpe -- it equals the account Sharpe only where risk
+        # per trade is a constant fraction of equity and positions do
+        # not overlap. It is a signal-quality measure.
+        sr_trade: ratio(stats.expectancy_r, stats.sd_r),
+        t_trade: t_trade(stats.expectancy_r, stats.sd_r, stats.n_closes),
+        sr_session: ratio(session.mean_daily_r, session.sd_daily_r),
+        sr_annual: sr_annual(session.mean_daily_r, session.sd_daily_r),
+
+        # Bounds. ucb95/ucb90 are deliberately NOT here (0_SPEC.md):
+        # both are pure derivations of (expectancy_r, sd_r, n_closes),
+        # all three of which are in this row, and no consumer of a
+        # metrics payload reads an upper bound. The retirement criterion
+        # that does (ucb90 < 0) runs off its own query and is untouched.
+        lcb95: stats.lcb95
       }
     end)
   end
@@ -1218,15 +1308,24 @@ defmodule TradingOptionsSim.Sim do
   # same "closed but never traded" case this app already models
   # elsewhere).
   #
-  # Field names/shape (capital_hours, total_net_r, final_score) match
-  # trading_system's own equivalent (Trading.full_universe_version_metrics/2,
-  # confirmed by reading that app's code directly — same names, same
-  # "final_score = Σ total_net_r ÷ Σ capital_hours" definition, not a
-  # mean of daily/per-run ratios) so an operator moving between the two
-  # apps' /candidates pages and MCP tools sees one vocabulary.
-  # total_net_r is a SUM of per-run R-multiples (realized_pnl_net /
-  # risk_at_entry) — a different quantity from realized_pnl (summed
-  # dollars); final_score divides through capital_hours, not dollars.
+  # `handoff_prompts/perf_contract/0_SPEC.md` is the authority on every
+  # field name, unit and population here — do not re-derive a definition
+  # in this file. An earlier version of this comment asserted that these
+  # names "match trading_system's own equivalent ... so an operator sees
+  # one vocabulary," and that claim is what allowed two silent drifts:
+  #
+  #   * final_score was this app's raw total_r/capital_hours while
+  #     trading_system scaled the same ratio by 1_000_000 — a factor of
+  #     10^6 under one name. Both now apply @final_score_scale and ship
+  #     it as a field.
+  #   * capital_hours uses risk_at_entry (premium at risk) here and
+  #     entry notional there. That difference is real and permanent —
+  #     options have no stop-distance denominator to borrow — so it is
+  #     LABELLED via capital_basis rather than reconciled.
+  #
+  # The same applies to R itself: compute_risk_at_entry/3 is the full
+  # premium, where the equities apps use |entry - stop| * qty. Hence
+  # r_denominator on every row.
   #
   # capital_hours/total_net_r/avg_hold_seconds are computed from this
   # SAME query/population as expectancy_r — one grouped SQL call —
@@ -1252,7 +1351,7 @@ defmodule TradingOptionsSim.Sim do
       mean: avg(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
       stddev: fragment("stddev_samp(? / ?)", r.realized_pnl_net, r.risk_at_entry),
       realized_pnl: sum(r.realized_pnl_net),
-      total_net_r: sum(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
+      scored_total_r: sum(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
       capital_hours:
         sum(
           fragment(
@@ -1262,36 +1361,160 @@ defmodule TradingOptionsSim.Sim do
             r.entry_at
           )
         ),
-      avg_hold_seconds: avg(fragment("EXTRACT(EPOCH FROM (? - ?))", r.exit_at, r.entry_at))
+      avg_hold_seconds: avg(fragment("EXTRACT(EPOCH FROM (? - ?))", r.exit_at, r.entry_at)),
+      realized_pnl_gross: sum(r.realized_pnl),
+      first_traded_on: min(fragment("(? AT TIME ZONE 'UTC')::date", r.exit_at))
     })
     |> Repo.all()
     |> Map.new(fn row ->
       stats =
         if row.n >= 2 and row.mean do
           stddev = row.stddev || Decimal.new(0)
-          {lcb, ucb} = TradingCore.Stats.bounds(row.mean, stddev, row.n, :p95)
+          {lcb, _ucb} = TradingCore.Stats.bounds(row.mean, stddev, row.n, :p95)
 
           %{
             expectancy_r: row.mean,
-            lcb95: lcb && Decimal.to_float(lcb),
-            ucb95: ucb && Decimal.to_float(ucb)
+            sd_r: row.stddev,
+            lcb95: lcb && Decimal.to_float(lcb)
           }
         else
-          %{expectancy_r: row.mean, lcb95: nil, ucb95: nil}
+          # sd_r is nil below 2 closes for the same reason lcb95 is:
+          # stddev_samp of one observation is undefined, and a bound
+          # built on it would be a fabricated number.
+          %{expectancy_r: row.mean, sd_r: nil, lcb95: nil}
         end
 
       stats =
         Map.merge(stats, %{
           n_closes: row.n,
           realized_pnl: row.realized_pnl,
+          realized_pnl_gross: row.realized_pnl_gross,
           capital_hours: row.capital_hours,
           avg_hold_seconds: row.avg_hold_seconds,
-          total_net_r: row.total_net_r,
-          final_score: final_score(row.total_net_r, row.capital_hours)
+          scored_total_r: row.scored_total_r,
+          first_traded_on: row.first_traded_on,
+          final_score: final_score(row.scored_total_r, row.capital_hours)
         })
 
       {row.strategy_version_id, stats}
     end)
+  end
+
+  # Per-session statistics (0_SPEC.md "The two grains"). Intraday trades
+  # on one session share a regime and a gap, so per-trade standard
+  # errors are overstated; aggregating to the session handles that by
+  # construction, with no intraclass-correlation constant to assume.
+  #
+  # The population is deliberately IDENTICAL to
+  # expectancy_r_stats_by_version/1's — closed, not churn, non-nil
+  # realized_pnl_net, non-nil non-zero risk_at_entry, non-nil
+  # entry_at/exit_at. That is what makes the spec's
+  # `sum(daily_r) == total_r` identity hold, and it extends to a third
+  # pair the same one-population discipline that already keeps
+  # final_score's numerator and denominator from drifting apart.
+  #
+  # The grain is the UTC CALENDAR DATE of exit_at — the date a close
+  # settled on, matching trading_system's strategy_run_daily
+  # .trading_date convention. Matching it deliberately is worth more
+  # than being cleverer than it in one app.
+  #
+  # There is no daily rollup TABLE here on purpose: performance_snapshots
+  # is an append-only whole-history recompute with no per-date grain and
+  # no R fields, so it cannot serve this. A subquery is enough until
+  # there is a measured query-cost reason it is not.
+  defp session_stats_by_version(version_ids) do
+    daily =
+      SimRun
+      |> where([r], r.strategy_version_id in ^version_ids)
+      |> where([r], r.status == "closed")
+      |> where([r], not r.is_churn)
+      |> where([r], not is_nil(r.realized_pnl_net))
+      |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
+      |> where([r], not is_nil(r.entry_at) and not is_nil(r.exit_at))
+      |> group_by([r], [
+        r.strategy_version_id,
+        fragment("(? AT TIME ZONE 'UTC')::date", r.exit_at)
+      ])
+      |> select([r], %{
+        strategy_version_id: r.strategy_version_id,
+        d: fragment("(? AT TIME ZONE 'UTC')::date", r.exit_at),
+        daily_r: sum(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry))
+      })
+
+    from(x in subquery(daily),
+      group_by: x.strategy_version_id,
+      select: %{
+        strategy_version_id: x.strategy_version_id,
+        n_sessions: count(x.d),
+        mean_daily_r: avg(x.daily_r),
+        sd_daily_r: fragment("stddev_samp(?)", x.daily_r)
+      }
+    )
+    |> Repo.all()
+    |> Map.new(fn row ->
+      # sd_daily_r is nil below 2 sessions, matching the n >= 2 guard
+      # expectancy_r_stats_by_version/1 already applies to lcb95.
+      sd = if row.n_sessions >= 2, do: row.sd_daily_r, else: nil
+
+      {row.strategy_version_id,
+       %{n_sessions: row.n_sessions, mean_daily_r: row.mean_daily_r, sd_daily_r: sd}}
+    end)
+  end
+
+  # Shared guard for every derived ratio: a nil or zero denominator is
+  # "not computable", never a number. Ratios are floats -- these are
+  # descriptive statistics, not money.
+  defp ratio(nil, _d), do: nil
+  defp ratio(_n, nil), do: nil
+
+  defp ratio(numerator, denominator) do
+    d = to_float(denominator)
+    if d == 0.0, do: nil, else: to_float(numerator) / d
+  end
+
+  defp t_trade(_mean, _sd, n) when is_nil(n) or n < 2, do: nil
+
+  defp t_trade(mean, sd, n) do
+    case ratio(mean, sd) do
+      nil -> nil
+      sr -> sr * :math.sqrt(n)
+    end
+  end
+
+  @trading_days_per_year 252
+
+  defp sr_annual(mean_daily_r, sd_daily_r) do
+    case ratio(mean_daily_r, sd_daily_r) do
+      nil -> nil
+      sr -> sr * :math.sqrt(@trading_days_per_year)
+    end
+  end
+
+  defp to_float(%Decimal{} = d), do: Decimal.to_float(d)
+  defp to_float(n) when is_number(n), do: n / 1
+
+  # total_r is the SUM of per-run R, and the spec's first reconciliation
+  # identity is `total_r == n_closes * expectancy_r`. Deriving it from
+  # exactly that product rather than a second SUM in SQL makes the
+  # identity true by construction instead of by coincidence.
+  defp total_r(0, _expectancy_r), do: nil
+  defp total_r(_n_closes, nil), do: nil
+  defp total_r(n_closes, expectancy_r), do: Decimal.mult(expectancy_r, n_closes)
+
+  # The cost floor expectancy_r must clear, in R units: two fills
+  # (entry + exit) per closed run at the measured average commission.
+  # cost_margin is expectancy_r - required_r, so the two must stay on
+  # one definition of "round trip" -- hence both read this function.
+  defp required_r(nil), do: nil
+  defp required_r(avg_commission_r), do: Decimal.mult(avg_commission_r, 2)
+
+  # What fraction of this version's closed runs made it into the scored
+  # population. 1.0 means nothing was excluded as churn/no-entry.
+  defp scored_runs_coverage(0, 0), do: nil
+
+  defp scored_runs_coverage(n_closes, excluded_count) do
+    total = n_closes + excluded_count
+    if total == 0, do: nil, else: n_closes / total
   end
 
   # Guards the divisor: near-zero capital_hours (a handful of seconds of
@@ -1301,13 +1524,13 @@ defmodule TradingOptionsSim.Sim do
   # Matches trading_system's own guard on the same divisor.
   @min_capital_hours Decimal.new("0.01")
 
-  defp final_score(_total_net_r, nil), do: nil
+  defp final_score(_scored_total_r, nil), do: nil
 
-  defp final_score(total_net_r, capital_hours) do
+  defp final_score(scored_total_r, capital_hours) do
     if Decimal.compare(capital_hours, @min_capital_hours) == :lt do
       nil
     else
-      Decimal.div(total_net_r, capital_hours)
+      scored_total_r |> Decimal.div(capital_hours) |> Decimal.mult(@final_score_scale)
     end
   end
 
