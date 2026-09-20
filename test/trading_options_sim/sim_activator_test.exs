@@ -43,16 +43,26 @@ defmodule TradingOptionsSim.SimActivatorTest do
       assert {:error, :no_target_pool} = SimActivator.activate(version)
     end
 
+    # Defence in depth. StrategyVersion's changeset now rejects any
+    # strike_selection without a resolver, so this shape cannot normally
+    # reach activate/1 -- it is built by bypassing the changeset on
+    # purpose. The activator must still refuse it rather than trusting
+    # that whatever is in the database was validated by the current
+    # schema: a row written before a validation tightened is exactly the
+    # case that would otherwise activate against a config nothing can
+    # resolve.
     test "returns {:error, :unsupported_leg_config} for an unrecognized selection method" do
       pool = pool_fixture(["AAPL"])
 
       version =
         version_fixture(%{
           target_pool_id: pool.id,
-          option_leg_config: %{"strike_selection" => "fixed_delta"}
+          option_leg_config: %{"strike_selection" => "fixed_strike"}
         })
 
-      assert {:error, :unsupported_leg_config} = SimActivator.activate(version)
+      unvalidated = %{version | option_leg_config: %{"strike_selection" => "fixed_delta"}}
+
+      assert {:error, :unsupported_leg_config} = SimActivator.activate(unvalidated)
     end
 
     # Regression test for a real deadlock, observed live 2026-09-17 on
