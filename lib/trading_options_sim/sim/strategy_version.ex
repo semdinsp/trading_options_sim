@@ -62,8 +62,25 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   }
 
   @option_rights ~w(C P either)
+  # Same rule as @strike_selections: resolvable values only. "fixed" and
+  # "leaps" both resolve via resolve_contract_template/1 (which treats
+  # them identically -- "leaps" is documentation, not behaviour) and
+  # "dte_target" via ContractSelector.
   @expiry_selections ~w(fixed dte_target leaps)
-  @strike_selections ~w(fixed_delta fixed_strike pct_otm)
+  # Every value here MUST have a resolver, because this validation is
+  # the only thing standing between a saved version and a silent
+  # non-activation.
+  #
+  #   fixed_strike -> SimActivator.resolve_contract_template/1
+  #   atm_offset   -> TradingOptionsSim.ContractSelector.resolve/2
+  #
+  # fixed_delta and pct_otm were accepted here until 2026-09-20 and had
+  # no resolver on either path: a version using one saved cleanly, then
+  # failed at activation with :unsupported_leg_config. Nothing in the
+  # catalog used them (checked: all 31 versions were fixed_strike), so
+  # they are removed rather than left as a trap. Re-add a value here in
+  # the SAME change that gives it a resolver, never before.
+  @strike_selections ~w(fixed_strike atm_offset)
 
   schema "strategy_versions" do
     field :version, :integer
