@@ -210,7 +210,11 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   def notes_changeset(strategy_version, attrs) do
     strategy_version
     |> cast(attrs, [:notes])
-    |> validate_length(:notes, max: 255)
+
+    # No max: notes carry a structured caveat block (see
+    # TradingOptionsSim.Sim.Caveat), and the old 255 was an accident of
+    # `add :notes, :string` rather than a deliberate ceiling. The column
+    # is :text as of 20260919120000.
   end
 
   @doc """
