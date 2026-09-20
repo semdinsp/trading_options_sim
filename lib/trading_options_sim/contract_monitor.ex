@@ -173,6 +173,14 @@ defmodule TradingOptionsSim.ContractMonitor do
     pricing_backend: :black_scholes,
     ibkr_live_subscribed?: true,
     position_open?: false,
+    # Timestamp of the entry FILL (SimFill.filled_at), not of run open
+    # or of when the entry rule fired -- see min_hold_elapsed?/1.
+    entered_at: nil,
+    # Opt-in minimum hold in seconds. nil/absent/0 all mean NO GATE;
+    # never defaulted to 0-as-configured, so every already-activated
+    # version keeps today's behaviour byte-for-byte. Shared config key
+    # with trading_system and trading_live: params["min_hold_seconds"].
+    min_hold_seconds: nil,
     last_snapshot: %{},
     signal_names: [],
     canonical_names: %{},
@@ -337,6 +345,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       pricing_backend: pricing_backend,
       ibkr_live_subscribed?: pricing_backend != :ibkr_live,
       position_open?: Keyword.get(opts, :position_open?, false),
+      min_hold_seconds: min_hold_seconds(strategy_version),
       signal_names: signal_names,
       canonical_names: canonical_names
     }
@@ -457,6 +466,8 @@ defmodule TradingOptionsSim.ContractMonitor do
       direction: state.direction,
       exchange: state.exchange,
       position_open?: state.position_open?,
+      entered_at: state.entered_at,
+      min_hold_seconds: state.min_hold_seconds,
       ibkr_live_subscribed?: state.ibkr_live_subscribed?,
       last_snapshot: state.last_snapshot
     }
@@ -725,12 +736,107 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp maybe_transition(%{position_open?: true} = state, snapshot) do
-    if RuleEngine.evaluate(state.exit_rule, snapshot) and session_open?(state) do
+    if min_hold_elapsed?(state) and RuleEngine.evaluate(state.exit_rule, snapshot) and
+         session_open?(state) do
       submit_exit(state, snapshot, "rule_exit")
     else
       state
     end
   end
+
+  @doc """
+  `true` when the rule-based exit is allowed to fire.
+
+  Suppresses ONLY the `rules["exit"]` path for `min_hold_seconds` after
+  the entry FILL. Every forced close continues to fire during the
+  window: `force_close_expiry/3` (DTE-based) and `do_force_close/2`
+  (`EodCloser`, and the operator's `force_close/2`) call `submit_exit/3`
+  directly and never reach `maybe_transition/2`, which is the only
+  place this gate is consulted.
+
+  That separation is STRUCTURAL, not an exemption list. A list of
+  "unless expiry, unless EOD, unless ..." rots the first time someone
+  adds a new close path; ordering does not. The forced closes already
+  bypass `session_open?/1` for the same reason, so this gate inherits a
+  separation the module had already established rather than inventing
+  one. Ported from `TradingLive.StrategyStockMonitor.min_hold_elapsed?/1`
+  (branch `claude/min-hold-seconds-exit-guard`) -- same config key,
+  same `nil`/`0` semantics, same fail-open rule -- so a version
+  promoted between the apps behaves identically.
+
+  ## Expiry is the close this must never delay
+
+  In the equities apps the worst case for a wrongly-suppressed exit is
+  one delayed exit against a stop that still fires. Here there is no
+  stop: `stop_loss`/`take_profit` do not exist in this module, and
+  `SimRun.stop_loss_price` has no writer anywhere in this codebase
+  (see `Sim.compute_risk_at_entry/3`'s own TODO, which is also why R is
+  premium-at-risk rather than stop-distance). The backstop that makes
+  the equities argument safe is absent, so the cost of a wrongly
+  suppressed exit is bounded only by the premium.
+
+  Worse, `force_close_expiry/3` exists specifically to flatten before
+  assignment mechanics this simulator does not model. A gate in front
+  of it could carry a position into expiry -- not a delayed exit, but
+  an outcome the sim cannot price at all. Hence the sabotage test in
+  `contract_monitor_test.exs`: move this gate above the forced closes
+  and that test must go red.
+
+  ## Fail open on every ambiguous branch
+
+  No position, no known entry time, or an unexpected shape all return
+  `true` (allow the exit). A gate that cannot prove its precondition
+  must not silently suppress an exit for a position it knows nothing
+  about. The equities apps justify this by noting the harms are not
+  comparable; that argument is weaker here for the reason above, so it
+  is re-derived rather than inherited: a wrongly allowed exit costs one
+  early exit, while a wrongly suppressed one leaves a decaying position
+  with nothing underneath to catch it. Failing open is still correct,
+  but because it is the safer default for an unprovable precondition,
+  not because a stop will clean up afterwards.
+
+  ## Why the gate exists
+
+  `trading_system` measured 60,057 closed runs held under one minute at
+  -$30.10/trade NET, with cost drag only ~10% of the gross loss -- those
+  trades lose BEFORE costs, so the signals have no edge at that horizon.
+  87% of closes were rule exits firing seconds after entry, because
+  entry and exit conditions are near-mirror images and noise
+  round-trips the position. Observed independently in this app before
+  either figure was shared: `SPY VWAP Reversion Call` (entry z < -1.5,
+  exit z > -0.5) round-tripped 5 times in ~2 minutes on cent-level
+  moves, with commission exceeding P&L on every close.
+
+  This roster is where the gate binds hardest: 30 of 31 versions here
+  have an exit rule, against ~27% in `trading_system`.
+  """
+  @spec min_hold_elapsed?(t() | map()) :: boolean()
+  def min_hold_elapsed?(%{min_hold_seconds: nil}), do: true
+  def min_hold_elapsed?(%{min_hold_seconds: 0}), do: true
+
+  # Flat, or open with no recorded entry fill time -- fail OPEN.
+  def min_hold_elapsed?(%{position_open?: false}), do: true
+  def min_hold_elapsed?(%{entered_at: nil}), do: true
+
+  def min_hold_elapsed?(%{min_hold_seconds: seconds, entered_at: %DateTime{} = entered_at})
+      when is_integer(seconds) and seconds > 0 do
+    hold_ends_at = DateTime.add(entered_at, seconds, :second)
+    DateTime.compare(DateTime.utc_now(), hold_ends_at) != :lt
+  end
+
+  def min_hold_elapsed?(_state), do: true
+
+  # params["min_hold_seconds"] on the strategy version. Anything that is
+  # not a positive integer -- absent, nil, 0, a string, a float -- means
+  # no gate, so a malformed value can never silently suppress an exit.
+  defp min_hold_seconds(%{params: params}) when is_map(params) do
+    case Map.get(params, "min_hold_seconds") do
+      seconds when is_integer(seconds) and seconds > 0 -> seconds
+      _absent_or_invalid -> nil
+    end
+  end
+
+  defp min_hold_seconds(_version), do: nil
 
   # "Observation always runs, the resulting action is what's gated" —
   # same split TradingLive.StrategyStockMonitor's transmission_allowed?/1
@@ -862,7 +968,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
         Sim.maybe_mark_prior_run_as_churn(state.strategy_version.id, run)
 
-        %{state | position_open?: true}
+        %{state | position_open?: true, entered_at: now}
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} entry fill failed: #{inspect(reason)}")
@@ -917,7 +1023,7 @@ defmodule TradingOptionsSim.ContractMonitor do
           "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} exited at #{Decimal.to_string(price)} (#{exit_reason})"
         )
 
-        %{state | position_open?: false}
+        %{state | position_open?: false, entered_at: nil}
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} exit fill failed: #{inspect(reason)}")
