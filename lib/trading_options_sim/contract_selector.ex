@@ -20,20 +20,31 @@ defmodule TradingOptionsSim.ContractSelector do
   these levels — and TWS rejected every subscription with error 200
   until they were corrected by hand.
 
-  ## Strikes are probed, not computed
+  ## Rounding first, probing only to confirm
 
-  There is no chain endpoint on `trading_hub`, and the listing increment
-  is not uniform: it varies by underlying, by price level, and by expiry
-  (weeklies are often denser than monthlies). Assuming "$5 for SPY"
-  would be correct today and wrong for the first symbol added that
-  doesn't follow it — the same false-uniformity trap that has already
-  produced several silent failures in this workspace.
+  An earlier version of this module probed candidate strikes outward
+  from spot until one resolved. Measured against the live hub, that is
+  unusable: a resolve HIT costs ~148ms, but a MISS costs a full
+  **10 seconds** — IBKR never replies for a contract it doesn't know, so
+  every miss runs to timeout. Probing ~20 candidates for a symbol whose
+  grid is offset could burn 200 seconds.
 
-  So candidates are generated around the spot and each is validated via
-  `TradingHub.IBKR.ContractResolver.resolve/4`, which answers
-  authoritatively whether IBKR knows that contract. The first candidate
-  that resolves wins. A symbol on $1 or $2.50 increments therefore works
-  with no change here, just with a nearer hit.
+  Worse, `IbPortfolio.HubClient` is a single GenServer that serializes
+  every hub call for this app. A probe loop doesn't just make itself
+  slow, it blocks `IBKRLive` subscriptions and every other hub consumer
+  behind it — observed live as a 20-message backlog on that process.
+
+  So the strike is ROUNDED to the underlying's known increment and
+  confirmed with ONE resolve. If that misses, the two neighbouring
+  grid points are tried and then it gives up. Worst case is three
+  calls (~20s), typical case one (~148ms).
+
+  `@strike_increments` is therefore a real assumption rather than
+  something discovered at runtime, and a wrong entry produces a
+  `:no_listed_contract` rather than a bad fill. Each entry below is
+  verified against IBKR, and an unlisted symbol falls back to $1 —
+  the densest common grid, so a miss is a miss rather than a silent
+  skip past a strike that exists.
 
   ## Expiry
 
@@ -50,13 +61,27 @@ defmodule TradingOptionsSim.ContractSelector do
 
   @type contract :: %{expiry: String.t(), strike: Decimal.t(), right: String.t()}
 
-  # Candidate offsets from spot, in dollars, tried nearest-first. Wide
-  # enough to find a listing on a $10-increment underlying, fine enough
-  # to land exactly on a $1-increment one.
-  @probe_steps [0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10]
+  # Strike grid per underlying, probed against IBKR 2026-09-20 on the
+  # 20261120 monthly. Increments widen with price and vary by expiry,
+  # so these are a claim about the liquid monthlies this app targets,
+  # not about every listing.
+  #
+  #   SPY  760C ok, 762C/763C not found            -> 5.0
+  #   QQQ  715C/720C ok                            -> 5.0
+  #   XLF   53C ok,  53.5C not found,  54C ok      -> 1.0
+  #   XLK  275C ok, 276C/277.5C/280C not found     -> UNRESOLVED
+  #
+  # XLK is deliberately absent. 275 lists while 276, 277.5 and 280 do
+  # not, which fits no single increment, and pinning it down needs more
+  # probes than is reasonable against a shared HubClient at 10s per
+  # miss. It therefore takes @default_increment and will most likely
+  # return :no_listed_contract until someone measures it properly --
+  # which is the correct failure: no contract beats a wrong one.
+  @strike_increments %{"SPY" => 5.0, "QQQ" => 5.0, "XLF" => 1.0}
 
-  # How many monthly expiries past the target to try before giving up.
-  @expiry_lookahead 3
+  # $1 is the densest common grid, so an unknown symbol misses rather
+  # than silently skipping past a strike that exists.
+  @default_increment 1.0
 
   @doc """
   Resolves `leg_config` for `symbol` into a concrete contract.
@@ -112,43 +137,21 @@ defmodule TradingOptionsSim.ContractSelector do
     Date.day_of_week(date) == 5 and date.day in 15..21
   end
 
-  # Nearest-first, both directions: a strike below the target is as good
-  # as one above when both are equidistant, and which exists depends on
-  # where the increment grid happens to fall.
-  defp probe_strikes(symbol, expiry, target, right, config) do
+  # At most three candidates: the rounded strike, then one grid step
+  # either side. Bounded deliberately -- see the moduledoc on why an
+  # unbounded probe loop is a denial of service against the shared
+  # HubClient rather than merely slow.
+  defp probe_strikes(symbol, expiry, target, right, _config) do
+    increment = Map.get(@strike_increments, symbol, @default_increment)
+    rounded = Float.round(target / increment) * increment
+
     candidates =
-      @probe_steps
-      |> Enum.flat_map(fn step -> [target + step, target - step] end)
-      |> Enum.map(&Float.round(&1 * 1.0, 2))
+      [rounded, rounded + increment, rounded - increment]
+      |> Enum.map(&Float.round(&1, 2))
       |> Enum.uniq()
 
-    expiries = expiry_candidates(expiry, config)
-
-    Enum.reduce_while(expiries, {:error, :no_listed_contract}, fn exp, acc ->
-      case first_listed(symbol, exp, candidates, right) do
-        {:ok, _} = found -> {:halt, found}
-        {:error, _} -> {:cont, acc}
-      end
-    end)
+    first_listed(symbol, expiry, candidates, right)
   end
-
-  # Only walk forward through expiries when the caller asked for a DTE
-  # target. A deliberately named fixed_expiry is not silently swapped
-  # for a different month.
-  defp expiry_candidates(expiry, %{"expiry_selection" => "dte_target"}) do
-    Enum.reduce(1..@expiry_lookahead, [expiry], fn _i, acc ->
-      next =
-        acc
-        |> List.last()
-        |> parse_expiry()
-        |> Date.add(1)
-        |> third_friday_on_or_after(25)
-
-      acc ++ [next]
-    end)
-  end
-
-  defp expiry_candidates(expiry, _config), do: [expiry]
 
   defp first_listed(symbol, expiry, candidates, right) do
     Enum.reduce_while(candidates, {:error, :no_listed_contract}, fn strike, acc ->
@@ -197,10 +200,6 @@ defmodule TradingOptionsSim.ContractSelector do
       _other ->
         {:error, :no_spot}
     end
-  end
-
-  defp parse_expiry(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>) do
-    Date.new!(String.to_integer(y), String.to_integer(m), String.to_integer(d))
   end
 
   defp to_decimal(value) when is_float(value) do
