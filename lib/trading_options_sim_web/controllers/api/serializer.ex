@@ -6,6 +6,8 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
   doesn't encode `Decimal` by default.
   """
 
+  alias TradingOptionsSim.Sim.Caveat
+
   @doc """
   Parses `"limit"`/`"offset"` query-string params (both optional
   strings, since Plug never coerces query params to integers) into the
@@ -75,6 +77,12 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "target_pool_id" => version.target_pool_id,
       "source" => version.source,
       "notes" => version.notes,
+      # ALWAYS present, even when empty -- an absent key cannot be
+      # distinguished from "this client didn't know to look", which is
+      # the whole failure mode Caveat exists to close. [] / false is a
+      # positive statement that nothing is flagged.
+      "caveats" => Enum.map(Caveat.parse(version.notes), &Caveat.to_map/1),
+      "has_open_caveat" => Caveat.open?(version.notes),
       "rating" => version.rating,
       "tags" => tags(version.tags),
       "inserted_at" => str(version.inserted_at)

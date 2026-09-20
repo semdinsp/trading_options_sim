@@ -586,10 +586,16 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     assert conn.resp_body =~ "no strategy version with id"
   end
 
-  test "update_strategy_version_notes returns an MCP error (not a crash) over 255 chars", %{
+  # Was "returns an MCP error (not a crash) over 255 chars". notes was
+  # varchar(255), so an over-length note was a real crash path. The
+  # column is :text as of migration 20260919120000 -- notes now carry
+  # structured caveat blocks (TradingOptionsSim.Sim.Caveat), which do
+  # not fit in 255 characters. Inverted rather than deleted so a future
+  # narrowing fails here instead of silently truncating a caveat.
+  test "update_strategy_version_notes accepts a note past the old 255-char ceiling", %{
     conn: conn
   } do
-    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Notes Too Long Test"})
+    {:ok, strategy} = Sim.create_strategy(%{name: "MCP Notes Long Test"})
 
     {:ok, version} =
       Sim.create_strategy_version(strategy, %{
@@ -602,18 +608,18 @@ defmodule TradingOptionsSimWeb.MCPIntegrationTest do
     conn = initialize(conn, raw)
     session = session_id(conn)
 
-    too_long = String.duplicate("a", 256)
+    long = String.duplicate("a", 4_000)
 
     conn =
       call_tool(
         raw,
         session,
         "update_strategy_version_notes",
-        %{"version_id" => version.id, "notes" => too_long},
+        %{"version_id" => version.id, "notes" => long},
         2
       )
 
-    assert conn.resp_body =~ "failed to update notes"
-    assert Sim.get_strategy_version!(version.id).notes != too_long
+    refute conn.resp_body =~ "failed to update notes"
+    assert Sim.get_strategy_version!(version.id).notes == long
   end
 end

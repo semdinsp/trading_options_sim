@@ -497,17 +497,75 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert json_response(conn, 403)
     end
 
-    test "422s (not 500) when notes exceed 255 characters", %{conn: conn} do
+    # The fields must be present on EVERY row, not only caveated ones.
+    # An absent key is indistinguishable from "this client didn't know
+    # to look", which is the exact failure the caveat index exists to
+    # close: the answer was already in the payload and nobody could ask
+    # for it.
+    test "every version row carries caveats and has_open_caveat", %{conn: conn} do
       version = version_fixture()
-      too_long = String.duplicate("a", 256)
+
+      row =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/#{version.id}")
+        |> json_response(200)
+        |> Map.fetch!("strategy_version")
+
+      assert row["caveats"] == []
+      assert row["has_open_caveat"] == false
+    end
+
+    test "a caveated note is parsed into queryable entries", %{conn: conn} do
+      version = version_fixture()
+
+      notes = """
+      CAVEATS FIRST — one live, one permanent.
+      (1) HISTORY BEFORE 2026-09-18 IS NOT COMPARABLE: priced at a flat 30% IV.
+      (2) DO NOT TRUST THE NAME: R is return-on-premium, not return-on-risk.
+
+      Origin: seeded by hand.
+      """
+
+      {:ok, _} = Sim.set_strategy_version_notes(version, notes)
+
+      row =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/#{version.id}")
+        |> json_response(200)
+        |> Map.fetch!("strategy_version")
+
+      assert [history, semantic] = row["caveats"]
+      assert history["kind"] == "history"
+      assert semantic["kind"] == "semantic"
+
+      # :history is actionable, so the row is open. A :semantic caveat
+      # alone would not be -- it never clears, and a permanent flag
+      # stops being read.
+      assert row["has_open_caveat"] == true
+    end
+
+    # Was "422s (not 500) when notes exceed 255 characters". That test
+    # guarded a real crash path: notes was varchar(255), so an
+    # over-length note raised Postgrex 22001 as a 500 unless the
+    # changeset caught it first. The column is :text as of migration
+    # 20260919120000 (notes now carry structured caveat blocks -- see
+    # TradingOptionsSim.Sim.Caveat), so there is no length to violate
+    # and the crash path is gone rather than merely handled. Kept,
+    # inverted, so a future narrowing of the column fails here loudly
+    # instead of silently truncating someone's caveat.
+    test "accepts a note far longer than the old 255-char ceiling", %{conn: conn} do
+      version = version_fixture()
+      long = String.duplicate("a", 4_000)
 
       conn =
         conn
         |> token_conn(["strategies:write"])
-        |> patch(~p"/api/v1/versions/#{version.id}/notes", %{"notes" => too_long})
+        |> patch(~p"/api/v1/versions/#{version.id}/notes", %{"notes" => long})
 
-      body = json_response(conn, 422)
-      assert body["errors"]["notes"]
+      body = json_response(conn, 200)
+      assert String.length(body["strategy_version"]["notes"]) == 4_000
     end
   end
 end
