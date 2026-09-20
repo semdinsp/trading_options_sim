@@ -484,9 +484,24 @@ defmodule TradingOptionsSimWeb.CoreComponents do
   @doc """
   A `StrategyVersion.lifecycle_stage` badge — bordered rectangle, per
   DESIGN.md's badge convention, colored per stage rather than one flat
-  gray for all four: `discovery` (neutral, nothing proven yet),
-  `quarantine` (warning/amber, under evaluation), `test_portfolio`
-  (success/green, proven and paper-live), `retired` (muted, terminal).
+  gray for all four.
+
+  The colours come from `TradingCore.UI.Tokens.lifecycle_stage/1` and are
+  deliberately NOT restated here. They used to be, and this app disagreed
+  with `trading_system` on three of five stages as a result —
+  `test_portfolio` rendered green here and amber there, and `quarantine`
+  (the stage meaning *under suspicion*) was amber here and
+  brand-primary there. The same operator reads both screens. A local
+  explanation that drifts from the shared map is how someone justifies
+  re-adding a local override later, so the map is the only place the
+  meaning is written down.
+
+  The markup below — including `font-data` and `inline-block`, which
+  differ from `trading_system`'s wrapper — stays local on purpose. This
+  change unified colour semantics only; aligning markup is a separate
+  job needing a shared component library, and doing both at once makes
+  the visual diff unreviewable.
+
   Shared between `ActiveStrategiesLive` and `StrategyVersionsLive` so
   the same stage always reads the same color everywhere it appears.
 
@@ -500,21 +515,12 @@ defmodule TradingOptionsSimWeb.CoreComponents do
     ~H"""
     <span class={[
       "inline-block px-1.5 py-0.5 border text-[11px] uppercase tracking-wide font-data",
-      lifecycle_badge_class(@stage)
+      TradingCore.UI.Tokens.lifecycle_stage(@stage)
     ]}>
       {String.replace(@stage, "_", " ")}
     </span>
     """
   end
-
-  defp lifecycle_badge_class("discovery"), do: "border-base-content/20 text-base-content/60"
-  defp lifecycle_badge_class("quarantine"), do: "border-warning/40 text-warning bg-warning/10"
-
-  defp lifecycle_badge_class("test_portfolio"),
-    do: "border-success/40 text-success bg-success/10"
-
-  defp lifecycle_badge_class("retired"), do: "border-base-content/15 text-base-content/40"
-  defp lifecycle_badge_class(_other), do: "border-base-content/20 text-base-content/60"
 
   @doc """
   Retire/unretire toggle for a `StrategyVersion` — a "Retire" button at
