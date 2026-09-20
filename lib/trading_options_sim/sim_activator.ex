@@ -23,6 +23,7 @@ defmodule TradingOptionsSim.SimActivator do
   require Logger
 
   alias TradingOptionsSim.ContractMonitor
+  alias TradingOptionsSim.ContractSelector
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.StrategyVersion
 
@@ -66,12 +67,12 @@ defmodule TradingOptionsSim.SimActivator do
   def activate(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
 
   def activate(%StrategyVersion{} = version) do
-    with {:ok, contract_template} <- resolve_contract_template(version.option_leg_config) do
+    with :ok <- validate_leg_config(version.option_leg_config) do
       pool = Sim.get_target_pool!(version.target_pool_id)
 
       pids =
         pool.target_pool_members
-        |> Enum.map(&start_for_member(version, &1, contract_template))
+        |> Enum.map(&start_for_resolved_member(version, &1))
         |> Enum.reject(&is_nil/1)
 
       unsubscribed_symbols =
@@ -253,6 +254,54 @@ defmodule TradingOptionsSim.SimActivator do
   end
 
   def resolve_contract_template(_config), do: {:error, :unsupported_leg_config}
+
+  # Resolves the contract PER MEMBER, then starts a monitor for it.
+  #
+  # This is the seam that makes a multi-symbol strategy possible. A
+  # fixed_strike config resolves to the same literal contract for every
+  # member (the pre-existing behaviour, unchanged), but an atm_offset
+  # config resolves against each symbol's own spot -- so one strategy
+  # over a pool of {SPY, QQQ, IWM} produces three genuinely
+  # at-the-money contracts rather than one usable strike and two
+  # nonsense ones.
+  #
+  # A member that cannot be resolved is skipped with a log line rather
+  # than failing the whole activation: one symbol lacking a listing at
+  # the requested expiry should not prevent the other symbols in the
+  # pool from trading. Fails closed per-member, not per-strategy.
+  defp start_for_resolved_member(version, member) do
+    case resolve_for_symbol(member.symbol, version.option_leg_config) do
+      {:ok, contract_template} ->
+        start_for_member(version, member, contract_template)
+
+      {:error, reason} ->
+        Logger.warning(
+          "SimActivator: skipping #{member.symbol} for version #{version.id} — " <>
+            "could not resolve a listed contract (#{inspect(reason)})"
+        )
+
+        nil
+    end
+  end
+
+  defp resolve_for_symbol(symbol, %{"strike_selection" => "atm_offset"} = config) do
+    ContractSelector.resolve(symbol, config)
+  end
+
+  defp resolve_for_symbol(_symbol, config), do: resolve_contract_template(config)
+
+  # Cheap up-front check so an unsupported config fails before a pool
+  # lookup and a round of hub RPCs. atm_offset is validated per symbol
+  # in ContractSelector; everything else goes through the literal
+  # template resolver.
+  defp validate_leg_config(%{"strike_selection" => "atm_offset"}), do: :ok
+
+  defp validate_leg_config(config) do
+    case resolve_contract_template(config) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp start_for_member(version, member, contract_template) do
     contract_key =

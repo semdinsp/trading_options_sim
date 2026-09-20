@@ -1,0 +1,208 @@
+defmodule TradingOptionsSim.ContractSelector do
+  @moduledoc """
+  Resolves an ATM-relative `option_leg_config` into a concrete
+  `{expiry, strike, right}` per symbol, against the live IBKR chain.
+
+  ## Why this exists
+
+  `option_leg_config` previously supported only `"fixed_strike"` — one
+  literal strike applied to every member of a target pool. That makes a
+  multi-symbol strategy impossible: SPY trades near 763 and QQQ near
+  722, so no single strike is near-the-money for both. A pool holding
+  both produced one usable contract and one deep-OTM or non-existent
+  one.
+
+  It also goes stale. A strike chosen at today's spot stops being ATM
+  after a 2% move, so a strategy silently changes character without its
+  configuration changing. That is not hypothetical here: ten strategies
+  seeded 2026-09-17 with literal strikes of 762/716 referenced contracts
+  that **do not exist at all** — SPY and QQQ list in $5 increments at
+  these levels — and TWS rejected every subscription with error 200
+  until they were corrected by hand.
+
+  ## Rounding first, probing only to confirm
+
+  An earlier version of this module probed candidate strikes outward
+  from spot until one resolved. Measured against the live hub, that is
+  unusable: a resolve HIT costs ~148ms, but a MISS costs a full
+  **10 seconds** — IBKR never replies for a contract it doesn't know, so
+  every miss runs to timeout. Probing ~20 candidates for a symbol whose
+  grid is offset could burn 200 seconds.
+
+  Worse, `IbPortfolio.HubClient` is a single GenServer that serializes
+  every hub call for this app. A probe loop doesn't just make itself
+  slow, it blocks `IBKRLive` subscriptions and every other hub consumer
+  behind it — observed live as a 20-message backlog on that process.
+
+  So the strike is ROUNDED to the underlying's known increment and
+  confirmed with ONE resolve. If that misses, the two neighbouring
+  grid points are tried and then it gives up. Worst case is three
+  calls (~20s), typical case one (~148ms).
+
+  `@strike_increments` is therefore a real assumption rather than
+  something discovered at runtime, and a wrong entry produces a
+  `:no_listed_contract` rather than a bad fill. Each entry below is
+  verified against IBKR, and an unlisted symbol falls back to $1 —
+  the densest common grid, so a miss is a miss rather than a silent
+  skip past a strike that exists.
+
+  ## Expiry
+
+  `"dte_target"` picks the nearest **third Friday** at or beyond the
+  requested days-to-expiry. Third Friday because that is the standard
+  monthly expiry: it is the most liquid, and every listed underlying has
+  one. Weeklies exist for the large ETFs but not universally, so
+  targeting them would reintroduce the per-symbol variation this module
+  exists to remove.
+
+  The resolved expiry is also probed, so a target landing on a month
+  with no listing for that symbol falls through to the next.
+  """
+
+  @type contract :: %{expiry: String.t(), strike: Decimal.t(), right: String.t()}
+
+  # Strike grid per underlying, probed against IBKR 2026-09-20 on the
+  # 20261120 monthly. Increments widen with price and vary by expiry,
+  # so these are a claim about the liquid monthlies this app targets,
+  # not about every listing.
+  #
+  #   SPY  760C ok, 762C/763C not found            -> 5.0
+  #   QQQ  715C/720C ok                            -> 5.0
+  #   XLF   53C ok,  53.5C not found,  54C ok      -> 1.0
+  #   XLK  275C ok, 276C/277.5C/280C not found     -> UNRESOLVED
+  #
+  # XLK is deliberately absent. 275 lists while 276, 277.5 and 280 do
+  # not, which fits no single increment, and pinning it down needs more
+  # probes than is reasonable against a shared HubClient at 10s per
+  # miss. It therefore takes @default_increment and will most likely
+  # return :no_listed_contract until someone measures it properly --
+  # which is the correct failure: no contract beats a wrong one.
+  @strike_increments %{"SPY" => 5.0, "QQQ" => 5.0, "XLF" => 1.0}
+
+  # $1 is the densest common grid, so an unknown symbol misses rather
+  # than silently skipping past a strike that exists.
+  @default_increment 1.0
+
+  @doc """
+  Resolves `leg_config` for `symbol` into a concrete contract.
+
+  Returns `{:error, :no_spot}` when the underlying has no price (nothing
+  to be at-the-money *of*), and `{:error, :no_listed_contract}` when no
+  probed candidate resolves. Both fail closed: a strategy that cannot
+  name a real contract must not activate against a guess.
+  """
+  @spec resolve(String.t(), map()) :: {:ok, contract()} | {:error, atom()}
+  def resolve(symbol, %{"strike_selection" => "atm_offset"} = config) do
+    with {:ok, spot} <- spot_price(symbol),
+         {:ok, expiry} <- resolve_expiry(config),
+         right when right in ["C", "P"] <- Map.get(config, "right") do
+      target = spot + (config["strike_offset"] || 0)
+      probe_strikes(symbol, expiry, target, right, config)
+    else
+      {:error, reason} -> {:error, reason}
+      _invalid_right -> {:error, :unsupported_leg_config}
+    end
+  end
+
+  def resolve(_symbol, _config), do: {:error, :unsupported_leg_config}
+
+  @doc """
+  The nearest third Friday at or beyond `dte_target` days from today,
+  as this app's `"YYYYMMDD"` wire format.
+
+  Exposed for tests and for callers that want the expiry without
+  resolving a strike.
+  """
+  @spec third_friday_on_or_after(Date.t(), non_neg_integer()) :: String.t()
+  def third_friday_on_or_after(from, dte_target) do
+    target = Date.add(from, dte_target)
+
+    Stream.iterate(target, &Date.add(&1, 1))
+    |> Enum.find(&third_friday?/1)
+    |> Calendar.strftime("%Y%m%d")
+  end
+
+  defp resolve_expiry(%{"expiry_selection" => "dte_target"} = config) do
+    dte = config["dte_target"] || 45
+    {:ok, third_friday_on_or_after(Date.utc_today(), dte)}
+  end
+
+  # A literal expiry is still honoured, so an ATM strike can be paired
+  # with a deliberately chosen expiry (a specific LEAPS, say).
+  defp resolve_expiry(%{"fixed_expiry" => expiry}) when is_binary(expiry), do: {:ok, expiry}
+
+  defp resolve_expiry(_config), do: {:error, :unsupported_leg_config}
+
+  defp third_friday?(date) do
+    Date.day_of_week(date) == 5 and date.day in 15..21
+  end
+
+  # At most three candidates: the rounded strike, then one grid step
+  # either side. Bounded deliberately -- see the moduledoc on why an
+  # unbounded probe loop is a denial of service against the shared
+  # HubClient rather than merely slow.
+  defp probe_strikes(symbol, expiry, target, right, _config) do
+    increment = Map.get(@strike_increments, symbol, @default_increment)
+    rounded = Float.round(target / increment) * increment
+
+    candidates =
+      [rounded, rounded + increment, rounded - increment]
+      |> Enum.map(&Float.round(&1, 2))
+      |> Enum.uniq()
+
+    first_listed(symbol, expiry, candidates, right)
+  end
+
+  defp first_listed(symbol, expiry, candidates, right) do
+    Enum.reduce_while(candidates, {:error, :no_listed_contract}, fn strike, acc ->
+      case resolve_via_hub(symbol, expiry, strike, right) do
+        {:ok, _con_id} ->
+          {:halt, {:ok, %{expiry: expiry, strike: to_decimal(strike), right: right}}}
+
+        {:error, _} ->
+          {:cont, acc}
+      end
+    end)
+  end
+
+  defp resolve_via_hub(symbol, expiry, strike, right) do
+    case call_hub(TradingHub.IBKR.ContractResolver, :resolve, [symbol, expiry, strike, right]) do
+      {:ok, con_id} -> {:ok, con_id}
+      other -> {:error, other}
+    end
+  end
+
+  # Unwraps HubClient's own {:ok, <remote return>} envelope so callers
+  # see the remote function's result directly. An unreachable hub is an
+  # error like any other -- callers fail closed on it.
+  defp call_hub(module, fun, args) do
+    case IbPortfolio.HubClient.call_hub(TradingOptionsSim.HubClient, module, fun, args, 10_000) do
+      {:ok, remote_result} -> remote_result
+      {:error, reason} -> {:error, reason}
+    end
+  catch
+    :exit, _reason -> {:error, :hub_unreachable}
+  end
+
+  # Read from trading_hub rather than this app's own PriceRelay cache:
+  # resolution happens at ACTIVATION, before any monitor exists, so
+  # there is no local tick to read yet. `last` is preferred over the
+  # bid/ask midpoint because it is the field always present outside
+  # session hours -- bid/ask come back as -1.0 when the book is closed.
+  defp spot_price(symbol) do
+    case call_hub(TradingHub.MarketData.Manager, :get_last_price, [symbol]) do
+      {:ok, %{last: last}} when is_number(last) and last > 0 ->
+        {:ok, last}
+
+      {:ok, %{close: close}} when is_number(close) and close > 0 ->
+        {:ok, close}
+
+      _other ->
+        {:error, :no_spot}
+    end
+  end
+
+  defp to_decimal(value) when is_float(value) do
+    value |> Decimal.from_float() |> Decimal.round(2)
+  end
+end
