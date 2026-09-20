@@ -24,6 +24,7 @@ defmodule TradingOptionsSim.SimActivator do
 
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.ContractSelector
+  alias TradingOptionsSim.Pricing.UnderlyingSubscription
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.StrategyVersion
 
@@ -151,9 +152,25 @@ defmodule TradingOptionsSim.SimActivator do
       end)
       |> Enum.count(& &1)
 
+    # Release this version's hold on each underlying. Reference-counted,
+    # so a symbol another active strategy still needs keeps its
+    # subscription -- only the last release actually unsubscribes.
+    # Without this, every deactivate/reactivate cycle would leak an IBKR
+    # market-data line until trading_hub itself restarted.
+    release_underlyings(version)
+
     {:ok, _updated} = Sim.mark_deactivated(version)
 
     {:ok, terminated_count}
+  end
+
+  defp release_underlyings(%StrategyVersion{target_pool_id: nil}), do: :ok
+
+  defp release_underlyings(%StrategyVersion{} = version) do
+    version.target_pool_id
+    |> Sim.get_target_pool!()
+    |> Map.fetch!(:target_pool_members)
+    |> Enum.each(&UnderlyingSubscription.release(&1.symbol))
   end
 
   # Every symbol worth checking for a running monitor: every open run's
@@ -270,6 +287,17 @@ defmodule TradingOptionsSim.SimActivator do
   # the requested expiry should not prevent the other symbols in the
   # pool from trading. Fails closed per-member, not per-strategy.
   defp start_for_resolved_member(version, member) do
+    # Subscribe the UNDERLYING before resolving a contract against it.
+    # ContractSelector reads spot from trading_hub, so an unsubscribed
+    # symbol returns {:error, :no_spot} and the member is skipped -- which
+    # is exactly what happened to QQQ across three restarts, and what made
+    # XLK/XLF permanently unusable since no sibling app tracks them.
+    #
+    # Reference-counted (see UnderlyingSubscription): several members and
+    # several strategies on one symbol share a single hub subscription,
+    # released only when the last one detaches.
+    ensure_underlying(member)
+
     case resolve_for_symbol(member.symbol, version.option_leg_config) do
       {:ok, contract_template} ->
         start_for_member(version, member, contract_template)
@@ -282,6 +310,24 @@ defmodule TradingOptionsSim.SimActivator do
 
         nil
     end
+  end
+
+  # A failed subscribe is logged inside UnderlyingSubscription and is
+  # NOT fatal: resolution may still succeed if another app already holds
+  # the symbol, and a strategy must not fail to activate because one hub
+  # RPC was unlucky. The :no_spot path below is the real gate.
+  defp ensure_underlying(member) do
+    UnderlyingSubscription.ensure(member.symbol,
+      exchange: member.exchange,
+      currency: member.currency || "USD"
+    )
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "SimActivator: underlying subscribe for #{member.symbol} failed: #{inspect(reason)}"
+      )
+
+      {:ok, false}
   end
 
   defp resolve_for_symbol(symbol, %{"strike_selection" => "atm_offset"} = config) do
