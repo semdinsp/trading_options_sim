@@ -15,6 +15,24 @@ defmodule TradingOptionsSim.SimActivatorTest do
     Sim.get_target_pool!(pool.id)
   end
 
+  # Deterministic replacement for Process.sleep/1 after a broadcast.
+  # PubSub delivery is asynchronous, so a sleep bets the monitor
+  # finishes inside the interval -- usually true, occasionally not, and
+  # the resulting failures surface in unrelated tests. A GenServer.call
+  # cannot be served until the monitor has drained the broadcast ahead
+  # of it. Falls back to a sleep only when no monitor is registered,
+  # where there is nothing to synchronise against.
+  defp sync_monitor(version_id, symbol) do
+    key = {symbol, "20271231", Decimal.new("150.00"), "C"}
+
+    case TradingOptionsSim.ContractMonitor.whereis(version_id, key) do
+      nil -> Process.sleep(50)
+      pid -> _ = TradingOptionsSim.ContractMonitor.snapshot(pid)
+    end
+
+    :ok
+  end
+
   defp fixed_leg_config do
     %{
       "expiry_selection" => "fixed",
@@ -219,9 +237,9 @@ defmodule TradingOptionsSim.SimActivatorTest do
 
       # First cycle: enter, then exit — closes the first SimRun.
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSA6", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "AAPLSA6")
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSA6", message.(150.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "AAPLSA6")
 
       [first_run] = Sim.list_sim_runs("closed") |> Enum.filter(&(&1.symbol == "AAPLSA6"))
       assert first_run.status == "closed"
@@ -237,7 +255,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
 
       # Second cycle: enter again on the SAME monitor process.
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSA6", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "AAPLSA6")
 
       # The first run must be completely untouched by the second entry.
       reloaded_first_run = Sim.get_sim_run!(first_run.id)
@@ -276,9 +294,9 @@ defmodule TradingOptionsSim.SimActivatorTest do
       # churn-qualifying fast close (well under the 90s hold-time
       # threshold in normal test execution).
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST1", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "CHURNTEST1")
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST1", message.(150.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "CHURNTEST1")
 
       [first_run] = Sim.list_sim_runs("closed") |> Enum.filter(&(&1.symbol == "CHURNTEST1"))
       refute first_run.is_churn
@@ -287,7 +305,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
       # and re-enters well within the 120s reopen-gap window.
       {:ok, [_pid], []} = SimActivator.activate(version)
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST1", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "CHURNTEST1")
 
       assert Sim.get_sim_run!(first_run.id).is_churn == true
     end
@@ -313,9 +331,9 @@ defmodule TradingOptionsSim.SimActivatorTest do
       end
 
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST2", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "CHURNTEST2")
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST2", message.(150.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "CHURNTEST2")
 
       [first_run] = Sim.list_sim_runs("closed") |> Enum.filter(&(&1.symbol == "CHURNTEST2"))
 
@@ -328,7 +346,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
 
       {:ok, [_pid], []} = SimActivator.activate(version)
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:CHURNTEST2", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "CHURNTEST2")
 
       refute Sim.get_sim_run!(first_run.id).is_churn
     end
@@ -408,9 +426,9 @@ defmodule TradingOptionsSim.SimActivatorTest do
       end
 
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSD8", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "AAPLSD8")
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSD8", message.(150.0))
-      Process.sleep(50)
+      sync_monitor(version.id, "AAPLSD8")
 
       assert Sim.list_open_sim_runs(version) == []
       assert Process.alive?(pid)
@@ -439,7 +457,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
         |> Map.put(:__struct__, TradingHub.Message)
 
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:AAPLSD2", message)
-      Process.sleep(50)
+      sync_monitor(version.id, "AAPLSD2")
 
       assert ContractMonitor.snapshot(pid).position_open? == true
 

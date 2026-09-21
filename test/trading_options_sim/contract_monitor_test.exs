@@ -112,6 +112,39 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{symbol}", message)
   end
 
+  # Deterministic replacement for `Process.sleep/1` after a broadcast.
+  #
+  # PubSub delivery is asynchronous, so a test that broadcasts and then
+  # sleeps is betting that the monitor finishes its work inside the
+  # chosen interval. At 50ms that bet is usually safe and occasionally
+  # not: under full-suite load these tests failed roughly one run in
+  # three, a DIFFERENT test each time across four files, which reads
+  # like cross-test interference but is really 55 independent races.
+  #
+  # A GenServer.call cannot be served until every message already in the
+  # monitor's mailbox has been handled, so this returns exactly when the
+  # broadcast has been processed -- no sooner, and no arbitrary wait
+  # afterwards. Slow machines get correctness, fast ones get speed.
+  defp sync(pid) when is_pid(pid) do
+    _ = ContractMonitor.snapshot(pid)
+    :ok
+  end
+
+  # For the handful of tests that broadcast before they hold a pid, or
+  # whose monitor may have stopped: resolve through the registry, and
+  # fall back to a short sleep only when there is genuinely nothing to
+  # synchronise against.
+  defp sync(symbol) when is_binary(symbol) do
+    case Registry.select(
+           TradingOptionsSim.MonitorRegistry,
+           [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}]
+         )
+         |> Enum.find(fn {key, _pid} -> match?({_, {^symbol, _, _, _}}, key) end) do
+      {_key, pid} -> sync(pid)
+      nil -> Process.sleep(50)
+    end
+  end
+
   describe "registry_key/2 and whereis/2" do
     test "a started monitor can be looked up via whereis/2" do
       version = version_fixture(%{})
@@ -160,7 +193,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key)
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       snapshot = ContractMonitor.snapshot(pid)
       assert snapshot.position_open? == false
@@ -182,12 +215,12 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       # First tick enters (satisfies entry, not yet exit).
       broadcast_underlying_price(symbol, 130.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
 
       # Second tick satisfies exit.
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       snapshot = ContractMonitor.snapshot(pid)
       assert snapshot.position_open? == false
@@ -227,15 +260,15 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       # Cycle 1: enter, then exit.
       broadcast_underlying_price(symbol, 130.0)
-      Process.sleep(50)
+      sync(pid)
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
       assert Sim.get_sim_run!(first_run.id).status == "closed"
 
       # Cycle 2: re-enter on the SAME monitor — no SimActivator.activate/1
       # call anywhere in this test, purely rule-driven oscillation.
       broadcast_underlying_price(symbol, 130.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
 
       # The first run must be untouched — still closed, still exactly 2
@@ -252,7 +285,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       # Cycle 3: exit again, so total_run_commission on the FIRST run
       # only reflects its own 2 fills, never the second run's.
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       first_fills = Sim.list_sim_fills(Sim.get_sim_run!(first_run.id))
       second_fills = Sim.list_sim_fills(Sim.get_sim_run!(second_run.id))
@@ -280,9 +313,9 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key)
 
       broadcast_underlying_price(symbol, 130.0)
-      Process.sleep(50)
+      sync(pid)
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert Sim.get_sim_run!(run.id).status == "closed"
       assert Process.alive?(pid)
@@ -300,12 +333,12 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       symbol = "COMMISSIONTEST1"
       key = contract_key(symbol)
-      {_pid, run} = start_monitor(version, key)
+      {pid, run} = start_monitor(version, key)
 
       broadcast_underlying_price(symbol, 130.0)
-      Process.sleep(50)
+      sync(pid)
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       [entry_fill, exit_fill] = Sim.list_sim_fills(run)
 
@@ -324,12 +357,12 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       symbol = "COMMISSIONTEST2"
       key = contract_key(symbol)
-      {_pid, run} = start_monitor(version, key)
+      {pid, run} = start_monitor(version, key)
 
       broadcast_underlying_price(symbol, 130.0)
-      Process.sleep(50)
+      sync(pid)
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       closed_run = Sim.get_sim_run!(run.id)
       [entry_fill, exit_fill] = Sim.list_sim_fills(closed_run)
@@ -355,10 +388,10 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       symbol = "RISKTEST1"
       key = contract_key(symbol)
-      {_pid, run} = start_monitor(version, key)
+      {pid, run} = start_monitor(version, key)
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       entered_run = Sim.get_sim_run!(run.id)
       refute is_nil(entered_run.risk_at_entry)
@@ -375,10 +408,10 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       symbol = "CONTEXTTEST1"
       key = contract_key(symbol)
-      {_pid, run} = start_monitor(version, key)
+      {pid, run} = start_monitor(version, key)
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       entered_run = Sim.get_sim_run!(run.id)
 
@@ -401,10 +434,10 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       symbol = "SHORTTEST1"
       key = contract_key(symbol)
-      {_pid, run} = start_monitor(version, key, direction: "short")
+      {pid, run} = start_monitor(version, key, direction: "short")
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       fills = Sim.list_sim_fills(run)
       assert length(fills) == 1
@@ -450,7 +483,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key, exchange: closed_exchange_fixture())
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
       assert Sim.list_sim_fills(run) == []
@@ -471,7 +504,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key, exchange: closed_exchange_fixture())
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == true
       assert length(Sim.list_sim_fills(run)) == 1
@@ -492,7 +525,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key, exchange: always_open_exchange_fixture())
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
       assert Sim.list_sim_fills(run) == []
@@ -509,7 +542,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, _run} = start_monitor(version, key, exchange: closed_exchange_fixture())
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       snapshot = ContractMonitor.snapshot(pid)
       assert snapshot.position_open? == false
@@ -528,7 +561,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key, exchange: exchange)
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == false
 
       {:ok, hours} =
@@ -542,7 +575,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       refute hours.enabled == false
 
       broadcast_underlying_price(symbol, 151.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == true
       assert length(Sim.list_sim_fills(run)) == 1
@@ -559,7 +592,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key, exchange: nil)
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == true
       assert length(Sim.list_sim_fills(run)) == 1
@@ -576,7 +609,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key, exchange: "UNMAPPED_EXCHANGE")
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
       assert Sim.list_sim_fills(run) == []
@@ -616,7 +649,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
           %{entry_at: now, entry_price: Decimal.new("5.00")}
         )
 
-      {:ok, _pid} =
+      {:ok, pid} =
         start_supervised(
           {ContractMonitor,
            sim_run_id: run.id,
@@ -628,7 +661,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         )
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       closed_run = Sim.get_sim_run!(run.id)
       assert closed_run.status == "closed"
@@ -652,11 +685,11 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, contract_key("MHNONE1"))
 
       broadcast_underlying_price("MHNONE1", 130.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
 
       broadcast_underlying_price("MHNONE1", 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
       assert Enum.map(Sim.list_sim_fills(run), & &1.kind) == ["entry", "exit"]
@@ -669,9 +702,9 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, _run} = start_monitor(version, contract_key("MHZERO1"))
 
       broadcast_underlying_price("MHZERO1", 130.0)
-      Process.sleep(50)
+      sync(pid)
       broadcast_underlying_price("MHZERO1", 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
     end
@@ -681,7 +714,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, contract_key("MHHOLD1"))
 
       broadcast_underlying_price("MHHOLD1", 130.0)
-      Process.sleep(50)
+      sync(pid)
       snap = ContractMonitor.snapshot(pid)
       assert snap.position_open? == true
       assert snap.min_hold_seconds == 3600
@@ -689,7 +722,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       # Exit rule is satisfied, but the hold has not elapsed.
       broadcast_underlying_price("MHHOLD1", 150.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
       assert Enum.map(Sim.list_sim_fills(run), & &1.kind) == ["entry"]
 
@@ -699,7 +732,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       end)
 
       broadcast_underlying_price("MHHOLD1", 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
       assert Enum.map(Sim.list_sim_fills(run), & &1.kind) == ["entry", "exit"]
@@ -716,7 +749,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, contract_key("MHEXP1"))
 
       broadcast_underlying_price("MHEXP1", 130.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
 
       # Well inside the 1h hold. The forced close must not be delayed.
@@ -734,7 +767,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, contract_key("MHEOD1"))
 
       broadcast_underlying_price("MHEOD1", 130.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
 
       send(pid, {:force_close_eod, :eod_flatten})
@@ -749,7 +782,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, contract_key("MHMAN1"))
 
       broadcast_underlying_price("MHMAN1", 130.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
 
       :ok = ContractMonitor.force_close(pid, :manual)
@@ -809,7 +842,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       # An underlying tick arrives, but IBKRLive has no data yet for this
       # contract — must not enter, must not fall back to Black-Scholes.
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
       assert Sim.list_sim_fills(run) == []
@@ -840,14 +873,14 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         und_price: 150.0
       })
 
-      Process.sleep(50)
+      sync(pid)
 
       # The greeks tick alone doesn't trigger evaluation (per design,
       # evaluation is driven by the underlying's own tick, reading
       # whatever IBKRLive has cached) — a subsequent underlying tick is
       # what actually fires the rule check.
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == true
 
@@ -929,16 +962,16 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       # trading_hub's own handler emits them.
       broadcast_option_quote(occ_symbol, %{bid: 5.00, bid_size: 10})
       broadcast_option_quote(occ_symbol, %{ask: 7.00, ask_size: 10})
-      Process.sleep(50)
+      sync(pid)
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       {pid, run}
     end
 
     test "a separate ask tick does not erase the bid that preceded it" do
-      {_pid, run} = enter_with_quote("IBKRQ1", "IBKRQ1_OCC", [])
+      {pid, run} = enter_with_quote("IBKRQ1", "IBKRQ1_OCC", [])
 
       [fill] = Sim.list_sim_fills(run)
 
@@ -968,9 +1001,9 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         und_price: 250.0
       })
 
-      Process.sleep(50)
+      sync(pid)
       broadcast_underlying_price("IBKRQ2", 250.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == false
 
@@ -992,7 +1025,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     # catch it: the old definition happened to give plausible-looking
     # absolute values.
     test "fill_slippage is the distance from the mid, not from the model price" do
-      {_pid, run} = enter_with_quote("IBKRSLIP1", "IBKRSLIP1_OCC", [])
+      {pid, run} = enter_with_quote("IBKRSLIP1", "IBKRSLIP1_OCC", [])
 
       [fill] = Sim.list_sim_fills(run)
       snap = fill.pricing_snapshot
@@ -1056,7 +1089,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       occ_symbol = "IBKRQ4_OCC"
 
-      {_pid, run} =
+      {pid, run} =
         start_monitor(version, contract_key("IBKRQ4"),
           pricing_backend: :ibkr_live,
           occ_symbol: occ_symbol
@@ -1074,9 +1107,9 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         und_price: 150.0
       })
 
-      Process.sleep(50)
+      sync(pid)
       broadcast_underlying_price("IBKRQ4", 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       [fill] = Sim.list_sim_fills(run)
       assert Decimal.equal?(fill.fill_price, Decimal.new("6.25"))
@@ -1092,7 +1125,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       occ_symbol = "IBKRQ5_OCC"
 
-      {_pid, run} =
+      {pid, run} =
         start_monitor(version, contract_key("IBKRQ5"),
           pricing_backend: :ibkr_live,
           occ_symbol: occ_symbol
@@ -1113,10 +1146,10 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       # Crossed book: ask below bid. Must not be used.
       broadcast_option_quote(occ_symbol, %{bid: 7.00, bid_size: 10})
       broadcast_option_quote(occ_symbol, %{ask: 5.00, ask_size: 10})
-      Process.sleep(50)
+      sync(pid)
 
       broadcast_underlying_price("IBKRQ5", 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       [fill] = Sim.list_sim_fills(run)
       assert fill.pricing_snapshot["fill_basis"] == "model_price"
@@ -1246,7 +1279,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert ContractMonitor.snapshot(pid).position_open? == false
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open? == true
       assert Sim.list_sim_fills(run) |> length() == 1
@@ -1278,7 +1311,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       Process.sleep(30)
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
 
       assert Process.alive?(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
@@ -1318,7 +1351,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run} = start_monitor(version, key)
 
       broadcast_underlying_price(symbol, 150.0)
-      Process.sleep(50)
+      sync(pid)
       assert ContractMonitor.snapshot(pid).position_open? == true
 
       assert :ok = ContractMonitor.force_close(pid, :manual)

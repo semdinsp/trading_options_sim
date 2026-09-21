@@ -5,6 +5,23 @@ defmodule TradingOptionsSim.SimReactivatorTest do
   # documents.
   use TradingOptionsSim.DataCase, async: false
 
+  # Deterministic replacement for Process.sleep/1 after a broadcast.
+  # PubSub delivery is asynchronous, so sleeping bets that the monitor
+  # finishes inside the interval; a GenServer.call cannot be served
+  # until it has drained the broadcast ahead of it. Falls back to a
+  # sleep only when no monitor is registered -- there is then nothing
+  # to synchronise against. See contract_monitor_test.exs's sync/1.
+  defp sync_monitor(version_id, symbol) do
+    key = {symbol, "20271231", Decimal.new("150.00"), "C"}
+
+    case TradingOptionsSim.ContractMonitor.whereis(version_id, key) do
+      nil -> Process.sleep(50)
+      pid -> _ = TradingOptionsSim.ContractMonitor.snapshot(pid)
+    end
+
+    :ok
+  end
+
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.SimReactivator
@@ -120,9 +137,9 @@ defmodule TradingOptionsSim.SimReactivatorTest do
     end
 
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:REACTSYM4", message.(130.0))
-    Process.sleep(50)
+    sync_monitor(version.id, "REACTSYM4")
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:REACTSYM4", message.(150.0))
-    Process.sleep(50)
+    sync_monitor(version.id, "REACTSYM4")
 
     assert Sim.list_open_sim_runs(version) == []
 
