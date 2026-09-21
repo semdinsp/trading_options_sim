@@ -31,6 +31,12 @@ config :trading_options_sim, :start_hub_client, false
 # tests actually cover is independent of the wait.
 config :trading_options_sim, :underlying_first_tick_timeout_ms, 0
 
+# A node name that will never actually exist, so nothing connects to it
+# -- but UnderlyingSubscription's :nodeup handler needs a configured
+# value to compare against, otherwise the hub-restart recovery path is
+# untestable and silently never exercised.
+config :trading_options_sim, :hub_node, :"trading_hub@test-nonexistent"
+
 # SimReactivator queries the Repo from application boot, before
 # test_helper.exs puts Repo into sandbox :manual mode — left on, it
 # grabs a connection outside any test's sandbox ownership and breaks

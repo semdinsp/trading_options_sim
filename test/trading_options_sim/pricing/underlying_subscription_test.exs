@@ -107,6 +107,93 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscriptionTest do
     end
   end
 
+  describe "recovery after a hub-side subscription is lost" do
+    # A hub restart clears trading_hub's refcounts but never touches this
+    # process, so supervision does not repair it and init/1 never
+    # re-runs. Meanwhile this app's PubSub registrations survive intact
+    # -- so without these handlers the app stays subscribed to a topic
+    # nobody publishes to, with no crash and no log line.
+
+    test "re-subscribes on :nodeup for the hub node" do
+      symbol = unique_symbol()
+      {:ok, _} = UnderlyingSubscription.ensure(symbol)
+      pid = UnderlyingSubscription.whereis(symbol)
+
+      assert UnderlyingSubscription.stats(pid).resubscribe_count == 0
+
+      send(pid, {:nodeup, Application.fetch_env!(:trading_options_sim, :hub_node)})
+
+      # Asserts the handler RAN, not merely that the process survived
+      # the message. Verified by sabotage: disabling the nodeup clause
+      # leaves an "is it still alive" assertion passing, so only the
+      # counter actually catches a broken handler.
+      assert UnderlyingSubscription.stats(pid).resubscribe_count == 1
+
+      UnderlyingSubscription.release(symbol)
+      UnderlyingSubscription.release(symbol)
+    end
+
+    test "ignores :nodeup for any other node" do
+      symbol = unique_symbol()
+      {:ok, _} = UnderlyingSubscription.ensure(symbol)
+      pid = UnderlyingSubscription.whereis(symbol)
+
+      send(pid, {:nodeup, :some_other_node@nowhere})
+      send(pid, {:nodedown, :some_other_node@nowhere})
+
+      assert UnderlyingSubscription.stats(pid).resubscribe_count == 0,
+             "an unrelated node event must not trigger a re-subscribe"
+
+      assert Process.alive?(pid)
+
+      UnderlyingSubscription.release(symbol)
+      UnderlyingSubscription.release(symbol)
+    end
+
+    # The Polygon websocket can clear its refcounts while the hub NODE
+    # stays up, so :nodeup never fires for it. Matched structurally as a
+    # plain map to avoid a compile-time dependency on trading_hub.
+    test "re-subscribes on a polygon_websocket resubscribe health broadcast" do
+      symbol = unique_symbol()
+      {:ok, _} = UnderlyingSubscription.ensure(symbol)
+      pid = UnderlyingSubscription.whereis(symbol)
+
+      send(pid, %{
+        type: :health,
+        data: %{component: :polygon_websocket, action: :resubscribe}
+      })
+
+      assert UnderlyingSubscription.stats(pid).resubscribe_count == 1
+
+      UnderlyingSubscription.release(symbol)
+      UnderlyingSubscription.release(symbol)
+    end
+
+    # This process subscribes to "system:health", a topic it does not
+    # own, so it WILL receive broadcasts it has no specific clause for.
+    # trading_system hit exactly this: its connection GenServer took
+    # "account:equity" broadcasts and crashed with FunctionClauseError
+    # on every reconnect.
+    test "survives unrelated health broadcasts and arbitrary messages" do
+      symbol = unique_symbol()
+      {:ok, _} = UnderlyingSubscription.ensure(symbol)
+      pid = UnderlyingSubscription.whereis(symbol)
+
+      send(pid, %{type: :health, data: %{component: :ibkr, action: :connected}})
+      send(pid, %{type: :price, symbol: "SPY", data: %{last: 100.0}})
+      send(pid, :some_unexpected_atom)
+      send(pid, {:tuple, :nobody, :handles})
+
+      assert UnderlyingSubscription.stats(pid).resubscribe_count == 0,
+             "unrelated messages must not trigger a re-subscribe"
+
+      assert Process.alive?(pid)
+
+      UnderlyingSubscription.release(symbol)
+      UnderlyingSubscription.release(symbol)
+    end
+  end
+
   # Registry cleanup is asynchronous: the entry is removed by the
   # Registry process reacting to the holder's DOWN, so it can briefly
   # outlive Process.alive?/1 returning false. Polling rather than
