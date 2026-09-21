@@ -61,6 +61,23 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscriptionTest do
       refute_eventually_registered(symbol)
     end
 
+    # The first-tick wait must be bounded and must not raise when no tick
+    # can ever arrive. config/test.exs sets the timeout to 0, so this
+    # exercises the "gave up" path rather than the "tick arrived" one --
+    # the failure mode that matters, since a hang here would stall an
+    # entire activation sweep rather than skipping one symbol.
+    test "ensure/2 returns promptly when no tick can arrive" do
+      symbol = unique_symbol()
+
+      {elapsed_us, {:ok, priced?}} =
+        :timer.tc(fn -> UnderlyingSubscription.ensure(symbol) end)
+
+      refute priced?
+      assert elapsed_us < 1_000_000, "ensure/2 took #{div(elapsed_us, 1000)}ms; must be bounded"
+
+      UnderlyingSubscription.release(symbol)
+    end
+
     test "release/1 on an unknown or already-stopped symbol is a no-op" do
       assert UnderlyingSubscription.release(unique_symbol()) == :ok
 

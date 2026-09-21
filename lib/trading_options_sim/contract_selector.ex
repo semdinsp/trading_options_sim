@@ -175,8 +175,30 @@ defmodule TradingOptionsSim.ContractSelector do
   # Unwraps HubClient's own {:ok, <remote return>} envelope so callers
   # see the remote function's result directly. An unreachable hub is an
   # error like any other -- callers fail closed on it.
+  # Deliberately longer than IBKR's own miss cost. A resolve HIT returns
+  # in ~148ms, but a MISS takes a full 10 seconds -- IBKR never replies
+  # for a contract it does not know, so the request runs to ITS timeout.
+  # At a 10s budget here the two raced, and a miss surfaced as
+  # `{:erpc, :timeout}` instead of the `{:error, :not_found}` the probe
+  # logic is written to handle. Observed live 2026-09-20:
+  #
+  #   [warning] TradingHub.IBKR.ContractResolver.resolve/4 RPC failed:
+  #             Erlang error: {:erpc, :timeout}
+  #
+  # 15s leaves headroom for the remote timeout to fire and return a real
+  # answer, which is the difference between "this strike is not listed"
+  # (try the next one) and "something went wrong" (give up on the
+  # symbol).
+  @hub_call_timeout_ms 15_000
+
   defp call_hub(module, fun, args) do
-    case IbPortfolio.HubClient.call_hub(TradingOptionsSim.HubClient, module, fun, args, 10_000) do
+    case IbPortfolio.HubClient.call_hub(
+           TradingOptionsSim.HubClient,
+           module,
+           fun,
+           args,
+           @hub_call_timeout_ms
+         ) do
       {:ok, remote_result} -> remote_result
       {:error, reason} -> {:error, reason}
     end

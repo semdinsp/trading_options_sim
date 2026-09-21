@@ -25,6 +25,12 @@ config :trading_options_sim, TradingOptionsSimWeb.Endpoint,
 # hub_client_child/0.
 config :trading_options_sim, :start_hub_client, false
 
+# No HubClient here, so an underlying can never tick -- waiting for one
+# would burn UnderlyingSubscription's full production timeout on every
+# ensure/2 and make unrelated tests time out. The refcount lifecycle the
+# tests actually cover is independent of the wait.
+config :trading_options_sim, :underlying_first_tick_timeout_ms, 0
+
 # SimReactivator queries the Repo from application boot, before
 # test_helper.exs puts Repo into sandbox :manual mode — left on, it
 # grabs a connection outside any test's sandbox ownership and breaks
