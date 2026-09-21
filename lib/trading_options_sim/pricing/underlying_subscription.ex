@@ -67,7 +67,20 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
 
   require Logger
 
-  defstruct [:symbol, :exchange, :currency, depend_count: 0, subscribed?: false]
+  defstruct [
+    :symbol,
+    :exchange,
+    :currency,
+    depend_count: 0,
+    subscribed?: false,
+    # Counts recovery re-issues. Exists so a test can prove the handler
+    # RAN, not merely that the process survived the message -- the
+    # subscribed? flag is always false where there is no hub, so it
+    # cannot distinguish "re-subscribed and failed" from "never tried".
+    # Also a genuine operational signal: a climbing count means the hub
+    # or the Polygon socket is flapping.
+    resubscribe_count: 0
+  ]
 
   @type symbol :: String.t()
 
@@ -243,6 +256,17 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
       currency: Keyword.get(opts, :currency, "USD")
     }
 
+    # Exactly once per process. :net_kernel.monitor_nodes/1 STACKS --
+    # calling it again on each reconnect yields N duplicate {:nodeup, _}
+    # messages per transition, and N duplicate resubscribe storms.
+    :net_kernel.monitor_nodes(true)
+
+    # Covers the Polygon in-place reconnect, which :nodeup cannot see:
+    # the hub's WebSocketClient can clear its refcounts while the hub
+    # NODE stays up. Subscribed here rather than at the call site so the
+    # process that owns the subscription is the one that repairs it.
+    Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "system:health")
+
     # Subscribing in init is safe here, unlike ContractMonitor's old
     # IBKRLive startup: this is a plain hub RPC, not a start_child
     # against the same DynamicSupervisor that is currently starting this
@@ -255,6 +279,16 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
     {:reply, {:ok, state.subscribed?}, %{state | depend_count: state.depend_count + 1}}
   end
 
+  def handle_call(:stats, _from, state) do
+    {:reply,
+     %{
+       symbol: state.symbol,
+       subscribed?: state.subscribed?,
+       depend_count: state.depend_count,
+       resubscribe_count: state.resubscribe_count
+     }, state}
+  end
+
   def handle_call(:detach, _from, %{depend_count: count} = state) when count <= 1 do
     # terminate/2 runs before the process exits, so the unsubscribe
     # happens exactly once whether this stop is clean or abnormal.
@@ -264,6 +298,99 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
   def handle_call(:detach, _from, state) do
     {:reply, :ok, %{state | depend_count: state.depend_count - 1}}
   end
+
+  # --- Recovery -------------------------------------------------------
+  #
+  # A hub-side subscription does NOT survive a trading_hub restart.
+  # TradingHub.MarketData.Manager and TradingHub.Polygon.WebSocketClient
+  # both refcount `symbol => MapSet of caller tags` in PROCESS STATE, so
+  # when those processes die the hub stops asking the upstream for those
+  # symbols.
+  #
+  # The failure is asymmetric and silent. This app's Phoenix.PubSub
+  # topic registrations are local and survive untouched -- so we stay
+  # subscribed to a topic nobody publishes to any more. No crash, no
+  # error, no log line. The app looks healthy and receives nothing,
+  # which is the same shape as the :no_spot and never-fires bugs this
+  # app has already been bitten by.
+  #
+  # Supervision does not save us: a hub restart never touches this
+  # process, so it is never restarted and init/1 never re-runs. Verified
+  # rather than assumed -- this module previously had no handle_info
+  # clauses at all.
+  #
+  # TWO triggers are needed and neither is sufficient alone:
+  #
+  #   :nodeup       covers a hub restart. Misses the Polygon in-place
+  #                 reconnect, where the hub node never goes down.
+  #   system:health covers Polygon's own reconnect (observed once after
+  #                 a ~2h46m silent stall with the socket still
+  #                 ESTABLISHED). Misses a hub restart, and can race it
+  #                 -- the broadcast may fire before we have
+  #                 re-subscribed to "system:health" itself.
+  @impl true
+  def handle_info({:nodeup, node}, state) do
+    if node == hub_node() do
+      Logger.info("UnderlyingSubscription: #{state.symbol} — trading_hub back up, re-subscribing")
+
+      {:noreply, resubscribe(state)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:nodedown, _node}, state), do: {:noreply, state}
+
+  # Matched STRUCTURALLY as a plain map rather than against
+  # %TradingHub.Message{}, so this app keeps no compile-time dependency
+  # on trading_hub -- the same convention IbPortfolio.Message and
+  # TradingSignal.HubConnection already use here.
+  def handle_info(
+        %{type: :health, data: %{component: :polygon_websocket, action: :resubscribe}},
+        state
+      ) do
+    Logger.info(
+      "UnderlyingSubscription: #{state.symbol} — polygon websocket re-authed, re-subscribing"
+    )
+
+    {:noreply, resubscribe(state)}
+  end
+
+  # Every other broadcast on "system:health", and anything else. A
+  # catch-all is required now that this process subscribes to a topic it
+  # does not fully own: an unmatched message would otherwise crash it on
+  # every unrelated health broadcast. That exact failure has bitten a
+  # sibling app (trading_system's connection GenServer took
+  # "account:equity" broadcasts it had no clause for and crashed with
+  # FunctionClauseError on every reconnect).
+  def handle_info(_other, state), do: {:noreply, state}
+
+  # Re-issue is deliberately broad rather than precise: both hub modules
+  # refcount by {symbol, caller}, so re-subscribing a tag already held
+  # is a harmless no-op. Tracking exactly what was lost would be more
+  # code and more ways to be wrong than simply asking again.
+  # get_env, NOT fetch_env!. This is read inside handle_info, so a
+  # raise here kills a live subscription holder on an unrelated node
+  # event -- strictly worse than the silent-stale-subscription problem
+  # this recovery exists to fix. Caught by the "ignores :nodeup for any
+  # other node" test, which crashed with ArgumentError in :test where
+  # :hub_node is unset.
+  #
+  # nil never equals a real node name, so an unconfigured hub simply
+  # means no :nodeup ever matches -- the same outcome as having no hub,
+  # reached without taking the process down.
+  defp hub_node, do: Application.get_env(:trading_options_sim, :hub_node)
+
+  defp resubscribe(state) do
+    %{
+      state
+      | subscribed?: subscribe(state) == :ok,
+        resubscribe_count: state.resubscribe_count + 1
+    }
+  end
+
+  @doc false
+  def stats(pid), do: GenServer.call(pid, :stats)
 
   @impl true
   def terminate(_reason, %{subscribed?: true, symbol: symbol}) do
