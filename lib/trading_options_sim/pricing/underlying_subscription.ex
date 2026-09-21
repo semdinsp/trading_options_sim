@@ -110,16 +110,53 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
     end
   end
 
+  # How long ensure/2 waits for the FIRST tick after a successful
+  # subscribe, and how often it re-checks.
+  #
+  # Subscribing and having a price are not the same event. The hub
+  # accepts the subscription immediately, but IBKR takes a moment to
+  # deliver the first tick -- so a caller that resolved a contract right
+  # after ensure/2 returned got {:error, :no_spot} against a
+  # subscription that was perfectly healthy and priced a second later.
+  # Observed live 2026-09-20: 3 of 15 versions failed to activate this
+  # way, and the log read "could not resolve a listed contract
+  # (:no_spot)" as though the symbol were unavailable.
+  #
+  # 3s is well past IBKR's observed sub-second first tick while staying
+  # short enough that a genuinely dead symbol does not stall an
+  # activation sweep. Waiting is skipped entirely when the subscribe
+  # itself failed -- there is nothing to wait for.
+  # Overridable so :test can set it to 0. There is no HubClient in test
+  # (config/test.exs sets start_hub_client: false), so a tick can never
+  # arrive and every ensure/2 would burn the full timeout waiting for
+  # something that cannot happen -- which made previously-fast tests
+  # slow enough to time out nondeterministically.
+  @default_first_tick_timeout_ms 3_000
+  @first_tick_poll_ms 100
+
+  defp first_tick_timeout_ms do
+    Application.get_env(
+      :trading_options_sim,
+      :underlying_first_tick_timeout_ms,
+      @default_first_tick_timeout_ms
+    )
+  end
+
   @doc """
   Ensures `symbol` is subscribed on `trading_hub`, starting the holder
   process if needed, and registers one more dependant on it.
 
-  Returns `{:ok, subscribed?}` — `subscribed?` is `false` when the
-  process is running but the real subscribe RPC failed (an unreachable
-  hub, a contract IBKR rejects). Deliberately not an error: a failed
-  subscribe must not stop a strategy activating, for the same reason
-  `IBKRLive` treats it as non-fatal. The caller surfaces it instead of
-  crashing on it.
+  Blocks until the symbol actually has a price, or the configured
+  first-tick timeout elapses. That wait is the point: callers
+  resolve option contracts against this symbol's spot immediately
+  afterwards, and a subscription that has not yet ticked is
+  indistinguishable from one that will never tick.
+
+  Returns `{:ok, priced?}`. `false` means either the subscribe RPC
+  failed (unreachable hub, a contract IBKR rejects) or no tick arrived
+  in time. Deliberately not an error: a failed subscribe must not stop
+  a strategy activating, for the same reason `IBKRLive` treats it as
+  non-fatal. The caller surfaces it rather than crashing on it.
   """
   @spec ensure(symbol(), keyword()) :: {:ok, boolean()}
   def ensure(symbol, opts \\ []) do
@@ -137,7 +174,46 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
           pid
       end
 
-    GenServer.call(pid, :attach, 15_000)
+    case GenServer.call(pid, :attach, 15_000) do
+      {:ok, true} -> {:ok, await_first_tick(symbol)}
+      {:ok, false} -> {:ok, false}
+    end
+  end
+
+  # Polls rather than waiting on a broadcast: this app's PriceRelay
+  # subscribes to the hub's fan-out, but a caller of ensure/2 is an
+  # arbitrary process (SimActivator) with no subscription of its own,
+  # and adding one for a 3-second window would be more moving parts than
+  # a bounded poll.
+  defp await_first_tick(symbol) do
+    timeout = first_tick_timeout_ms()
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    Enum.reduce_while(Stream.cycle([:tick]), false, fn _, _acc ->
+      if priced?(symbol) do
+        {:halt, true}
+      else
+        if System.monotonic_time(:millisecond) >= deadline do
+          Logger.warning(
+            "UnderlyingSubscription: #{symbol} subscribed but no tick within " <>
+              "#{timeout}ms — callers will see :no_spot"
+          )
+
+          {:halt, false}
+        else
+          Process.sleep(@first_tick_poll_ms)
+          {:cont, false}
+        end
+      end
+    end)
+  end
+
+  defp priced?(symbol) do
+    case call_hub(:get_last_price, [symbol]) do
+      {:ok, %{last: last}} when is_number(last) and last > 0 -> true
+      {:ok, %{close: close}} when is_number(close) and close > 0 -> true
+      _ -> false
+    end
   end
 
   @doc """
