@@ -10,10 +10,31 @@ defmodule TradingOptionsSim.Sim.SimFill do
   `ContractMonitor`'s own `fill_price_for/4`: `fill_basis` is `"quote"`
   (filled against a real two-sided bid/ask) or `"model_price"` (no
   usable quote -- the Black-Scholes backend, or an IBKR contract with no
-  quote tick yet), plus `fill_bid`/`fill_ask`/`fill_spread_fraction` and
-  the `fill_slippage` actually given up versus the model mid. Before
-  2026-09-16 no slippage was applied at all and every fill was a model
-  mid, which flattered any exit that had to cross a wide spread.
+  quote tick yet), plus `fill_bid`/`fill_ask`/`fill_spread_fraction`.
+
+  Two distinct costs are recorded separately, and the distinction is the
+  point:
+
+    * `fill_slippage` — execution cost, measured from the QUOTE MID.
+      Divided by `fill_ask - fill_bid` it is the realized spread
+      fraction, directly comparable to the configured
+      `fill_spread_fraction` and to an externally measured
+      effective/quoted spread ratio.
+    * `model_mid_divergence` — pricer error: how far the Black-Scholes
+      model price sat from the mid. `nil` when there was no quote to
+      diverge from.
+
+  They were one field until 2026-09-21, and `fill_slippage` measured
+  from the MODEL PRICE rather than the mid — so it summed execution
+  cost and pricer error into a number that looked like neither. The
+  defect was visible in the data: a configured spread fraction of 0.5
+  realized a LOWER ratio (0.374) than a configured 0.25 (0.392), which
+  is backwards, because the flat-IV model's disagreement with the book
+  swamped the deliberate crossing in both.
+
+  Before 2026-09-16, earlier still, no slippage was applied at all and
+  every fill was a model mid — which flattered any exit that had to
+  cross a wide spread.
 
   `commission` is an estimate from `TradingCore.Costs.IBKR.option_cost/5`
   (IBKR's published options schedule, Fixed plan — see that module's own
