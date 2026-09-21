@@ -5,6 +5,18 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
   # async: false already documents.
   use TradingOptionsSimWeb.ConnCase, async: false
 
+  # Deterministic replacement for Process.sleep/1 after a broadcast.
+  # PubSub delivery is asynchronous, so sleeping is a bet that the
+  # monitor finishes inside the interval -- usually safe, occasionally
+  # not, and the failures look like unrelated cross-test interference.
+  # A GenServer.call cannot be served until the monitor has drained the
+  # broadcast ahead of it, so this returns exactly when the work is
+  # done. See contract_monitor_test.exs's own sync/1 for the same fix.
+  defp sync_monitor(pid) do
+    _ = TradingOptionsSim.ContractMonitor.snapshot(pid)
+    :ok
+  end
+
   import Phoenix.LiveViewTest
 
   alias TradingOptionsSim.Sim
@@ -143,7 +155,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
           }
         })
 
-      {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+      {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
 
       message = fn price ->
         %{type: :price, symbol: "DETAILSYM6", source: :ibkr, data: %{last: price}}
@@ -151,9 +163,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
       end
 
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM6", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(pid)
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM6", message.(150.0))
-      Process.sleep(50)
+      sync_monitor(pid)
 
       {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
 
@@ -232,14 +244,14 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
         rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}}
       })
 
-    {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+    {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
 
     message =
       %{type: :price, symbol: "DETAILSYM7", source: :ibkr, data: %{last: 150.0}}
       |> Map.put(:__struct__, TradingHub.Message)
 
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM7", message)
-    Process.sleep(50)
+    sync_monitor(pid)
 
     {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
 
@@ -268,14 +280,14 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
         rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}}
       })
 
-    {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+    {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
 
     message =
       %{type: :price, symbol: "DETAILSYM8", source: :ibkr, data: %{last: 150.0}}
       |> Map.put(:__struct__, TradingHub.Message)
 
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM8", message)
-    Process.sleep(50)
+    sync_monitor(pid)
 
     [run] = Sim.list_open_sim_runs(version)
     TradingOptionsSim.Repo.delete!(run)
@@ -311,14 +323,14 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
         rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}}
       })
 
-    {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+    {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
 
     message =
       %{type: :price, symbol: "DETAILSYM9", source: :ibkr, data: %{last: 150.0}}
       |> Map.put(:__struct__, TradingHub.Message)
 
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM9", message)
-    Process.sleep(50)
+    sync_monitor(pid)
 
     [run] = Sim.list_open_sim_runs(version)
     refute is_nil(run.entry_price)
@@ -376,7 +388,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
           }
         })
 
-      {:ok, [_pid], []} = TradingOptionsSim.SimActivator.activate(version)
+      {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
 
       message = fn price ->
         %{type: :price, symbol: "DETAILSYM5", source: :ibkr, data: %{last: price}}
@@ -384,9 +396,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
       end
 
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM5", message.(130.0))
-      Process.sleep(50)
+      sync_monitor(pid)
       Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILSYM5", message.(150.0))
-      Process.sleep(50)
+      sync_monitor(pid)
 
       assert Sim.list_open_sim_runs(version) == []
 
