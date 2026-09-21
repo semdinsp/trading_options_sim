@@ -1043,16 +1043,34 @@ defmodule TradingOptionsSim.ContractMonitor do
   # The returned map is merged into the persisted entry/exit snapshot,
   # so `SimFill.pricing_snapshot`'s documented "slippage applied" is a
   # real recorded number rather than an implicit zero.
+  #
+  # fill_slippage measures from the QUOTE MID, not the model price. It
+  # measured from the model price until 2026-09-21, which silently
+  # summed execution cost with pricer error -- and for options, where a
+  # flat-IV model routinely disagrees with the book, the error term
+  # dominated. The symptom was an inversion no execution assumption can
+  # produce: a configured fraction of 0.5 realized 0.374 while 0.25
+  # realized 0.392, over 8,239 fills. Keep the two quantities separate.
   defp fill_price_for(state, snapshot, action, reason) do
     model_price = fill_price(snapshot["run_current_price"])
 
     case quote_from(snapshot) do
       nil ->
-        {model_price, %{"fill_basis" => "model_price", "fill_slippage" => "0"}}
+        # No quote to cross, so no execution cost and no mid to diverge
+        # from. nil rather than "0" for the divergence: absent is not the
+        # same as measured-and-zero, and conflating them is how the old
+        # fill_slippage hid its own defect.
+        {model_price,
+         %{
+           "fill_basis" => "model_price",
+           "fill_slippage" => "0",
+           "model_mid_divergence" => nil
+         }}
 
       {bid, ask} ->
         fraction = spread_fraction(state, reason)
         price = touch_price(bid, ask, action, fraction) |> Decimal.round(2)
+        mid = bid |> Decimal.add(ask) |> Decimal.div(2)
 
         {price,
          %{
@@ -1060,8 +1078,18 @@ defmodule TradingOptionsSim.ContractMonitor do
            "fill_bid" => Decimal.to_string(bid),
            "fill_ask" => Decimal.to_string(ask),
            "fill_spread_fraction" => Decimal.to_string(fraction),
-           "fill_slippage" =>
-             model_price |> Decimal.sub(price) |> Decimal.abs() |> Decimal.to_string()
+           # Execution cost: how far this fill crossed from the QUOTE MID.
+           # Divided by (ask - bid) this is the realized spread fraction,
+           # directly comparable to the configured one above and to an
+           # externally measured effective/quoted spread ratio.
+           "fill_slippage" => mid |> Decimal.sub(price) |> Decimal.abs() |> Decimal.to_string(),
+           # Pricer error: how far the model price sat from the mid. A
+           # separate quantity that used to be folded into fill_slippage
+           # (see this function's own doc) and is worth keeping -- it is
+           # a direct read on how wrong the flat-IV assumption is against
+           # a real book, which nothing else in this app measures.
+           "model_mid_divergence" =>
+             model_price |> Decimal.sub(mid) |> Decimal.abs() |> Decimal.to_string()
          }}
     end
   end

@@ -981,6 +981,42 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert exit_fill.pricing_snapshot["fill_slippage"] == "0.50"
     end
 
+    # Regression test for a defect the data showed before anyone read the
+    # code: fill_slippage measured from the MODEL PRICE, so it summed
+    # execution cost with pricer error. Over 8,239 live fills a
+    # configured fraction of 0.5 realized 0.374 while 0.25 realized
+    # 0.392 -- an inversion no execution assumption can produce, because
+    # the flat-IV model's disagreement with the book dominated both.
+    #
+    # Asserting the RATIO rather than the raw number is what makes this
+    # catch it: the old definition happened to give plausible-looking
+    # absolute values.
+    test "fill_slippage is the distance from the mid, not from the model price" do
+      {_pid, run} = enter_with_quote("IBKRSLIP1", "IBKRSLIP1_OCC", [])
+
+      [fill] = Sim.list_sim_fills(run)
+      snap = fill.pricing_snapshot
+
+      bid = Decimal.new(snap["fill_bid"])
+      ask = Decimal.new(snap["fill_ask"])
+      slippage = Decimal.new(snap["fill_slippage"])
+      configured = Decimal.new(snap["fill_spread_fraction"])
+
+      # Quote is 5.00/7.00, mid 6.00, configured 0.25 -> fill at 6.50,
+      # so slippage from the mid is 0.50 and the realized ratio is
+      # exactly the configured fraction.
+      realized = Decimal.div(slippage, Decimal.sub(ask, bid))
+
+      assert Decimal.equal?(Decimal.round(realized, 4), Decimal.round(configured, 4)),
+             "realized #{Decimal.to_string(realized)} should equal " <>
+               "configured #{Decimal.to_string(configured)}"
+
+      # The model price is 6.00 here, equal to the mid, so the two
+      # definitions coincide in this fixture -- which is exactly why the
+      # divergence field has to be asserted separately.
+      assert snap["model_mid_divergence"] == "0.00"
+    end
+
     test "a forced expiry close crosses the full spread, selling the bid" do
       {pid, run} = enter_with_quote("IBKRQ3", "IBKRQ3_OCC", [])
 
