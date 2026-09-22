@@ -62,6 +62,12 @@ defmodule TradingOptionsSim.Application do
          max_restarts: 100,
          max_seconds: 10},
         TradingOptionsSim.PriceRelay,
+        # Polygon's own relay, on topics deliberately separate from
+        # PriceRelay's -- see PolygonRelay's moduledoc on why merging
+        # the two would reintroduce a silent overwrite bug. Started
+        # unconditionally: it listens to nothing until a caller asks it
+        # to watch a symbol, so it costs one idle process when unused.
+        TradingOptionsSim.PolygonRelay,
         TradingOptionsSim.SignalConnection,
         # Exchange-hours support (OPTIONS_SIM_ARCHITECTURE_PLAN.md §5c) —
         # ExchangeSessionCache backs every ContractMonitor's session-open
