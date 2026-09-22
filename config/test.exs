@@ -31,6 +31,11 @@ config :trading_options_sim, :start_hub_client, false
 # tests actually cover is independent of the wait.
 config :trading_options_sim, :underlying_first_tick_timeout_ms, 0
 
+# Same reasoning for the Polygon holder: no HubClient in test, so a
+# tick can never arrive and every ensure/2 would burn the full
+# production timeout waiting for something impossible.
+config :trading_options_sim, :polygon_first_tick_timeout_ms, 0
+
 # A node name that will never actually exist, so nothing connects to it
 # -- but UnderlyingSubscription's :nodeup handler needs a configured
 # value to compare against, otherwise the hub-restart recovery path is
