@@ -122,6 +122,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   alias TradingCore.RuleEngine
   alias TradingOptionsSim.Pricing.BlackScholes
   alias TradingOptionsSim.Pricing.IBKRLive
+  alias TradingOptionsSim.Pricing.PolygonFeatures
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.SignalBus
 
@@ -633,7 +634,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
       true ->
         priced = price_contract_black_scholes(state, spot, dte)
-        snapshot = build_snapshot(priced, spot, state.last_signal_values)
+        snapshot = build_snapshot(priced, spot, signal_values(state))
 
         state
         |> Map.put(:last_snapshot, snapshot)
@@ -665,7 +666,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             state
 
           {:ok, tick} ->
-            snapshot = build_ibkr_live_snapshot(tick, spot, state.last_signal_values)
+            snapshot = build_ibkr_live_snapshot(tick, spot, signal_values(state))
 
             state
             |> Map.put(:last_snapshot, snapshot)
@@ -683,6 +684,14 @@ defmodule TradingOptionsSim.ContractMonitor do
       volatility: state.implied_volatility,
       right: state.right
     })
+  end
+
+  # Caller-supplied values that sit underneath the pricing keys: the
+  # latest trading_signal values plus the underlying's Polygon features
+  # (run_poly_*, see PolygonFeatures). Polygon keys are absent, not
+  # zero, when stale or unknown, so a rule on them fails closed.
+  defp signal_values(state) do
+    Map.merge(state.last_signal_values, PolygonFeatures.snapshot(state.symbol))
   end
 
   # tick.underlying_price (from IBKR's own und_price field, when

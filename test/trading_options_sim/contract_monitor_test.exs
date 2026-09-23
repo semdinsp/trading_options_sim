@@ -201,6 +201,84 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "Polygon underlying features (run_poly_*)" do
+    defp polygon_quote(symbol, bid_size, ask_size) do
+      :ok = TradingOptionsSim.PolygonRelay.watch(symbol)
+
+      msg =
+        %{
+          type: :price,
+          source: :polygon,
+          symbol: symbol,
+          data: %{
+            bid: Decimal.new("149.99"),
+            ask: Decimal.new("150.01"),
+            bid_size: bid_size && Decimal.new(bid_size),
+            ask_size: ask_size && Decimal.new(ask_size)
+          },
+          metadata: %{source: "polygon.io", data_type: :ws_quote}
+        }
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(
+        TradingHub.PubSub,
+        TradingContract.Topics.prices_polygon(symbol),
+        msg
+      )
+
+      # Drain the relay so the ETS write has landed.
+      _ = TradingOptionsSim.PolygonRelay.watching()
+    end
+
+    defp imbalance_rule do
+      %{"entry" => %{"signal" => "run_poly_imbalance", "op" => "gt", "value" => 0.3}}
+    end
+
+    test "an entry rule on a Polygon feature fires on the next underlying tick" do
+      symbol = "POLYMON1"
+      {pid, run} = start_monitor(version_fixture(imbalance_rule()), contract_key(symbol))
+
+      polygon_quote(symbol, "400", "100")
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open? == true
+      [fill] = Sim.list_sim_fills(run)
+      assert_in_delta fill.pricing_snapshot["run_poly_imbalance"], 0.6, 1.0e-9
+    end
+
+    test "does not enter when the Polygon feature is below threshold" do
+      symbol = "POLYMON2"
+      {pid, run} = start_monitor(version_fixture(imbalance_rule()), contract_key(symbol))
+
+      polygon_quote(symbol, "100", "100")
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    # Unknown sizes must fail closed, not read as a 0.0 imbalance.
+    test "does not enter when the quote carries no sizes" do
+      symbol = "POLYMON3"
+
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_poly_imbalance", "op" => "lt", "value" => 0.3}
+        })
+
+      {pid, run} = start_monitor(version, contract_key(symbol))
+
+      polygon_quote(symbol, nil, nil)
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+  end
+
   describe "exit rule transition" do
     test "closes an open position and records an exit fill when the exit rule is satisfied" do
       version =
