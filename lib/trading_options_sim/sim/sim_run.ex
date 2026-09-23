@@ -56,6 +56,10 @@ defmodule TradingOptionsSim.Sim.SimRun do
 
     field :is_churn, :boolean, default: false
 
+    # Data-quality exclusion, orthogonal to is_churn: see
+    # excluded_reasons/0 and Sim.exclude_runs/2.
+    field :excluded_reason, :string
+
     has_many :sim_fills, TradingOptionsSim.Sim.SimFill
 
     many_to_many :tags, TradingOptionsSim.Sim.Tag,
@@ -124,6 +128,22 @@ defmodule TradingOptionsSim.Sim.SimRun do
   def churn_changeset(sim_run) do
     change(sim_run, is_churn: true)
   end
+
+  @excluded_reasons ~w(stale_ibkr_data)
+
+  @doc """
+  Why a run can be excluded from scoring. A run excluded here really
+  happened in the simulator, but its inputs were bad, so it must not
+  count toward any metric, gate or lifecycle decision.
+
+    * `"stale_ibkr_data"` -- priced from an IBKR option tick/quote that
+      had stopped updating. 2026-09-23: trading_hub lost its option
+      subscriptions at ~09:57 ET and monitors kept trading against the
+      cached book until the close (fixed going forward by
+      ContractMonitor's staleness gate).
+  """
+  @spec excluded_reasons() :: [String.t()]
+  def excluded_reasons, do: @excluded_reasons
 
   @doc """
   Closes the run — sets exit_at/exit_price/exit_reason/realized_pnl,
