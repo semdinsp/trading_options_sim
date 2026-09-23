@@ -1048,6 +1048,111 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run}
     end
 
+    # Staleness gate. On 2026-09-23 the hub lost its IBKR option
+    # subscriptions at ~09:57 ET and IBKRLive kept serving its last cached
+    # tick; 1,144 runs traded against one frozen book until the close.
+    defp broadcast_aged(occ_symbol, data, age_ms) do
+      message =
+        %{
+          type: :price,
+          symbol: occ_symbol,
+          source: :ibkr,
+          data: data,
+          timestamp: DateTime.add(DateTime.utc_now(), -age_ms, :millisecond)
+        }
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{occ_symbol}", message)
+    end
+
+    @greeks %{
+      implied_vol: 0.30,
+      delta: 0.55,
+      opt_price: 6.00,
+      gamma: 0.02,
+      vega: 0.15,
+      theta: -0.03,
+      und_price: 150.0
+    }
+
+    defp start_live(symbol, occ_symbol) do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      {pid, run} =
+        start_monitor(version, contract_key(symbol),
+          pricing_backend: :ibkr_live,
+          occ_symbol: occ_symbol
+        )
+
+      await_ibkr_live(occ_symbol)
+      {pid, run}
+    end
+
+    test "a stale option tick is not traded on" do
+      {pid, run} = start_live("STALE1", "STALE1_OCC")
+      broadcast_aged("STALE1_OCC", @greeks, 120_000)
+
+      log =
+        capture_log(fn ->
+          broadcast_underlying_price("STALE1", 150.0)
+          sync(pid)
+          broadcast_underlying_price("STALE1", 150.5)
+          sync(pid)
+        end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+      assert length(Regex.scan(~r/IBKR option data is stale/, log)) == 1
+    end
+
+    # The gate must NOT fire on healthy input: a tick a few seconds old is
+    # normal between computations on a live contract.
+    test "a recent but not instantaneous tick still trades" do
+      {pid, run} = start_live("STALE2", "STALE2_OCC")
+      broadcast_aged("STALE2_OCC", @greeks, 5_000)
+      broadcast_underlying_price("STALE2", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert [_fill] = Sim.list_sim_fills(run)
+    end
+
+    test "trading resumes once a fresh tick replaces a stale one" do
+      {pid, run} = start_live("STALE3", "STALE3_OCC")
+      broadcast_aged("STALE3_OCC", @greeks, 120_000)
+
+      capture_log(fn ->
+        broadcast_underlying_price("STALE3", 150.0)
+        sync(pid)
+      end)
+
+      assert Sim.list_sim_fills(run) == []
+
+      broadcast_aged("STALE3_OCC", @greeks, 0)
+      sync(pid)
+      broadcast_underlying_price("STALE3", 150.0)
+      sync(pid)
+
+      assert [_fill] = Sim.list_sim_fills(run)
+    end
+
+    test "a stale quote under a fresh tick falls back to the model price" do
+      {pid, run} = start_live("STALE4", "STALE4_OCC")
+      broadcast_aged("STALE4_OCC", %{bid: 5.00, bid_size: 10}, 120_000)
+      broadcast_aged("STALE4_OCC", %{ask: 7.00, ask_size: 10}, 120_000)
+      broadcast_aged("STALE4_OCC", @greeks, 0)
+      sync(pid)
+      broadcast_underlying_price("STALE4", 150.0)
+      sync(pid)
+
+      [fill] = Sim.list_sim_fills(run)
+      assert fill.pricing_snapshot["fill_basis"] == "model_price"
+      assert Decimal.equal?(fill.fill_price, Decimal.new("6.00"))
+    end
+
     # Regression, 2026-09-23 open: an IBKR computation tick can carry an
     # underlying price and no option price. An always-true entry rule
     # then reached fill_price(nil) and crashed the monitor -- 78 times in
