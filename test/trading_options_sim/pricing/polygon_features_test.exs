@@ -102,6 +102,20 @@ defmodule TradingOptionsSim.Pricing.PolygonFeaturesTest do
       assert snap == %{}
     end
 
+    # Late delivery (a hub catching up after a reconnect) must not look
+    # fresh: the hub's own stamp dates the value, not receive time.
+    test "a quote stamped 60s ago is stale even if it arrived just now" do
+      data = %{
+        bid: Decimal.new("100.00"),
+        ask: Decimal.new("100.10"),
+        bid_size: Decimal.new("1"),
+        ask_size: Decimal.new("1"),
+        timestamp: DateTime.from_unix!(@t0 - 60_000, :millisecond)
+      }
+
+      assert F.new() |> F.apply_quote(data, @t0) |> F.to_snapshot(@t0) == %{}
+    end
+
     test "a crossed or one-sided quote is ignored" do
       assert F.new() |> quote("100.10", "100.00", "1", "1", @t0) |> F.to_snapshot(@t0) == %{}
       assert F.new() |> quote("0", "100.00", "1", "1", @t0) |> F.to_snapshot(@t0) == %{}

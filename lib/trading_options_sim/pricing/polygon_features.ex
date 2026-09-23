@@ -7,8 +7,19 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
   aggregate it relays into one `%PolygonFeatures{}` per symbol and
   writes it to a named ETS table; `ContractMonitor` merges
   `snapshot/1` into every evaluation. The fold functions are pure and
-  take the receive time as an argument, so the tests drive time
-  directly rather than sleeping.
+  take a fallback time as an argument, so the tests drive time directly
+  rather than sleeping.
+
+  ## Clock: the hub's stamp, not receive time
+
+  Every value is dated with the message's own `data[:timestamp]` (a
+  `DateTime` on trades, quotes and bars), falling back to the caller's
+  `now` only when a message carries none. Receive time would make data
+  that arrives late -- a hub catching up after a reconnect -- look
+  fresh. A bar's stamp is Polygon's `"e"`, the bar END, so a bar is ~0s
+  old on arrival and the 150s window tolerates one missed bar; Polygon
+  sends no bar for a minute with no trades, so thin names age out and
+  fail closed. Same convention as trading_live and trading_system.
 
   ## Keys
 
@@ -106,6 +117,8 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
 
   @spec apply_trade(t(), map(), integer()) :: t()
   def apply_trade(%__MODULE__{} = f, data, now) do
+    now = event_ms(data, now)
+
     case to_float(Map.get(data, :last)) do
       price when is_float(price) and price > 0 ->
         %{f | last_trade: price, last_trade_at: now}
@@ -119,6 +132,7 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
 
   @spec apply_quote(t(), map(), integer()) :: t()
   def apply_quote(%__MODULE__{} = f, data, now) do
+    now = event_ms(data, now)
     bid = to_float(Map.get(data, :bid))
     ask = to_float(Map.get(data, :ask))
 
@@ -138,6 +152,8 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
 
   @spec apply_aggregate(t(), map(), integer()) :: t()
   def apply_aggregate(%__MODULE__{} = f, data, now) do
+    now = event_ms(data, now)
+
     case to_float(Map.get(data, :volume)) do
       v when is_float(v) and v >= 0 ->
         prior =
@@ -177,6 +193,11 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
   end
 
   # --- Internals ------------------------------------------------------------
+
+  defp event_ms(%{timestamp: %DateTime{} = ts}, _fallback),
+    do: DateTime.to_unix(ts, :millisecond)
+
+  defp event_ms(_data, fallback), do: fallback
 
   defp fresh?(nil, _now, _max), do: false
   defp fresh?(at, now, max), do: now - at <= max
