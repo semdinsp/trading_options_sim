@@ -55,8 +55,13 @@ defmodule TradingOptionsSim.ContractSelector do
   targeting them would reintroduce the per-symbol variation this module
   exists to remove.
 
-  The resolved expiry is also probed, so a target landing on a month
-  with no listing for that symbol falls through to the next.
+  The expiry is probed too, and a target landing on a month with no
+  listing for that symbol falls through to the next two third Fridays.
+  That is not hypothetical: on 2026-09-23 SPY listed Dec, Jan and Mar
+  but NOT Feb 2027, so every 120-DTE SPY leg (target 20270219) failed
+  with `:no_listed_contract` from the day it was created, while QQQ,
+  which does list Feb, resolved fine. `candidates/3` orders the probes
+  so the fall-through stays cheap -- see its doc.
   """
 
   @type contract :: %{expiry: String.t(), strike: Decimal.t(), right: String.t()}
@@ -97,7 +102,11 @@ defmodule TradingOptionsSim.ContractSelector do
          {:ok, expiry} <- resolve_expiry(config),
          right when right in ["C", "P"] <- Map.get(config, "right") do
       target = spot + (config["strike_offset"] || 0)
-      probe_strikes(symbol, expiry, target, right, config)
+      expiries = [expiry | fallback_expiries(expiry, config)]
+
+      symbol
+      |> candidates(target, expiries)
+      |> first_listed(symbol, right, &resolve_via_hub/4)
     else
       {:error, reason} -> {:error, reason}
       _invalid_right -> {:error, :unsupported_leg_config}
@@ -137,25 +146,52 @@ defmodule TradingOptionsSim.ContractSelector do
     Date.day_of_week(date) == 5 and date.day in 15..21
   end
 
-  # At most three candidates: the rounded strike, then one grid step
-  # either side. Bounded deliberately -- see the moduledoc on why an
-  # unbounded probe loop is a denial of service against the shared
-  # HubClient rather than merely slow.
-  defp probe_strikes(symbol, expiry, target, right, _config) do
-    increment = Map.get(@strike_increments, symbol, @default_increment)
-    rounded = Float.round(target / increment) * increment
-
-    candidates =
-      [rounded, rounded + increment, rounded - increment]
-      |> Enum.map(&Float.round(&1, 2))
-      |> Enum.uniq()
-
-    first_listed(symbol, expiry, candidates, right)
+  # Only a dte_target expiry falls through. A fixed_expiry is a
+  # deliberate choice (a specific LEAPS), and silently trading a
+  # different month would be worse than not trading at all.
+  defp fallback_expiries(expiry, %{"expiry_selection" => "dte_target"}) do
+    next = expiry |> wire_date() |> third_friday_on_or_after(1)
+    [next, next |> wire_date() |> third_friday_on_or_after(1)]
   end
 
-  defp first_listed(symbol, expiry, candidates, right) do
-    Enum.reduce_while(candidates, {:error, :no_listed_contract}, fn strike, acc ->
-      case resolve_via_hub(symbol, expiry, strike, right) do
+  defp fallback_expiries(_expiry, _config), do: []
+
+  defp wire_date(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>),
+    do: Date.new!(String.to_integer(y), String.to_integer(m), String.to_integer(d))
+
+  @doc """
+  The ordered `{expiry, strike}` probes for `symbol` at `target`.
+
+  The rounded strike on each expiry first, then one grid step either
+  side on the FIRST expiry only. At most `length(expiries) + 2` probes.
+
+  Ordered this way because an unlisted expiry and an off-grid strike
+  both cost a full 10s miss, and they are not equally likely: for SPY
+  and QQQ at a $5 grid, the rounded strike is essentially always
+  listed, so a miss on it almost always means the MONTH is missing.
+  Probing neighbours on a missing month first would spend 30s learning
+  nothing. Bounded deliberately -- see the moduledoc on why an
+  unbounded probe loop is a denial of service against the shared
+  HubClient rather than merely slow.
+  """
+  @spec candidates(String.t(), number(), [String.t()]) :: [{String.t(), float()}]
+  def candidates(symbol, target, [first | _] = expiries) do
+    increment = Map.get(@strike_increments, symbol, @default_increment)
+    rounded = Float.round(Float.round(target / increment) * increment, 2)
+
+    neighbours =
+      [rounded + increment, rounded - increment]
+      |> Enum.map(&{first, Float.round(&1, 2)})
+
+    (Enum.map(expiries, &{&1, rounded}) ++ neighbours) |> Enum.uniq()
+  end
+
+  @doc false
+  # `resolver` is the hub lookup, injectable so the probe order and the
+  # fall-through are testable without a hub.
+  def first_listed(candidates, symbol, right, resolver) do
+    Enum.reduce_while(candidates, {:error, :no_listed_contract}, fn {expiry, strike}, acc ->
+      case resolver.(symbol, expiry, strike, right) do
         {:ok, _con_id} ->
           {:halt, {:ok, %{expiry: expiry, strike: to_decimal(strike), right: right}}}
 
