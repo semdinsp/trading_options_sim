@@ -183,6 +183,9 @@ defmodule TradingOptionsSim.ContractMonitor do
     # with trading_system and trading_live: params["min_hold_seconds"].
     min_hold_seconds: nil,
     last_snapshot: %{},
+    # Set once an unpriced fill has been skipped and logged, cleared by
+    # the next priced fill -- one warning per episode, not one per tick.
+    unpriced_warned?: false,
     signal_names: [],
     canonical_names: %{},
     last_signal_values: %{}
@@ -947,7 +950,14 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp submit_entry(state, snapshot) do
     action = if state.direction == "short", do: "sell", else: "buy"
-    {price, fill_basis} = fill_price_for(state, snapshot, action, "entry")
+
+    case fill_price_for(state, snapshot, action, "entry") do
+      {:ok, price, fill_basis} -> record_entry(state, snapshot, action, price, fill_basis)
+      :no_price -> skip_unpriced(state, "entry")
+    end
+  end
+
+  defp record_entry(state, snapshot, action, price, fill_basis) do
     now = DateTime.utc_now()
 
     {run, state} = ensure_open_run(state)
@@ -977,7 +987,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
         Sim.maybe_mark_prior_run_as_churn(state.strategy_version.id, run)
 
-        %{state | position_open?: true, entered_at: now}
+        %{state | position_open?: true, entered_at: now, unpriced_warned?: false}
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} entry fill failed: #{inspect(reason)}")
@@ -987,7 +997,17 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp submit_exit(state, snapshot, exit_reason) do
     action = if state.direction == "short", do: "buy", else: "sell"
-    {price, fill_basis} = fill_price_for(state, snapshot, action, exit_reason)
+
+    case fill_price_for(state, snapshot, action, exit_reason) do
+      {:ok, price, fill_basis} ->
+        record_exit(state, snapshot, action, exit_reason, price, fill_basis)
+
+      :no_price ->
+        skip_unpriced(state, exit_reason)
+    end
+  end
+
+  defp record_exit(state, snapshot, action, exit_reason, price, fill_basis) do
     now = DateTime.utc_now()
 
     run = Sim.get_sim_run!(state.sim_run_id)
@@ -1032,7 +1052,7 @@ defmodule TradingOptionsSim.ContractMonitor do
           "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} exited at #{Decimal.to_string(price)} (#{exit_reason})"
         )
 
-        %{state | position_open?: false, entered_at: nil}
+        %{state | position_open?: false, entered_at: nil, unpriced_warned?: false}
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} exit fill failed: #{inspect(reason)}")
@@ -1060,16 +1080,25 @@ defmodule TradingOptionsSim.ContractMonitor do
   # dominated. The symptom was an inversion no execution assumption can
   # produce: a configured fraction of 0.5 realized 0.374 while 0.25
   # realized 0.392, over 8,239 fills. Keep the two quantities separate.
+  #
+  # Returns :no_price when there is neither a usable quote nor a model
+  # price -- an IBKR option tick can arrive carrying only greeks or an
+  # underlying price, typically in the first seconds after the open.
+  # Never fabricate a fill from nothing: the caller skips the transition
+  # and the next tick re-evaluates it.
   defp fill_price_for(state, snapshot, action, reason) do
     model_price = fill_price(snapshot["run_current_price"])
 
     case quote_from(snapshot) do
+      nil when is_nil(model_price) ->
+        :no_price
+
       nil ->
         # No quote to cross, so no execution cost and no mid to diverge
         # from. nil rather than "0" for the divergence: absent is not the
         # same as measured-and-zero, and conflating them is how the old
         # fill_slippage hid its own defect.
-        {model_price,
+        {:ok, model_price,
          %{
            "fill_basis" => "model_price",
            "fill_slippage" => "0",
@@ -1081,7 +1110,7 @@ defmodule TradingOptionsSim.ContractMonitor do
         price = touch_price(bid, ask, action, fraction) |> Decimal.round(2)
         mid = bid |> Decimal.add(ask) |> Decimal.div(2)
 
-        {price,
+        {:ok, price,
          %{
            "fill_basis" => "quote",
            "fill_bid" => Decimal.to_string(bid),
@@ -1097,10 +1126,30 @@ defmodule TradingOptionsSim.ContractMonitor do
            # (see this function's own doc) and is worth keeping -- it is
            # a direct read on how wrong the flat-IV assumption is against
            # a real book, which nothing else in this app measures.
-           "model_mid_divergence" =>
-             model_price |> Decimal.sub(mid) |> Decimal.abs() |> Decimal.to_string()
+           "model_mid_divergence" => divergence(model_price, mid)
          }}
     end
+  end
+
+  # nil when there is no model price to compare: absent, not zero.
+  defp divergence(nil, _mid), do: nil
+
+  defp divergence(model_price, mid),
+    do: model_price |> Decimal.sub(mid) |> Decimal.abs() |> Decimal.to_string()
+
+  # Leaves state untouched apart from the warn-once flag: the position
+  # stays as it was, and the next priced tick retries the transition.
+  # Covers forced closes too -- EodCloser re-sends every tick, and the
+  # expiry path always carries an intrinsic price.
+  defp skip_unpriced(%{unpriced_warned?: true} = state, _reason), do: state
+
+  defp skip_unpriced(state, reason) do
+    Logger.warning(
+      "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+        "#{reason} skipped -- no option price or quote yet; retrying on the next tick"
+    )
+
+    %{state | unpriced_warned?: true}
   end
 
   defp spread_fraction(state, reason) do
@@ -1160,6 +1209,12 @@ defmodule TradingOptionsSim.ContractMonitor do
   # with a FunctionClauseError, since only the is_float/1 clause existed.
   defp fill_price(%Decimal{} = price), do: Decimal.round(price, 2)
   defp fill_price(price) when is_integer(price), do: price |> Decimal.new() |> Decimal.round(2)
+
+  # nil: no price on this tick. Crashed the monitor with a
+  # FunctionClauseError until 2026-09-23 -- 78 crashes in the first two
+  # seconds after that day's open, when entry rules fired against IBKR
+  # option ticks that had not yet carried a price.
+  defp fill_price(nil), do: nil
 
   # entry_snapshot/exit_snapshot are DB `:map` columns Ecto persists via
   # Jason — but this same snapshot map is also handed to
