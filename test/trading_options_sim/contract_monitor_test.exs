@@ -970,6 +970,69 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run}
     end
 
+    # Regression, 2026-09-23 open: an IBKR computation tick can carry an
+    # underlying price and no option price. An always-true entry rule
+    # then reached fill_price(nil) and crashed the monitor -- 78 times in
+    # two seconds. It must skip the entry and retry on the next tick.
+    defp start_unpriced(symbol, occ_symbol) do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      {pid, run} =
+        start_monitor(version, contract_key(symbol),
+          pricing_backend: :ibkr_live,
+          occ_symbol: occ_symbol
+        )
+
+      await_ibkr_live(occ_symbol)
+      broadcast_option_greeks(occ_symbol, %{und_price: 150.0})
+      {pid, run}
+    end
+
+    test "an entry with no option price and no quote is skipped, not a crash" do
+      {pid, run} = start_unpriced("UNPRICED1", "UNPRICED1_OCC")
+
+      log =
+        capture_log(fn ->
+          broadcast_underlying_price("UNPRICED1", 150.0)
+          sync(pid)
+          broadcast_underlying_price("UNPRICED1", 150.5)
+          sync(pid)
+        end)
+
+      assert Process.alive?(pid)
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+
+      # One warning per episode, not one per tick.
+      assert length(Regex.scan(~r/entry skipped -- no option price/, log)) == 1
+    end
+
+    test "fills against the quote once one arrives, even with no model price" do
+      {pid, run} = start_unpriced("UNPRICED2", "UNPRICED2_OCC")
+
+      capture_log(fn ->
+        broadcast_underlying_price("UNPRICED2", 150.0)
+        sync(pid)
+      end)
+
+      assert Sim.list_sim_fills(run) == []
+
+      broadcast_option_quote("UNPRICED2_OCC", %{bid: 5.00, bid_size: 10})
+      broadcast_option_quote("UNPRICED2_OCC", %{ask: 7.00, ask_size: 10})
+      sync(pid)
+      broadcast_underlying_price("UNPRICED2", 150.0)
+      sync(pid)
+
+      [fill] = Sim.list_sim_fills(run)
+      assert fill.pricing_snapshot["fill_basis"] == "quote"
+      assert Decimal.equal?(fill.fill_price, Decimal.new("6.50"))
+      # No model price to compare against: absent, not zero.
+      assert fill.pricing_snapshot["model_mid_divergence"] == nil
+    end
+
     test "a separate ask tick does not erase the bid that preceded it" do
       {pid, run} = enter_with_quote("IBKRQ1", "IBKRQ1_OCC", [])
 
