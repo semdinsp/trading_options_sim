@@ -243,6 +243,20 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscription do
     {:noreply, resubscribe(state)}
   end
 
+  # The hub rejected our symbol and has already dropped its own refcount
+  # for it, so we are no longer subscribed. Clearing the flag keeps
+  # stats/terminate honest; the next :resubscribe or :nodeup retries.
+  def handle_info(
+        %{
+          type: :health,
+          data: %{component: :polygon_websocket, status: :subscribe_rejected, symbol: symbol}
+        },
+        %{symbol: symbol} = state
+      ) do
+    Logger.warning("PolygonSubscription: #{symbol} — subscribe rejected by Polygon")
+    {:noreply, %{state | subscribed?: false}}
+  end
+
   # Required, not defensive padding: this process subscribes to
   # "system:health", a topic it does not own, so it WILL receive
   # broadcasts it has no specific clause for. trading_system's

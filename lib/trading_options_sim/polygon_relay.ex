@@ -49,9 +49,20 @@ defmodule TradingOptionsSim.PolygonRelay do
   passed through unchanged, including `nil`. **`nil` means unknown, not
   zero** — a consumer computing an imbalance must handle both that and
   `Decimal.div/2` raising on a zero denominator.
+
+  ## Features
+
+  Alongside relaying, each message is folded into that symbol's
+  `TradingOptionsSim.Pricing.PolygonFeatures` in an ETS table this
+  process owns, which is what `ContractMonitor` reads as `run_poly_*`
+  rule keys. Done here rather than in a second subscriber because this
+  process already sees every message exactly once, already dispatched
+  on `data_type`.
   """
 
   use GenServer
+
+  alias TradingOptionsSim.Pricing.PolygonFeatures
 
   @doc false
   def start_link(opts \\ []) do
@@ -90,6 +101,7 @@ defmodule TradingOptionsSim.PolygonRelay do
 
   @impl true
   def init(_opts) do
+    :ok = PolygonFeatures.create_table()
     {:ok, %{watching: MapSet.new()}}
   end
 
@@ -98,8 +110,13 @@ defmodule TradingOptionsSim.PolygonRelay do
     if MapSet.member?(state.watching, symbol) do
       {:reply, :ok, state}
     else
-      Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, hub_prices_topic(symbol))
-      Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, hub_volume_topic(symbol))
+      # TradingHub.PubSub, not this app's own bus: the hub broadcasts
+      # there, and :pg only delivers to subscribers of the same-named
+      # server. Subscribing on TradingOptionsSim.PubSub compiled, passed
+      # every test that send/2'd straight to this process, and received
+      # nothing live -- measured 0 vs 12 SPY messages in 4s.
+      Phoenix.PubSub.subscribe(TradingHub.PubSub, hub_prices_topic(symbol))
+      Phoenix.PubSub.subscribe(TradingHub.PubSub, hub_volume_topic(symbol))
       {:reply, :ok, %{state | watching: MapSet.put(state.watching, symbol)}}
     end
   end
@@ -119,10 +136,20 @@ defmodule TradingOptionsSim.PolygonRelay do
       )
       when is_binary(symbol) do
     case data_type do
-      :ws_trade -> relay(prices_topic(symbol), message)
-      :ws_quote -> relay(prices_topic(symbol), message)
-      :ws_aggregate -> relay(volume_topic(symbol), message)
-      _other -> :ok
+      :ws_trade ->
+        fold(symbol, &PolygonFeatures.apply_trade/3, message.data)
+        relay(prices_topic(symbol), message)
+
+      :ws_quote ->
+        fold(symbol, &PolygonFeatures.apply_quote/3, message.data)
+        relay(prices_topic(symbol), message)
+
+      :ws_aggregate ->
+        fold(symbol, &PolygonFeatures.apply_aggregate/3, message.data)
+        relay(volume_topic(symbol), message)
+
+      _other ->
+        :ok
     end
 
     {:noreply, state}
@@ -133,6 +160,13 @@ defmodule TradingOptionsSim.PolygonRelay do
   # rather than matched loosely -- a clause that guessed from key
   # presence is exactly the bug this module's moduledoc warns about.
   def handle_info(_other, state), do: {:noreply, state}
+
+  defp fold(symbol, fun, data) when is_map(data) do
+    features = fun.(PolygonFeatures.get(symbol), data, PolygonFeatures.now_ms())
+    PolygonFeatures.put(symbol, features)
+  end
+
+  defp fold(_symbol, _fun, _data), do: :ok
 
   defp relay(topic, message) do
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, topic, message)

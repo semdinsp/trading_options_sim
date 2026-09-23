@@ -113,6 +113,50 @@ defmodule TradingOptionsSim.PolygonRelayTest do
   end
 
   describe "watch/1" do
+    # The live path: the hub BROADCASTS on TradingHub.PubSub, it never
+    # send/2s to this process. Every other test here sends directly and
+    # so passed while watch/1 subscribed on the wrong bus and the relay
+    # received nothing in production.
+    test "receives what the hub broadcasts on TradingHub.PubSub" do
+      :ok = PolygonRelay.watch("BUSTEST")
+      Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, PolygonRelay.prices_topic("BUSTEST"))
+
+      msg = hub_message("BUSTEST", :ws_trade, %{last: Decimal.new("50.00")})
+
+      Phoenix.PubSub.broadcast(
+        TradingHub.PubSub,
+        TradingContract.Topics.prices_polygon("BUSTEST"),
+        msg
+      )
+
+      assert_receive ^msg, 500
+    end
+
+    test "folds relayed messages into PolygonFeatures for that symbol" do
+      :ok = PolygonRelay.watch("FEATTEST")
+
+      quote_msg =
+        hub_message("FEATTEST", :ws_quote, %{
+          bid: Decimal.new("100.00"),
+          ask: Decimal.new("100.10"),
+          bid_size: Decimal.new("300"),
+          ask_size: Decimal.new("100")
+        })
+
+      Phoenix.PubSub.broadcast(
+        TradingHub.PubSub,
+        TradingContract.Topics.prices_polygon("FEATTEST"),
+        quote_msg
+      )
+
+      # Flush the relay's mailbox before reading the table.
+      _ = PolygonRelay.watching()
+
+      snapshot = TradingOptionsSim.Pricing.PolygonFeatures.snapshot("FEATTEST")
+      assert_in_delta snapshot["run_poly_imbalance"], 0.5, 1.0e-9
+      assert_in_delta snapshot["run_poly_spread_bps"], 9.995, 0.01
+    end
+
     test "is idempotent and tracks watched symbols" do
       :ok = PolygonRelay.watch("WATCHONCE")
       :ok = PolygonRelay.watch("WATCHONCE")

@@ -24,7 +24,9 @@ defmodule TradingOptionsSim.SimActivator do
 
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.ContractSelector
+  alias TradingOptionsSim.Pricing.PolygonSubscription
   alias TradingOptionsSim.Pricing.UnderlyingSubscription
+  alias TradingOptionsSim.PolygonRelay
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.StrategyVersion
 
@@ -170,7 +172,10 @@ defmodule TradingOptionsSim.SimActivator do
     version.target_pool_id
     |> Sim.get_target_pool!()
     |> Map.fetch!(:target_pool_members)
-    |> Enum.each(&UnderlyingSubscription.release(&1.symbol))
+    |> Enum.each(fn member ->
+      UnderlyingSubscription.release(member.symbol)
+      PolygonSubscription.release(member.symbol)
+    end)
   end
 
   # Every symbol worth checking for a running monitor: every open run's
@@ -297,6 +302,7 @@ defmodule TradingOptionsSim.SimActivator do
     # several strategies on one symbol share a single hub subscription,
     # released only when the last one detaches.
     ensure_underlying(member)
+    ensure_polygon(member)
 
     case resolve_for_symbol(member.symbol, version.option_leg_config) do
       {:ok, contract_template} ->
@@ -325,6 +331,26 @@ defmodule TradingOptionsSim.SimActivator do
     :exit, reason ->
       Logger.warning(
         "SimActivator: underlying subscribe for #{member.symbol} failed: #{inspect(reason)}"
+      )
+
+      {:ok, false}
+  end
+
+  # The underlying's Polygon trades/quotes/minute bars, which is where
+  # volume and a sized two-sided quote come from (IBKR's prices:SYMBOL
+  # carries neither). Two steps, both needed: ensure/2 asks the hub to
+  # stream the symbol, watch/1 makes PolygonRelay listen and fold it
+  # into PolygonFeatures -- the run_poly_* keys ContractMonitor merges
+  # into every rule snapshot. Non-fatal for the same reason as
+  # ensure_underlying/1: a rule on a run_poly_* key simply fails closed
+  # while the data is absent, and nothing else depends on it.
+  defp ensure_polygon(member) do
+    PolygonRelay.watch(member.symbol)
+    PolygonSubscription.ensure(member.symbol)
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "SimActivator: polygon subscribe for #{member.symbol} failed: #{inspect(reason)}"
       )
 
       {:ok, false}

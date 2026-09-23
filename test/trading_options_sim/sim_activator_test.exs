@@ -352,6 +352,42 @@ defmodule TradingOptionsSim.SimActivatorTest do
     end
   end
 
+  describe "Polygon underlying registration" do
+    # Without this nothing ever asked the hub for Polygon data or told
+    # PolygonRelay to listen, so every run_poly_* rule key was
+    # permanently absent and any rule using one could never fire.
+    test "activate/1 watches and subscribes each pool member on Polygon" do
+      pool = pool_fixture(["POLYACT1", "POLYACT2"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, _pids, []} = SimActivator.activate(version)
+
+      watching = TradingOptionsSim.PolygonRelay.watching()
+      assert "POLYACT1" in watching
+      assert "POLYACT2" in watching
+
+      assert is_pid(TradingOptionsSim.Pricing.PolygonSubscription.whereis("POLYACT1"))
+      assert is_pid(TradingOptionsSim.Pricing.PolygonSubscription.whereis("POLYACT2"))
+    end
+
+    test "deactivate/1 releases the Polygon subscription" do
+      pool = pool_fixture(["POLYDEACT"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, _pids, []} = SimActivator.activate(version)
+      holder = TradingOptionsSim.Pricing.PolygonSubscription.whereis("POLYDEACT")
+      ref = Process.monitor(holder)
+
+      {:ok, 1} = SimActivator.deactivate(version)
+
+      assert_receive {:DOWN, ^ref, :process, ^holder, _}, 1_000
+    end
+  end
+
   describe "deactivate/1" do
     test "terminates every running monitor and returns the count" do
       pool = pool_fixture(["AAPLSD1", "MSFTSD1"])
