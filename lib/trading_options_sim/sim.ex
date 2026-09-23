@@ -908,6 +908,9 @@ defmodule TradingOptionsSim.Sim do
   Excludes closed runs from every score, gate and lifecycle decision,
   recording `reason` (one of `SimRun.excluded_reasons/0`). The runs stay
   in place and still show in run lists -- only scoring skips them.
+  They are deliberately NOT counted as churn: `excluded_count` and
+  `scored_runs_coverage` measure trading behaviour, and a data outage
+  must not fail a version's churn gate.
   Returns `{:ok, count}`; `{:error, :invalid_reason}` for an unknown
   reason. Already-excluded runs keep their original reason.
   """
@@ -1632,7 +1635,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id in ^version_ids)
     |> where([r], r.status == "closed")
-    |> where([r], r.is_churn or not is_nil(r.excluded_reason))
+    |> where([r], r.is_churn)
     |> group_by([r], r.strategy_version_id)
     |> select([r], %{
       strategy_version_id: r.strategy_version_id,

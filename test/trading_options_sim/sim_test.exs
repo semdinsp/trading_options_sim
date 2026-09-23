@@ -1045,7 +1045,8 @@ defmodule TradingOptionsSim.SimTest do
         |> Enum.filter(&(&1.strategy_version_id == version.id))
 
       assert row.n_closes == 2
-      assert row.excluded_count == 3
+      # Not churn: a data outage must not move the churn gate.
+      assert row.excluded_count == 0
       assert Decimal.equal?(Decimal.new(to_string(row.realized_pnl)), Decimal.new("200.00"))
       assert row.expectancy_r > 0
     end

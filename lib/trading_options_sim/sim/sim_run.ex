@@ -57,7 +57,7 @@ defmodule TradingOptionsSim.Sim.SimRun do
     field :is_churn, :boolean, default: false
 
     # Data-quality exclusion, orthogonal to is_churn: see
-    # excluded_reasons/0 and exclusion_changeset/2.
+    # excluded_reasons/0 and Sim.exclude_runs/2.
     field :excluded_reason, :string
 
     has_many :sim_fills, TradingOptionsSim.Sim.SimFill
@@ -144,13 +144,6 @@ defmodule TradingOptionsSim.Sim.SimRun do
   """
   @spec excluded_reasons() :: [String.t()]
   def excluded_reasons, do: @excluded_reasons
-
-  @doc "Marks this run as excluded from scoring for `reason`."
-  def exclusion_changeset(sim_run, reason) do
-    sim_run
-    |> change(excluded_reason: reason)
-    |> validate_inclusion(:excluded_reason, @excluded_reasons)
-  end
 
   @doc """
   Closes the run — sets exit_at/exit_price/exit_reason/realized_pnl,
