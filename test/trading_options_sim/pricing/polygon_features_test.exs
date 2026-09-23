@@ -53,10 +53,35 @@ defmodule TradingOptionsSim.Pricing.PolygonFeaturesTest do
       snap =
         F.new()
         |> quote("100.00", "100.10", "300", "100", @t0)
+        |> quote("100.00", "100.10", nil, nil, @t0 + 5_000)
+        |> F.to_snapshot(@t0 + 5_000)
+
+      assert_in_delta snap["run_poly_imbalance_ema"], 0.5, 1.0e-9
+    end
+
+    # Fresh size-less quotes must not keep an old EMA looking current.
+    test "the EMA goes absent once the last SIZED quote is stale" do
+      snap =
+        F.new()
+        |> quote("100.00", "100.10", "300", "100", @t0)
         |> quote("100.00", "100.10", nil, nil, @t0 + 60_000)
         |> F.to_snapshot(@t0 + 60_000)
 
-      assert_in_delta snap["run_poly_imbalance_ema"], 0.5, 1.0e-9
+      assert Map.has_key?(snap, "run_poly_spread_bps")
+      refute Map.has_key?(snap, "run_poly_imbalance_ema")
+    end
+
+    # Decay runs from the last sized quote, not the last quote of any kind.
+    test "size-less quotes don't shorten the decay of the next sized one" do
+      snap =
+        F.new()
+        |> quote("100.00", "100.10", "300", "100", @t0)
+        |> quote("100.00", "100.10", nil, nil, @t0 + 59_900)
+        |> quote("100.00", "100.10", "100", "300", @t0 + 60_000)
+        |> F.to_snapshot(@t0 + 60_000)
+
+      # 60s at a 10s time constant: almost fully the new -0.5 reading.
+      assert snap["run_poly_imbalance_ema"] < -0.49
     end
 
     test "EMA moves partway toward a new reading" do

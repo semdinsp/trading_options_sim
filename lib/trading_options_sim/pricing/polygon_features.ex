@@ -56,6 +56,7 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
   defstruct quote: nil,
             quote_at: nil,
             imbalance_ema: nil,
+            imbalance_at: nil,
             last_trade: nil,
             last_trade_at: nil,
             samples: :queue.new(),
@@ -129,7 +130,7 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
         ask_size: to_float(Map.get(data, :ask_size))
       }
 
-      %{f | quote: q, quote_at: now, imbalance_ema: update_ema(f, imbalance(q), now)}
+      %{f | quote: q, quote_at: now} |> update_ema(imbalance(q), now)
     else
       f
     end
@@ -156,6 +157,7 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
   @spec to_snapshot(t(), integer()) :: map()
   def to_snapshot(%__MODULE__{} = f, now) do
     quote_fresh? = fresh?(f.quote_at, now, @fresh_ms)
+    imbalance_fresh? = fresh?(f.imbalance_at, now, @fresh_ms)
     trade_fresh? = fresh?(f.last_trade_at, now, @fresh_ms)
     bar_fresh? = fresh?(f.bar_at, now, @volume_fresh_ms)
 
@@ -163,7 +165,7 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
       {"run_poly_last", trade_fresh? && f.last_trade},
       {"run_poly_spread_bps", quote_fresh? && spread_bps(f.quote)},
       {"run_poly_imbalance", quote_fresh? && imbalance(f.quote)},
-      {"run_poly_imbalance_ema", quote_fresh? && f.imbalance_ema},
+      {"run_poly_imbalance_ema", imbalance_fresh? && f.imbalance_ema},
       {"run_poly_ret_1m_bps", trade_fresh? && return_bps(f, 60_000, now)},
       {"run_poly_ret_5m_bps", trade_fresh? && return_bps(f, 300_000, now)},
       {"run_poly_vwap_dev_bps", trade_fresh? && vwap_dev_bps(f, now)},
@@ -190,13 +192,18 @@ defmodule TradingOptionsSim.Pricing.PolygonFeatures do
   defp imbalance(_quote), do: nil
 
   # A quote with unknown sizes leaves the EMA where it was rather than
-  # pulling it toward zero.
-  defp update_ema(f, nil, _now), do: f.imbalance_ema
-  defp update_ema(%{imbalance_ema: nil}, x, _now), do: x
+  # pulling it toward zero. Freshness and decay both run off the last
+  # SIZED quote (imbalance_at), not quote_at: a run of size-less quotes
+  # must neither keep an old EMA looking current nor shrink the decay
+  # interval of the next real reading.
+  defp update_ema(f, nil, _now), do: f
 
-  defp update_ema(%{imbalance_ema: ema, quote_at: prev_at}, x, now) do
+  defp update_ema(%{imbalance_ema: nil} = f, x, now),
+    do: %{f | imbalance_ema: x, imbalance_at: now}
+
+  defp update_ema(%{imbalance_ema: ema, imbalance_at: prev_at} = f, x, now) do
     alpha = 1 - :math.exp(-max(now - prev_at, 0) / @ema_tau_ms)
-    ema + alpha * (x - ema)
+    %{f | imbalance_ema: ema + alpha * (x - ema), imbalance_at: now}
   end
 
   defp sample(%{last_sample_at: last} = f, price, now)
