@@ -121,6 +121,24 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscriptionTest do
       PolygonSubscription.release(symbol)
     end
 
+    # The hub drops its own refcount on a rejection, so we are no longer
+    # subscribed. :sys.replace_state stands in for a successful subscribe,
+    # which :test cannot produce (no hub).
+    test "a subscribe_rejected for this symbol clears subscribed?" do
+      symbol = unique_symbol()
+      {:ok, _} = PolygonSubscription.ensure(symbol)
+      pid = PolygonSubscription.whereis(symbol)
+      :sys.replace_state(pid, &%{&1 | subscribed?: true})
+
+      send(pid, rejected(unique_symbol()))
+      assert PolygonSubscription.stats(pid).subscribed? == true
+
+      send(pid, rejected(symbol))
+      assert PolygonSubscription.stats(pid).subscribed? == false
+
+      PolygonSubscription.release(symbol)
+    end
+
     test "survives unrelated health broadcasts and arbitrary messages" do
       symbol = unique_symbol()
       {:ok, _} = PolygonSubscription.ensure(symbol)
@@ -135,6 +153,18 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscriptionTest do
 
       PolygonSubscription.release(symbol)
     end
+  end
+
+  defp rejected(symbol) do
+    %{
+      type: :health,
+      data: %{
+        component: :polygon_websocket,
+        status: :subscribe_rejected,
+        action: :subscription_dropped,
+        symbol: symbol
+      }
+    }
   end
 
   defp refute_eventually_alive(pid) do
