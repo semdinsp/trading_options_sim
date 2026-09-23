@@ -255,14 +255,16 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   # existing quote rather than replacing it — an ask tick must not
   # erase the bid that came before it.
   @impl true
-  def handle_info(%{__struct__: TradingHub.Message, type: :price, data: data}, state) do
+  def handle_info(%{__struct__: TradingHub.Message, type: :price, data: data} = message, state) do
+    at = message_time(message)
+
     state =
       case greeks_tick(data) do
         nil -> state
-        tick -> %{state | last_tick: tick}
+        tick -> %{state | last_tick: Map.put(tick, :at, at)}
       end
 
-    case quote_tick(data) do
+    case quote_tick(data, at) do
       nil ->
         {:noreply, state}
 
@@ -397,15 +399,22 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   # is still a real two-sided market, just a stale one. Recording the
   # flag lets a consumer decide; silently dropping the quote would send
   # this app back to model-mid fills exactly when spreads matter most.
-  defp quote_tick(data) when is_map(data) do
+  defp quote_tick(data, at) when is_map(data) do
     if Enum.any?(@quote_keys, &Map.has_key?(data, &1)) do
       data
       |> Map.take(@quote_keys ++ [:delayed])
-      |> Map.put(:received_at, DateTime.utc_now())
+      |> Map.put(:received_at, at)
     end
   end
 
-  defp quote_tick(_data), do: nil
+  defp quote_tick(_data, _at), do: nil
+
+  # When a tick or quote was produced, for ContractMonitor's staleness
+  # gate: the hub's own Message.timestamp, falling back to receive time
+  # when absent. Same clock convention as PolygonFeatures, so data that
+  # arrives late does not read as fresh.
+  defp message_time(%{timestamp: %DateTime{} = ts}), do: ts
+  defp message_time(_message), do: DateTime.utc_now()
 
   defp merge_quote(nil, quote_fields), do: quote_fields
   defp merge_quote(existing, quote_fields), do: Map.merge(existing, quote_fields)

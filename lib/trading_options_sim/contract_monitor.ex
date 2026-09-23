@@ -186,6 +186,8 @@ defmodule TradingOptionsSim.ContractMonitor do
     # Set once an unpriced fill has been skipped and logged, cleared by
     # the next priced fill -- one warning per episode, not one per tick.
     unpriced_warned?: false,
+    # Same warn-once shape for the staleness gate in evaluate_ibkr_live/2.
+    stale_warned?: false,
     signal_names: [],
     canonical_names: %{},
     last_signal_values: %{}
@@ -669,13 +671,73 @@ defmodule TradingOptionsSim.ContractMonitor do
             state
 
           {:ok, tick} ->
-            snapshot = build_ibkr_live_snapshot(tick, spot, signal_values(state))
+            now = DateTime.utc_now()
 
-            state
-            |> Map.put(:last_snapshot, snapshot)
-            |> maybe_transition(snapshot)
+            if fresh?(tick[:at], now) do
+              tick = drop_stale_quote(tick, now)
+              snapshot = build_ibkr_live_snapshot(tick, spot, signal_values(state))
+
+              %{state | stale_warned?: false}
+              |> Map.put(:last_snapshot, snapshot)
+              |> maybe_transition(snapshot)
+            else
+              warn_stale(state, tick[:at])
+            end
         end
     end
+  end
+
+  # Staleness gate for the :ibkr_live backend.
+  #
+  # IBKRLive caches the last greeks tick and quote indefinitely. On
+  # 2026-09-23 trading_hub lost its IBKR option subscriptions at ~09:57
+  # ET and every monitor kept pricing from the cached values until the
+  # close: 1,144 runs entered and exited against an identical book with
+  # an identical underlying (SPY 770.61, QQQ 743.02), each losing
+  # exactly the spread. Underlying ticks kept arriving, so nothing
+  # looked stopped.
+  #
+  # A computation tick older than the limit skips evaluation entirely,
+  # exactly like {:error, :no_data} -- a stale price is no price. A
+  # stale QUOTE with a fresh tick drops only the quote, so the fill
+  # falls back to the model price, as it does when no quote has arrived.
+  # A tick with no :at (a pre-gate cache) counts as stale.
+  #
+  # The limit must sit well above the healthy gap between ticks, or it
+  # suppresses trading on a quiet contract that is perfectly live. At
+  # 60s it is two orders of magnitude above the multiple-per-second rate
+  # of the liquid SPY/QQQ monthlies this app trades.
+  @default_max_tick_age_ms 60_000
+
+  defp max_tick_age_ms do
+    Application.get_env(
+      :trading_options_sim,
+      :ibkr_live_max_tick_age_ms,
+      @default_max_tick_age_ms
+    )
+  end
+
+  defp fresh?(%DateTime{} = at, now),
+    do: DateTime.diff(now, at, :millisecond) <= max_tick_age_ms()
+
+  defp fresh?(_at, _now), do: false
+
+  defp drop_stale_quote(%{quote: %{received_at: at}} = tick, now) do
+    if fresh?(at, now), do: tick, else: %{tick | quote: nil}
+  end
+
+  defp drop_stale_quote(%{quote: %{}} = tick, _now), do: %{tick | quote: nil}
+  defp drop_stale_quote(tick, _now), do: tick
+
+  defp warn_stale(%{stale_warned?: true} = state, _at), do: state
+
+  defp warn_stale(state, at) do
+    Logger.warning(
+      "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+        "IBKR option data is stale (last tick at #{inspect(at)}); not evaluating until it refreshes"
+    )
+
+    %{state | stale_warned?: true}
   end
 
   defp price_contract_black_scholes(state, spot, dte) do
