@@ -1014,6 +1014,57 @@ defmodule TradingOptionsSim.SimTest do
       run
     end
 
+    # 2026-09-23: 1,144 runs traded against a frozen IBKR book. Marking
+    # them stale_ibkr_data must take them out of every score while
+    # leaving the version's other runs scored exactly as before.
+    test "excluded runs are not scored, and healthy runs still are" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      for _ <- 1..2 do
+        candidate_run_fixture(version, %{
+          symbol: "EXCL1",
+          exit_price: Decimal.new("6.00"),
+          realized_pnl: Decimal.new("100.00")
+        })
+      end
+
+      bad =
+        for _ <- 1..3 do
+          candidate_run_fixture(version, %{
+            symbol: "EXCL1",
+            exit_price: Decimal.new("4.99"),
+            realized_pnl: Decimal.new("-1.00")
+          })
+        end
+
+      assert {:ok, 3} = Sim.exclude_runs(Enum.map(bad, & &1.id), "stale_ibkr_data")
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert row.n_closes == 2
+      assert row.excluded_count == 3
+      assert Decimal.equal?(Decimal.new(to_string(row.realized_pnl)), Decimal.new("200.00"))
+      assert row.expectancy_r > 0
+    end
+
+    test "exclude_runs/2 rejects an unknown reason and leaves runs alone" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      run =
+        candidate_run_fixture(version, %{
+          symbol: "EXCL2",
+          exit_price: Decimal.new("6.00"),
+          realized_pnl: Decimal.new("100.00")
+        })
+
+      assert {:error, :invalid_reason} = Sim.exclude_runs([run.id], "because")
+      assert Sim.get_sim_run!(run.id).excluded_reason == nil
+    end
+
     test "computes n_closes/expectancy_r/realized_pnl for a discovery version" do
       strategy = strategy_fixture()
       version = version_fixture(strategy, %{version: 1})

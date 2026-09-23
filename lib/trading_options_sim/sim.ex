@@ -469,6 +469,7 @@ defmodule TradingOptionsSim.Sim do
         SimRun
         |> where([r], r.strategy_version_id in ^version_ids)
         |> where([r], r.status == "closed")
+        |> where([r], is_nil(r.excluded_reason))
         |> where([r], fragment("?::date", r.exit_at) == ^trading_date)
         |> select([r], r.strategy_version_id)
         |> distinct(true)
@@ -616,6 +617,7 @@ defmodule TradingOptionsSim.Sim do
       SimRun
       |> where([r], r.strategy_version_id == ^version_id)
       |> where([r], r.status == "closed")
+      |> where([r], is_nil(r.excluded_reason))
       |> select([r], r.realized_pnl)
       |> Repo.all()
 
@@ -903,6 +905,28 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
+  Excludes closed runs from every score, gate and lifecycle decision,
+  recording `reason` (one of `SimRun.excluded_reasons/0`). The runs stay
+  in place and still show in run lists -- only scoring skips them.
+  Returns `{:ok, count}`; `{:error, :invalid_reason}` for an unknown
+  reason. Already-excluded runs keep their original reason.
+  """
+  @spec exclude_runs([String.t()], String.t()) ::
+          {:ok, non_neg_integer()} | {:error, :invalid_reason}
+  def exclude_runs(run_ids, reason) when is_list(run_ids) do
+    if reason in SimRun.excluded_reasons() do
+      {count, _} =
+        SimRun
+        |> where([r], r.id in ^run_ids and r.status == "closed" and is_nil(r.excluded_reason))
+        |> Repo.update_all(set: [excluded_reason: reason, updated_at: DateTime.utc_now(:second)])
+
+      {:ok, count}
+    else
+      {:error, :invalid_reason}
+    end
+  end
+
+  @doc """
   The most recently closed `SimRun` for `version`/`symbol`, or `nil` if
   none exists — `StrategyVersionDetailLive`'s "last closed" summary for
   a member with no currently-open run. `nil` `exit_price`/`realized_pnl`
@@ -1094,6 +1118,7 @@ defmodule TradingOptionsSim.Sim do
   def closed_runs_by_regime(%StrategyVersion{id: strategy_version_id}) do
     SimRun
     |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "closed")
+    |> where([r], is_nil(r.excluded_reason))
     |> Repo.all()
     |> Enum.group_by(&(&1.context["regime_label"] || "uncategorized"))
   end
@@ -1340,7 +1365,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id in ^version_ids)
     |> where([r], r.status == "closed")
-    |> where([r], not r.is_churn)
+    |> where([r], not r.is_churn and is_nil(r.excluded_reason))
     |> where([r], not is_nil(r.realized_pnl_net))
     |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
     |> where([r], not is_nil(r.entry_at) and not is_nil(r.exit_at))
@@ -1427,7 +1452,7 @@ defmodule TradingOptionsSim.Sim do
       SimRun
       |> where([r], r.strategy_version_id in ^version_ids)
       |> where([r], r.status == "closed")
-      |> where([r], not r.is_churn)
+      |> where([r], not r.is_churn and is_nil(r.excluded_reason))
       |> where([r], not is_nil(r.realized_pnl_net))
       |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
       |> where([r], not is_nil(r.entry_at) and not is_nil(r.exit_at))
@@ -1546,7 +1571,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id in ^version_ids)
     |> where([r], r.status == "closed")
-    |> where([r], not r.is_churn)
+    |> where([r], not r.is_churn and is_nil(r.excluded_reason))
     |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
     |> join(:inner, [r], f in SimFill, on: f.sim_run_id == r.id)
     |> where([r, f], not is_nil(f.commission))
@@ -1578,7 +1603,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id in ^version_ids)
     |> where([r], r.status == "closed")
-    |> where([r], not r.is_churn)
+    |> where([r], not r.is_churn and is_nil(r.excluded_reason))
     |> where([r], not is_nil(r.exit_reason))
     |> group_by([r], [r.strategy_version_id, r.exit_reason])
     |> select([r], {r.strategy_version_id, r.exit_reason, count(r.id)})
@@ -1607,7 +1632,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id in ^version_ids)
     |> where([r], r.status == "closed")
-    |> where([r], r.is_churn)
+    |> where([r], r.is_churn or not is_nil(r.excluded_reason))
     |> group_by([r], r.strategy_version_id)
     |> select([r], %{
       strategy_version_id: r.strategy_version_id,
@@ -1678,6 +1703,7 @@ defmodule TradingOptionsSim.Sim do
     closed_runs =
       SimRun
       |> where([r], r.strategy_version_id == ^version.id and r.status == "closed")
+      |> where([r], is_nil(r.excluded_reason))
       |> where([r], r.exit_at >= ^period_start)
       |> preload(:sim_fills)
       |> Repo.all()
