@@ -131,6 +131,128 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "Not running"
   end
 
+  describe "position_view/3" do
+    alias TradingOptionsSimWeb.StrategyVersionDetailLive, as: Detail
+
+    defp snap(values, opts \\ []) do
+      %{
+        symbol: "SPY",
+        expiry: "20261120",
+        strike: Decimal.new("770.00"),
+        right: "C",
+        entered_at: Keyword.get(opts, :entered_at),
+        min_hold_seconds: Keyword.get(opts, :min_hold),
+        last_snapshot: values
+      }
+    end
+
+    defp open_run(direction \\ "long"),
+      do: %{
+        entry_price: Decimal.new("10.00"),
+        multiplier: 100,
+        direction: direction,
+        entry_at: nil
+      }
+
+    test "marks at the quote mid when a two-sided book exists" do
+      v =
+        Detail.position_view(
+          open_run(),
+          snap(%{"run_bid" => 11.0, "run_ask" => 11.2, "run_current_price" => 99.0}),
+          nil
+        )
+
+      assert v.mark_basis == "quote mid"
+      assert_in_delta v.mark, 11.1, 1.0e-9
+      assert_in_delta v.unrealized, 110.0, 1.0e-6
+      assert_in_delta v.unrealized_pct, 11.0, 1.0e-6
+      assert v.occ == "SPY   261120C00770000"
+    end
+
+    test "falls back to the model price, labelled, with no book" do
+      v = Detail.position_view(open_run(), snap(%{"run_current_price" => 9.0}), nil)
+
+      assert v.mark_basis == "model"
+      assert_in_delta v.unrealized, -100.0, 1.0e-6
+    end
+
+    test "a short profits when the mark falls" do
+      v = Detail.position_view(open_run("short"), snap(%{"run_current_price" => 9.0}), nil)
+      assert_in_delta v.unrealized, 100.0, 1.0e-6
+    end
+
+    test "no price at all means no P&L rather than a made-up one" do
+      v = Detail.position_view(open_run(), snap(%{}), nil)
+      assert v.mark == nil
+      assert v.unrealized == nil
+    end
+
+    test "reports time held and the min-hold still remaining" do
+      entered = DateTime.add(DateTime.utc_now(), -600, :second)
+      v = Detail.position_view(open_run(), snap(%{}, entered_at: entered, min_hold: 1800), nil)
+
+      assert v.held_minutes == 10
+      assert_in_delta v.hold_remaining_seconds, 1200, 2
+    end
+  end
+
+  # Before 2026-09-24 the page rebuilt the monitor's key from the leg
+  # config, so any monitor on a strike the config didn't name (every
+  # atm_offset version, and any resumed run) showed "Not running".
+  test "a monitor on a strike the leg config doesn't name shows Running with its position",
+       %{conn: conn} do
+    strategy = strategy_fixture()
+    pool = pool_fixture("DETAILRES1")
+
+    version =
+      version_fixture(strategy, %{
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config(),
+        # A nil exit rule is vacuously TRUE and would exit on the first
+        # tick; this one never fires, so the position stays open.
+        rules: %{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "lt", "value" => 0}
+        }
+      })
+
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: "DETAILRES1",
+        expiry: "20271231",
+        strike: Decimal.new("145.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    {:ok, {_fill, _run}} =
+      Sim.record_entry_fill(
+        run,
+        %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: at},
+        %{entry_at: at, entry_price: Decimal.new("5.00")}
+      )
+
+    {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
+
+    message =
+      %{type: :price, symbol: "DETAILRES1", source: :ibkr, data: %{last: 150.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILRES1", message)
+    sync_monitor(pid)
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    assert html =~ "Running"
+    refute html =~ "Not running"
+    assert html =~ "DETAILRES1271231C00145000"
+    assert html =~ ~r/\$5\.00\s*×\s*1/
+    assert html =~ "Mark"
+  end
+
   describe "recent fills panel" do
     test "hidden when no fills exist yet", %{conn: conn} do
       strategy = strategy_fixture()
@@ -287,8 +409,8 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
 
-    refute html =~ "Flat — no open position"
-    assert html =~ "Direction"
+    refute html =~ "Flat — watching this contract"
+    assert html =~ "Mark"
   end
 
   test "shows the live current price when position_open? but the SimRun genuinely isn't found",
@@ -326,7 +448,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
 
-    assert html =~ "Current"
+    assert html =~ "Mark"
     assert html =~ "150.0"
     assert html =~ "pending"
   end
@@ -374,7 +496,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
 
-    assert html =~ "Current"
+    assert html =~ "Mark"
     assert html =~ "150.0"
     assert html =~ "pending"
   end
@@ -438,7 +560,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
 
       assert html =~ "Running"
       refute html =~ "No monitor running for this symbol"
-      assert html =~ "Flat — no open position"
+      assert html =~ "Flat — watching this contract"
     end
 
     test "deactivating stops the monitor", %{conn: conn} do

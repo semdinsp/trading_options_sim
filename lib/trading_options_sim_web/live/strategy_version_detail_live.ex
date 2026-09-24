@@ -174,7 +174,6 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
   defp load_version(socket, id) do
     version = Sim.get_strategy_version_detail!(id)
-    contract_template = SimActivator.resolve_contract_template(version.option_leg_config)
 
     members =
       version.target_pool
@@ -182,7 +181,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
         nil -> []
         pool -> pool.target_pool_members
       end
-      |> Enum.map(&build_member_entry(version, contract_template, &1))
+      |> Enum.map(&build_member_entry(version, &1))
       |> Enum.sort_by(& &1.member.symbol)
 
     is_active? = not is_nil(version.activated_at) and is_nil(version.deactivated_at)
@@ -215,22 +214,26 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   # next one. Fetching the run fresh, only when the monitor's own
   # snapshot says a position is actually open, keeps both reads from
   # ever describing two different points in time.
-  defp build_member_entry(version, contract_template, member) do
+  # The monitor is found through the registry by {version, symbol}, not
+  # rebuilt from the leg config: for atm_offset (every current version)
+  # the config names no strike, so the old lookup always came back empty
+  # and every member showed "Not running" while its monitor ran fine.
+  defp build_member_entry(version, member) do
     pid =
-      case contract_template do
-        {:ok, template} ->
-          contract_key = {member.symbol, template.expiry, template.strike, template.right}
-          ContractMonitor.whereis(version.id, contract_key)
-
-        {:error, :unsupported_leg_config} ->
-          nil
-      end
+      Enum.find_value(ContractMonitor.monitors_for_version(version.id), fn
+        {symbol, pid} when symbol == member.symbol -> pid
+        _ -> nil
+      end)
 
     snapshot = pid && fetch_monitor_snapshot(pid)
 
+    # The run on the monitor's OWN contract -- a symbol can still have
+    # other, stale open runs from before activation resumed runs.
     run =
       if snapshot && snapshot.position_open? do
-        version |> Sim.list_open_sim_runs() |> Enum.find(&(&1.symbol == member.symbol))
+        version
+        |> Sim.list_open_sim_runs()
+        |> Enum.find(&SimActivator.same_contract?(&1, snapshot))
       end
 
     entry_fill = if run, do: entry_fill(run)
@@ -238,6 +241,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     %{
       member: member,
       run: run,
+      position: snapshot && position_view(run, snapshot, entry_fill),
       running?: not is_nil(snapshot),
       snapshot: snapshot,
       entry_fill: entry_fill,
@@ -293,12 +297,94 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   # round-trip needed) rather than leaving the operator with no price
   # at all during a real, briefly-open position on a fast-oscillating
   # signal (confirmed live 2026-09-15).
-  defp current_price_display(snapshot) do
-    case Map.get(snapshot.last_snapshot, "run_current_price") do
-      nil -> "—"
-      price -> "$#{format_snapshot_value(price)}"
-    end
+  @doc false
+  # Everything the current-position box shows, derived from the run and
+  # ONE monitor snapshot. Public (and @doc false) so it can be tested
+  # without rendering.
+  #
+  # The mark is the quote MID when a two-sided book is present, else the
+  # model price (run_current_price) -- labelled either way, since a model
+  # price is not something the position could be sold at. Unrealized P&L
+  # is (mark - entry) * multiplier * qty, sign-flipped for a short, and
+  # excludes commission.
+  def position_view(run, snapshot, entry_fill) do
+    values = snapshot.last_snapshot || %{}
+    bid = number(values["run_bid"])
+    ask = number(values["run_ask"])
+
+    {mark, basis} =
+      cond do
+        is_number(bid) and is_number(ask) and bid > 0 and ask >= bid ->
+          {(bid + ask) / 2, "quote mid"}
+
+        is_number(number(values["run_current_price"])) ->
+          {number(values["run_current_price"]), "model"}
+
+        true ->
+          {nil, nil}
+      end
+
+    entry = run && run.entry_price && Decimal.to_float(run.entry_price)
+    raw_qty = (entry_fill && entry_fill.quantity) || 1
+    qty = decimal_to_float(raw_qty) || 1
+    multiplier = (run && run.multiplier) || 100
+    sign = if (run && run.direction) == "short", do: -1, else: 1
+    entered_at = snapshot.entered_at || (run && run.entry_at)
+    now = DateTime.utc_now()
+
+    unrealized =
+      if is_number(mark) and is_number(entry), do: sign * (mark - entry) * multiplier * qty
+
+    %{
+      contract: "#{snapshot.expiry} #{Decimal.to_string(snapshot.strike)}#{snapshot.right}",
+      occ:
+        TradingOptionsSim.OccSymbol.build(
+          snapshot.symbol,
+          snapshot.expiry,
+          snapshot.strike,
+          snapshot.right
+        ),
+      entry: entry,
+      qty: raw_qty,
+      mark: mark,
+      mark_basis: basis,
+      bid: bid,
+      ask: ask,
+      underlying: number(values["run_underlying_price"]),
+      unrealized: unrealized,
+      unrealized_pct:
+        if(unrealized && entry && entry > 0, do: unrealized / (entry * multiplier * qty) * 100),
+      held_minutes: entered_at && div(DateTime.diff(now, entered_at, :second), 60),
+      hold_remaining_seconds:
+        case {snapshot.min_hold_seconds, entered_at} do
+          {s, %DateTime{} = at} when is_integer(s) and s > 0 ->
+            max(s - DateTime.diff(now, at, :second), 0)
+
+          _ ->
+            nil
+        end
+    }
   end
+
+  defp number(%Decimal{} = d), do: Decimal.to_float(d)
+  defp number(n) when is_number(n), do: n
+  defp number(_), do: nil
+
+  defp decimal_to_float(%Decimal{} = d), do: Decimal.to_float(d)
+  defp decimal_to_float(n) when is_number(n), do: n
+  defp decimal_to_float(_), do: nil
+
+  defp money(nil), do: "—"
+  defp money(n), do: "$" <> :erlang.float_to_binary(n * 1.0, decimals: 2)
+
+  defp signed_money(nil), do: "—"
+  defp signed_money(n) when n < 0, do: "-" <> money(-n)
+  defp signed_money(n), do: "+" <> money(n)
+
+  defp signed_class(nil), do: "text-base-content/60"
+  defp signed_class(n) when n < 0, do: "text-error"
+  defp signed_class(n) when n > 0, do: "text-success"
+  defp signed_class(_), do: "text-base-content/60"
 
   defp direction_class("long"), do: "border-long/40 text-long"
   defp direction_class("short"), do: "border-short/40 text-short"
@@ -645,7 +731,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       <div :if={@entry.running?} class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
           <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50 mb-1">
-            Live signal values
+            Live ticks &amp; signals
           </div>
 
           <div :if={map_size(@entry.snapshot.last_snapshot) == 0} class="text-base-content/30 text-sm">
@@ -670,49 +756,98 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             Position
           </div>
 
-          <div :if={not @entry.snapshot.position_open?} class="text-base-content/30 text-sm">
-            Flat — no open position
+          <div class="font-data text-[11px] text-base-content/60 mb-1">
+            {@entry.position.contract}
+            <span
+              class="whitespace-pre select-all text-base-content/40"
+              title="OCC symbol — click to select, paste into IBKR"
+            >{@entry.position.occ}</span>
           </div>
 
-          <table :if={@entry.snapshot.position_open?} class="font-data text-[11px] w-full">
-            <tbody>
-              <tr>
-                <td class="text-base-content/40 pr-3 py-0.5">Direction</td>
-                <td class={[
-                  "pr-3 py-0.5 uppercase",
-                  direction_class((@entry.run && @entry.run.direction) || @entry.fallback_direction)
-                ]}>
-                  {(@entry.run && @entry.run.direction) || @entry.fallback_direction}
-                </td>
-              </tr>
-              <tr :if={@entry.run && @entry.run.entry_price}>
-                <td class="text-base-content/40 pr-3 py-0.5">Entry</td>
-                <td class="pr-3 py-0.5 tabular-nums">
-                  ${Decimal.round(@entry.run.entry_price, 2)}
-                  <span :if={@entry.entry_fill}>× {format_qty(@entry.entry_fill.quantity)}</span>
-                </td>
-              </tr>
-              <tr :if={@entry.entry_fill}>
-                <td class="text-base-content/40 pr-3 py-0.5">Entered</td>
-                <td class="pr-3 py-0.5">{@entry.entry_fill.filled_at}</td>
-              </tr>
-              <tr :if={is_nil(@entry.run) || is_nil(@entry.run.entry_price)}>
-                <td class="text-base-content/40 pr-3 py-0.5">Current</td>
-                <td class="pr-3 py-0.5 tabular-nums">
-                  {current_price_display(@entry.snapshot)}
-                </td>
-              </tr>
-              <tr :if={is_nil(@entry.run) || is_nil(@entry.run.entry_price)}>
-                <td class="text-base-content/40 pr-3 py-0.5" colspan="2">
-                  <span class="text-base-content/30 normal-case">
-                    Entry price/qty pending — this contract's own
-                    <span class="font-data">SimRun</span>
-                    hasn't loaded yet (a real position, briefly open on a fast-oscillating signal).
-                  </span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <div :if={not @entry.snapshot.position_open?} class="text-base-content/30 text-sm">
+            Flat — watching this contract for an entry
+          </div>
+
+          <div
+            :if={@entry.snapshot.position_open?}
+            class="border border-base-300 bg-base-200/40 p-2"
+          >
+            <div class="flex items-baseline justify-between gap-3 mb-1">
+              <span class={[
+                "px-1.5 py-0.5 border text-[11px] uppercase tracking-wide font-data",
+                direction_class((@entry.run && @entry.run.direction) || @entry.fallback_direction)
+              ]}>
+                {(@entry.run && @entry.run.direction) || @entry.fallback_direction}
+              </span>
+              <span class={[
+                "font-data text-lg tabular-nums",
+                signed_class(@entry.position.unrealized)
+              ]}>
+                {signed_money(@entry.position.unrealized)}
+                <span :if={@entry.position.unrealized_pct} class="text-[11px]">
+                  ({:erlang.float_to_binary(@entry.position.unrealized_pct * 1.0, decimals: 1)}%)
+                </span>
+              </span>
+            </div>
+
+            <table class="font-data text-[11px] w-full">
+              <tbody>
+                <tr>
+                  <td class="text-base-content/40 pr-3 py-0.5">Entry</td>
+                  <td class="pr-3 py-0.5 tabular-nums">
+                    {money(@entry.position.entry)} × {format_qty(@entry.position.qty)}
+                  </td>
+                </tr>
+                <tr>
+                  <td class="text-base-content/40 pr-3 py-0.5">Mark</td>
+                  <td class="pr-3 py-0.5 tabular-nums">
+                    {money(@entry.position.mark)}
+                    <span :if={@entry.position.mark_basis} class="text-base-content/40">
+                      ({@entry.position.mark_basis})
+                    </span>
+                  </td>
+                </tr>
+                <tr :if={@entry.position.bid || @entry.position.ask}>
+                  <td class="text-base-content/40 pr-3 py-0.5">Bid / Ask</td>
+                  <td class="pr-3 py-0.5 tabular-nums">
+                    {money(@entry.position.bid)} / {money(@entry.position.ask)}
+                  </td>
+                </tr>
+                <tr>
+                  <td class="text-base-content/40 pr-3 py-0.5">Underlying</td>
+                  <td class="pr-3 py-0.5 tabular-nums">{money(@entry.position.underlying)}</td>
+                </tr>
+                <tr :if={@entry.position.held_minutes}>
+                  <td class="text-base-content/40 pr-3 py-0.5">Held</td>
+                  <td class="pr-3 py-0.5 tabular-nums">
+                    {@entry.position.held_minutes} min
+                    <span
+                      :if={
+                        @entry.position.hold_remaining_seconds &&
+                          @entry.position.hold_remaining_seconds > 0
+                      }
+                      class="text-base-content/40"
+                    >
+                      · rule exit allowed in {div(@entry.position.hold_remaining_seconds, 60)} min
+                    </span>
+                  </td>
+                </tr>
+                <tr :if={@entry.entry_fill}>
+                  <td class="text-base-content/40 pr-3 py-0.5">Entered</td>
+                  <td class="pr-3 py-0.5">{@entry.entry_fill.filled_at}</td>
+                </tr>
+                <tr :if={is_nil(@entry.position.entry)}>
+                  <td class="pr-3 py-0.5" colspan="2">
+                    <span class="text-base-content/30 normal-case">
+                      Entry price/qty pending — this contract's own
+                      <span class="font-data">SimRun</span>
+                      hasn't loaded yet (a real position, briefly open on a fast-oscillating signal).
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
 
           <.last_closed_run
             :if={not @entry.snapshot.position_open? and @entry.last_closed_run}

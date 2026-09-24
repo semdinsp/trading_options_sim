@@ -55,6 +55,158 @@ defmodule TradingOptionsSim.SimActivatorTest do
     version
   end
 
+  describe "resuming open runs" do
+    # "Spot moved since this run opened": an open run on strike 145 while
+    # the version's leg config now resolves to 150. Before 2026-09-24,
+    # activation opened a new run on 150 beside it and orphaned the 145
+    # run -- 154 of 243 open runs, 45 holding a position.
+    defp entered_run_on(version, symbol, strike) do
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: symbol,
+          expiry: "20271231",
+          strike: Decimal.new(strike),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      entered_at = DateTime.add(DateTime.utc_now(), -600, :second) |> DateTime.truncate(:second)
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: entered_at},
+          %{entry_at: entered_at, entry_price: Decimal.new("5.00")}
+        )
+
+      run
+    end
+
+    defp always_enter_version(pool) do
+      version_fixture(%{
+        target_pool_id: pool.id,
+        option_leg_config: fixed_leg_config(),
+        rules: %{"entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0}}
+      })
+    end
+
+    test "resumes the open run's own contract instead of orphaning it" do
+      pool = pool_fixture(["RESUME1"])
+      version = always_enter_version(pool)
+      run = entered_run_on(version, "RESUME1", "145.00")
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      snap = ContractMonitor.snapshot(pid)
+      assert Decimal.equal?(snap.strike, Decimal.new("145.00"))
+      assert [%{id: id}] = Sim.list_open_sim_runs(version)
+      assert id == run.id
+    end
+
+    test "a resumed run that holds a position starts the monitor OPEN" do
+      pool = pool_fixture(["RESUME2"])
+      version = always_enter_version(pool)
+      run = entered_run_on(version, "RESUME2", "145.00")
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.position_open?
+      assert DateTime.compare(snap.entered_at, run.entry_at) == :eq
+    end
+
+    # Before the fix a resumed monitor started flat, and its next entry
+    # signal wrote a second entry fill into the same run (48 runs, 248
+    # extra entries).
+    test "an entry signal does not add a second entry fill to a resumed run" do
+      pool = pool_fixture(["RESUME3"])
+      version = always_enter_version(pool)
+      run = entered_run_on(version, "RESUME3", "145.00")
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      message =
+        %{type: :price, symbol: "RESUME3", source: :ibkr, data: %{last: 150.0}}
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:RESUME3", message)
+      _ = ContractMonitor.snapshot(pid)
+
+      assert [_one_entry] = Sim.list_sim_fills(run) |> Enum.filter(&(&1.kind == "entry"))
+    end
+
+    # Only the old bug could leave several open runs on one symbol. The
+    # one holding a position wins, whatever order they were created in.
+    test "with several open runs, resumes the one holding a position" do
+      pool = pool_fixture(["RESUME7"])
+      version = always_enter_version(pool)
+      held = entered_run_on(version, "RESUME7", "145.00")
+
+      {:ok, _flat_newer} =
+        Sim.open_sim_run(version, %{
+          symbol: "RESUME7",
+          expiry: "20271231",
+          strike: Decimal.new("155.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.position_open?
+      assert Decimal.equal?(snap.strike, held.strike)
+    end
+
+    test "a symbol with no open run still resolves and opens a new one" do
+      pool = pool_fixture(["RESUME4"])
+      version = always_enter_version(pool)
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Decimal.equal?(ContractMonitor.snapshot(pid).strike, Decimal.new("150.00"))
+    end
+
+    # The monitor is on 145, which the leg config (150) doesn't name.
+    # The old deactivate rebuilt the key from the config/runs and could
+    # miss it, leaving it trading after "deactivate".
+    test "deactivate/1 stops a monitor the leg config doesn't name, flattening it" do
+      pool = pool_fixture(["RESUME5"])
+      version = always_enter_version(pool)
+      run = entered_run_on(version, "RESUME5", "145.00")
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      # A flatten needs a priced snapshot to exit at (do_force_close/2
+      # never fabricates one), so give the monitor one tick first.
+      message =
+        %{type: :price, symbol: "RESUME5", source: :ibkr, data: %{last: 150.0}}
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:RESUME5", message)
+      _ = ContractMonitor.snapshot(pid)
+      ref = Process.monitor(pid)
+
+      assert {:ok, 1} = SimActivator.deactivate(version)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
+      assert Sim.get_sim_run!(run.id).status == "closed"
+    end
+
+    test "monitors_for_version/1 finds monitors whatever contract they're on" do
+      pool = pool_fixture(["RESUME6"])
+      version = always_enter_version(pool)
+      _run = entered_run_on(version, "RESUME6", "145.00")
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      assert ContractMonitor.monitors_for_version(version.id) == [{"RESUME6", pid}]
+      assert ContractMonitor.monitors_for_version(Ecto.UUID.generate()) == []
+    end
+  end
+
   describe "activate/1" do
     test "returns {:error, :no_target_pool} when the version has no pool" do
       version = version_fixture(%{})

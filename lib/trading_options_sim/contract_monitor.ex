@@ -234,6 +234,25 @@ defmodule TradingOptionsSim.ContractMonitor do
     )
   end
 
+  @doc """
+  Every running monitor for `strategy_version_id`, as `{symbol, pid}`,
+  whatever contract each is on.
+
+  Use this rather than `whereis/2` whenever the contract isn't known up
+  front. For an `atm_offset` version it never is: the strike is resolved
+  from spot at activation, so a caller that tried to rebuild the key
+  from the leg config (as `StrategyVersionDetailLive` and
+  `SimActivator.deactivate/1` both did until 2026-09-24) could not find
+  a monitor that was running perfectly well.
+  """
+  @spec monitors_for_version(String.t()) :: [{String.t(), pid()}]
+  def monitors_for_version(strategy_version_id) do
+    TradingOptionsSim.MonitorRegistry
+    |> Registry.select([{{{strategy_version_id, :"$1"}, :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.filter(fn {contract, _pid} -> is_binary(contract) end)
+    |> Enum.map(fn {contract, pid} -> {contract |> String.split(":") |> hd(), pid} end)
+  end
+
   @doc "Looks up the running monitor for `{strategy_version_id, contract_key}`, if any."
   @spec whereis(String.t(), contract_key()) :: pid() | nil
   def whereis(strategy_version_id, contract_key) do
@@ -351,6 +370,10 @@ defmodule TradingOptionsSim.ContractMonitor do
       pricing_backend: pricing_backend,
       ibkr_live_subscribed?: pricing_backend != :ibkr_live,
       position_open?: Keyword.get(opts, :position_open?, false),
+      # Set together with position_open? when SimActivator resumes a run
+      # that already holds a position, so min_hold counts from the real
+      # entry rather than from the restart.
+      entered_at: Keyword.get(opts, :entered_at),
       min_hold_seconds: min_hold_seconds(strategy_version),
       signal_names: signal_names,
       canonical_names: canonical_names
