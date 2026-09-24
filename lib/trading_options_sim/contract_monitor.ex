@@ -592,7 +592,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     Map.new(signal_names, fn name -> {name, SignalBus.request(name)} end)
     |> Enum.reduce(%{}, fn
       {name, {:ok, topic}}, acc ->
-        Phoenix.PubSub.subscribe(TradingSignal.PubSub, topic)
+        subscribe_once(TradingSignal.PubSub, topic)
         canonical_name = String.trim_leading(topic, "signals:")
         Map.put(acc, canonical_name, name)
 
@@ -618,6 +618,21 @@ defmodule TradingOptionsSim.ContractMonitor do
       )
 
       %{}
+  end
+
+  # Phoenix.PubSub.subscribe/2 is NOT idempotent: subscribing twice
+  # delivers every broadcast twice. This runs on every
+  # :trading_signal_connected, and TradingSignal.PubSub is a LOCAL server
+  # here, so the first registration survives trading_signal restarting.
+  # Each reconnect used to add another copy: 83 topics were held twice
+  # across 75 monitors after one trading_signal restart on 2026-09-24.
+  # Same fix as trading_live's PubSubOnce (its PR #238).
+  defp subscribe_once(pubsub, topic) do
+    unless topic in Registry.keys(pubsub, self()) do
+      Phoenix.PubSub.subscribe(pubsub, topic)
+    end
+
+    :ok
   end
 
   defp underlying_price(%{last: last}) when is_number(last), do: last

@@ -1585,6 +1585,31 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "signal subscriptions across reconnects" do
+    # Phoenix.PubSub.subscribe/2 is not idempotent. On 2026-09-24, 83
+    # signal topics were held twice across 75 monitors after one
+    # trading_signal restart, so every signal tick arrived twice.
+    test "repeated :trading_signal_connected subscribes each topic exactly once" do
+      name = "once_signal_#{System.unique_integer([:positive])}"
+      topic = "signals:" <> name
+
+      version =
+        version_fixture(%{"entry" => %{"signal" => name, "op" => "gt", "value" => 1}})
+
+      {pid, _run} = start_monitor(version, contract_key("SIGONCE1"))
+
+      for _ <- 1..3, do: send(pid, :trading_signal_connected)
+      sync(pid)
+
+      count =
+        TradingSignal.PubSub
+        |> Registry.keys(pid)
+        |> Enum.count(&(&1 == topic))
+
+      assert count == 1
+    end
+  end
+
   describe "force_close/2" do
     test "flattens an open position and returns :ok" do
       version =
