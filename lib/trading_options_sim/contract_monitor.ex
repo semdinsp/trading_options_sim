@@ -828,7 +828,7 @@ defmodule TradingOptionsSim.ContractMonitor do
         tick.underlying_price || spot,
         tick.delta,
         tick.theta,
-        tick[:quote]
+        Map.get(tick, :quote)
       )
     )
   end
