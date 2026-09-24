@@ -834,41 +834,16 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   # Values a rule needs but can't compute itself (RuleEngine only
-  # compares): the option's own bid/ask spread, daily decay as a share of
-  # premium, and leverage.
-  #
-  #   run_spread      ask - bid, per share
-  #   run_spread_pct  (ask - bid) / mid * 100 -- what a round trip costs,
-  #                   roughly, as a % of the premium
-  #   run_theta_pct   theta PER DAY / price * 100 (negative for a long)
-  #   run_lambda      delta * underlying / price -- % option move per 1%
-  #                   underlying move (elasticity)
-  #
-  # `theta_per_day` must already be per day: IBKR's is, BlackScholes'
-  # is per YEAR and is converted by its caller. Each key is omitted, not
-  # zeroed, when its inputs are missing -- including IBKR's closed-book
-  # bid/ask of -1.0, which is "no market", not a spread.
+  # compares): run_spread, run_spread_pct, run_theta_pct, run_lambda.
+  # Computed by TradingCore.Options.Derived (moved there 2026-09-24,
+  # trading_core PR #52) so trading_live computes the same numbers for a
+  # promoted strategy; see its moduledoc for the definitions.
+  # `theta_per_day` must already be per day -- BlackScholes' per-year
+  # theta is divided by 365 at its call site below.
   @doc false
-  def derived_values(price, underlying, delta, theta_per_day, quote) do
-    priced? = is_number(price) and price > 0
-
-    [
-      {"run_theta_pct", (priced? and is_number(theta_per_day)) && theta_per_day / price * 100},
-      {"run_lambda",
-       (priced? and is_number(delta) and is_number(underlying)) && delta * underlying / price}
-    ]
-    |> Kernel.++(spread_values(quote))
-    |> Enum.filter(fn {_k, v} -> is_number(v) end)
-    |> Map.new()
-  end
-
-  defp spread_values(%{bid: bid, ask: ask})
-       when is_number(bid) and is_number(ask) and bid > 0 and ask >= bid do
-    mid = (bid + ask) / 2
-    [{"run_spread", ask - bid}, {"run_spread_pct", (ask - bid) / mid * 100}]
-  end
-
-  defp spread_values(_quote), do: []
+  defdelegate derived_values(price, underlying, delta, theta_per_day, quote),
+    to: TradingCore.Options.Derived,
+    as: :values
 
   # signal_values (named trading_signal values, keyed by the rule tree's
   # own signal name) are merged in first so a run_-prefixed pricing key
