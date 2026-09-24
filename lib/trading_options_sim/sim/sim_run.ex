@@ -129,7 +129,7 @@ defmodule TradingOptionsSim.Sim.SimRun do
     change(sim_run, is_churn: true)
   end
 
-  @excluded_reasons ~w(stale_ibkr_data)
+  @excluded_reasons ~w(stale_ibkr_data orphaned_position duplicate_entry)
 
   @doc """
   Why a run can be excluded from scoring. A run excluded here really
@@ -141,6 +141,13 @@ defmodule TradingOptionsSim.Sim.SimRun do
       subscriptions at ~09:57 ET and monitors kept trading against the
       cached book until the close (fixed going forward by
       ContractMonitor's staleness gate).
+    * `"orphaned_position"` -- held a position when activation stopped
+      watching it (a restart re-resolved ATM to a new strike and opened a
+      new run beside it, before SimActivator resumed open runs). Closed
+      with exit_reason "orphaned"; its exit was never priced.
+    * `"duplicate_entry"` -- a resumed monitor that didn't know its run
+      held a position entered again into the same run, overwriting
+      entry_price/entry_at, so the run's P&L and R are wrong.
   """
   @spec excluded_reasons() :: [String.t()]
   def excluded_reasons, do: @excluded_reasons
