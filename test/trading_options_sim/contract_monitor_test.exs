@@ -1216,6 +1216,45 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert fill.pricing_snapshot["model_mid_divergence"] == nil
     end
 
+    # The point of run_spread_pct: gate entries on execution cost.
+    test "an entry rule on run_spread_pct fires on a tight book and not on a wide one" do
+      spread_rule = fn ->
+        version_fixture(%{
+          "entry" => %{"signal" => "run_spread_pct", "op" => "lt", "value" => 5}
+        })
+      end
+
+      for {sym, bid, ask, expect_fill?} <- [
+            {"SPRD1", 5.95, 6.05, true},
+            {"SPRD2", 5.00, 7.00, false}
+          ] do
+        occ = sym <> "_OCC"
+
+        {pid, run} =
+          start_monitor(spread_rule.(), contract_key(sym),
+            pricing_backend: :ibkr_live,
+            occ_symbol: occ
+          )
+
+        await_ibkr_live(occ)
+
+        broadcast_option_greeks(occ, %{
+          opt_price: 6.00,
+          delta: 0.5,
+          theta: -0.03,
+          und_price: 150.0
+        })
+
+        broadcast_option_quote(occ, %{bid: bid, bid_size: 10})
+        broadcast_option_quote(occ, %{ask: ask, ask_size: 10})
+        sync(pid)
+        broadcast_underlying_price(sym, 150.0)
+        sync(pid)
+
+        assert Sim.list_sim_fills(run) != [] == expect_fill?
+      end
+    end
+
     test "a separate ask tick does not erase the bid that preceded it" do
       {pid, run} = enter_with_quote("IBKRQ1", "IBKRQ1_OCC", [])
 
@@ -1582,6 +1621,41 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       Process.sleep(30)
 
       assert SignalBusTest.requested_names() == ["vix_last"]
+    end
+  end
+
+  describe "derived_values/5 (spread, theta %, lambda)" do
+    # Live SPY 20261120 765C, 2026-09-24 after the close.
+    test "computes decay and leverage from a live-shaped tick" do
+      v = ContractMonitor.derived_values(20.73, 766.52, 0.5737, -0.1988, nil)
+
+      assert_in_delta v["run_theta_pct"], -0.959, 0.001
+      assert_in_delta v["run_lambda"], 21.21, 0.01
+      refute Map.has_key?(v, "run_spread")
+    end
+
+    test "spread in dollars and as a % of mid from a two-sided quote" do
+      v = ContractMonitor.derived_values(20.73, 766.52, 0.57, -0.2, %{bid: 20.70, ask: 20.76})
+
+      assert_in_delta v["run_spread"], 0.06, 1.0e-9
+      assert_in_delta v["run_spread_pct"], 0.2894, 0.0001
+    end
+
+    # IBKR sends bid/ask -1.0 when the book is closed: no market, which
+    # must not read as a (negative or zero) spread.
+    test "a closed-book quote yields no spread keys" do
+      v = ContractMonitor.derived_values(20.73, 766.52, 0.57, -0.2, %{bid: -1.0, ask: -1.0})
+
+      refute Map.has_key?(v, "run_spread")
+      refute Map.has_key?(v, "run_spread_pct")
+    end
+
+    test "missing inputs omit the key rather than zero it" do
+      assert ContractMonitor.derived_values(nil, 766.52, 0.57, -0.2, nil) == %{}
+      assert ContractMonitor.derived_values(0.0, 766.52, 0.57, -0.2, nil) == %{}
+
+      v = ContractMonitor.derived_values(20.73, nil, 0.57, nil, nil)
+      assert v == %{}
     end
   end
 
