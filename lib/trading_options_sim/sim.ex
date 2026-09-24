@@ -947,6 +947,7 @@ defmodule TradingOptionsSim.Sim do
     )
     |> order_by([r], desc: r.exit_at)
     |> limit(1)
+    |> preload(:sim_fills)
     |> Repo.one()
   end
 

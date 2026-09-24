@@ -43,7 +43,7 @@ defmodule TradingOptionsSimWeb.RunsLiveTest do
     assert html =~ "AAPL"
   end
 
-  test "shows the estimated commission column for a run with recorded fills", %{conn: conn} do
+  test "shows cost, fees, net and return for a run with recorded fills", %{conn: conn} do
     strategy = strategy_fixture()
     version = version_fixture(strategy)
     run = run_fixture(version)
@@ -83,18 +83,24 @@ defmodule TradingOptionsSimWeb.RunsLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/runs")
 
-    assert html =~ "Est. Commission"
+    assert html =~ "Fees"
     assert html =~ "$3.36"
+    # $5.00/share x 100 shares x 1 contract: the premium paid, and for a
+    # long the capital at risk.
+    assert html =~ "$500.00"
+    assert html =~ "$96.64"
+    # 96.64 / 500
+    assert html =~ "19.3%"
   end
 
-  test "shows a dash for the estimated commission when a run has no fills yet", %{conn: conn} do
+  test "shows a dash for fees when a run has no fills yet", %{conn: conn} do
     strategy = strategy_fixture()
     version = version_fixture(strategy)
     run_fixture(version)
 
     {:ok, _view, html} = live(conn, ~p"/runs")
 
-    assert html =~ "Est. Commission"
+    assert html =~ "Fees"
     assert html =~ "—"
   end
 

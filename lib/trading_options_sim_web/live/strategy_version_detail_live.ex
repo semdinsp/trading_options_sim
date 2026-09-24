@@ -189,6 +189,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     socket
     |> assign(:version, version)
     |> assign(:members, members)
+    |> assign(:capital_in_use, capital_in_use(members))
     |> assign(:is_active?, is_active?)
     |> assign(:recent_fills, Sim.list_recent_fills_for_version(version))
     |> assign(:total_fill_count, Sim.count_fills_for_version(version))
@@ -291,12 +292,17 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   defp format_snapshot_value(nil), do: "—"
   defp format_snapshot_value(value), do: to_string(value)
 
-  # "Current" price fallback shown while a position is open but its own
-  # SimRun hasn't resolved yet — reads straight from the monitor's own
-  # in-memory last_snapshot (always instantly available, no DB
-  # round-trip needed) rather than leaving the operator with no price
-  # at all during a real, briefly-open position on a fast-oscillating
-  # signal (confirmed live 2026-09-15).
+  # Premium currently tied up across this version's open long legs, i.e.
+  # what it would take to hold them all at once.
+  defp capital_in_use(members) do
+    open =
+      for %{snapshot: %{position_open?: true}, position: %{capital: c}} <- members,
+          is_number(c),
+          do: c
+
+    %{total: Enum.sum(open), legs: length(open)}
+  end
+
   @doc false
   # Everything the current-position box shows, derived from the run and
   # ONE monitor snapshot. Public (and @doc false) so it can be tested
@@ -335,6 +341,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     unrealized =
       if is_number(mark) and is_number(entry), do: sign * (mark - entry) * multiplier * qty
 
+    # Quotes are per share; a contract is `multiplier` shares. For a long
+    # this premium is paid in full up front -- the capital at risk.
+    cost_to_buy = if is_number(entry), do: entry * multiplier * qty
+
     %{
       contract: "#{snapshot.expiry} #{Decimal.to_string(snapshot.strike)}#{snapshot.right}",
       occ:
@@ -352,6 +362,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       ask: ask,
       underlying: number(values["run_underlying_price"]),
       unrealized: unrealized,
+      cost_to_buy: cost_to_buy,
+      multiplier: multiplier,
+      capital: if(sign == 1, do: cost_to_buy),
+      entry_fee: entry_fill && decimal_to_float(entry_fill.commission),
       unrealized_pct:
         if(unrealized && entry && entry > 0, do: unrealized / (entry * multiplier * qty) * 100),
       held_minutes: entered_at && div(DateTime.diff(now, entered_at, :second), 60),
@@ -607,6 +621,18 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
           </p>
         </div>
 
+        <div
+          :if={@capital_in_use.legs > 0}
+          class="font-data text-[11px] text-base-content/60"
+          title="Long options are paid in full up front, so this premium is both the cash required and the most these positions can lose."
+        >
+          <span class="uppercase tracking-wider text-base-content/40">Capital in use:</span>
+          {money(@capital_in_use.total)}
+          <span class="text-base-content/40">
+            across {@capital_in_use.legs} open leg{if @capital_in_use.legs == 1, do: "", else: "s"}
+          </span>
+        </div>
+
         <.member_card :for={entry <- @members} entry={entry} />
 
         <.recent_fills_panel fills={@recent_fills} total_count={@total_fill_count} />
@@ -645,6 +671,8 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
               <th class="pr-3 py-0.5">Action</th>
               <th class="pr-3 py-0.5 text-right">Qty</th>
               <th class="pr-3 py-0.5 text-right">Price</th>
+              <th class="pr-3 py-0.5 text-right" title="Price × 100 shares × qty">Value</th>
+              <th class="pr-3 py-0.5 text-right">Fee</th>
               <th class="pr-3 py-0.5">Filled</th>
             </tr>
           </thead>
@@ -665,6 +693,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
               <td class="pr-3 py-0.5 text-right tabular-nums">{fill.quantity}</td>
               <td class="pr-3 py-0.5 text-right tabular-nums">
                 ${Decimal.round(fill.fill_price, 2)}
+              </td>
+              <td class="pr-3 py-0.5 text-right tabular-nums">{dollars(fill_value(fill))}</td>
+              <td class="pr-3 py-0.5 text-right tabular-nums text-base-content/50">
+                {dollars(fill.commission)}
               </td>
               <td class="pr-3 py-0.5 text-base-content/50">{fill.filled_at}</td>
             </tr>
@@ -798,6 +830,24 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
                     {money(@entry.position.entry)} × {format_qty(@entry.position.qty)}
                   </td>
                 </tr>
+                <tr :if={@entry.position.cost_to_buy}>
+                  <td class="text-base-content/40 pr-3 py-0.5">Cost to buy</td>
+                  <td class="pr-3 py-0.5 tabular-nums">
+                    {money(@entry.position.cost_to_buy)}
+                    <span class="text-base-content/40">
+                      = {money(@entry.position.entry)} × {@entry.position.multiplier} × {format_qty(
+                        @entry.position.qty
+                      )}
+                    </span>
+                    <span :if={@entry.position.capital} class="text-base-content/40">
+                      · capital at risk
+                    </span>
+                  </td>
+                </tr>
+                <tr :if={@entry.position.entry_fee}>
+                  <td class="text-base-content/40 pr-3 py-0.5">Entry fee</td>
+                  <td class="pr-3 py-0.5 tabular-nums">{money(@entry.position.entry_fee)}</td>
+                </tr>
                 <tr>
                   <td class="text-base-content/40 pr-3 py-0.5">Mark</td>
                   <td class="pr-3 py-0.5 tabular-nums">
@@ -880,29 +930,67 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   # flat, with no currently-open run) and standalone for a non-running
   # member with trade history — same summary either way, so this is one
   # component rather than the markup living twice in render/1.
+  # Per-share prices alone hide what a trade cost: an option quote is
+  # per share and one contract is 100 shares. This shows the dollar
+  # round trip -- cost to buy, proceeds, gross, fees, net, return on the
+  # capital tied up -- from Sim.TradeCost.
   defp last_closed_run(assigns) do
+    assigns = assign(assigns, :cost, TradingOptionsSim.Sim.TradeCost.summary(assigns.run))
+
     ~H"""
     <div class={@class}>
-      <span class="text-base-content/40">Last closed:</span>
-      <span :if={@run.exit_price}>
-        ${Decimal.round(@run.exit_price, 2)}
-      </span>
-      <span :if={@run.realized_pnl} class={pnl_class(@run.realized_pnl)}>
-        {pnl_sign(@run.realized_pnl)}${Decimal.round(Decimal.abs(@run.realized_pnl), 2)}
-      </span>
-      <span :if={is_nil(@run.exit_price)} class="text-base-content/50">
-        Closed without an entry ({@run.exit_reason})
-      </span>
+      <div>
+        <span class="text-base-content/40">Last closed:</span>
+        <span :if={@run.exit_price}>
+          <span :if={@run.entry_price}>${Decimal.round(@run.entry_price, 2)} →</span>
+          ${Decimal.round(@run.exit_price, 2)}
+          <span class="text-base-content/40">per share</span>
+        </span>
+        <span :if={is_nil(@run.exit_price)} class="text-base-content/50">
+          Closed without an entry ({@run.exit_reason})
+        </span>
+      </div>
+      <div :if={@run.exit_price && @cost.cost_to_buy} class="text-base-content/70">
+        Cost {dollars(@cost.cost_to_buy)}
+        <span class="text-base-content/40">
+          ({@cost.contracts} × {@run.multiplier || 100} sh)
+        </span>
+        → proceeds {dollars(@cost.proceeds)} · gross
+        <span class={pnl_class(@cost.gross_pnl)}>{signed_dollars(@cost.gross_pnl)}</span>
+        · fees {dollars(@cost.fees)}
+        <span :if={@cost.spread_paid} class="text-base-content/40">
+          (spread paid {dollars(@cost.spread_paid)})
+        </span>
+        · net <span class={pnl_class(@cost.net_pnl)}>{signed_dollars(@cost.net_pnl)}</span>
+        <span :if={@cost.return_pct} class={pnl_class(@cost.return_pct)}>
+          ({Decimal.to_string(@cost.return_pct)}% on capital)
+        </span>
+        <span :if={@cost.hold_minutes} class="text-base-content/40">
+          · {@cost.hold_minutes} min
+        </span>
+      </div>
     </div>
     """
   end
 
-  defp pnl_sign(pnl) do
-    case Decimal.compare(pnl, Decimal.new(0)) do
-      :lt -> "-"
-      _ -> "+"
-    end
+  # What a fill moved in cash: the per-share price × the contract's
+  # multiplier × contracts.
+  defp fill_value(fill) do
+    fill.fill_price
+    |> Decimal.mult(fill.sim_run.multiplier || 100)
+    |> Decimal.mult(fill.quantity)
   end
+
+  defp dollars(nil), do: "—"
+  defp dollars(%Decimal{} = d), do: "$" <> (d |> Decimal.round(2) |> Decimal.to_string(:normal))
+
+  defp signed_dollars(nil), do: "—"
+
+  defp signed_dollars(%Decimal{} = d) do
+    if Decimal.negative?(d), do: "-" <> dollars(Decimal.abs(d)), else: "+" <> dollars(d)
+  end
+
+  defp pnl_class(nil), do: "text-base-content/60"
 
   defp pnl_class(pnl) do
     case Decimal.compare(pnl, Decimal.new(0)) do

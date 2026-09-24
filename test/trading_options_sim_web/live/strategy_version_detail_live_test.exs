@@ -251,6 +251,113 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "DETAILRES1271231C00145000"
     assert html =~ ~r/\$5\.00\s*×\s*1/
     assert html =~ "Mark"
+    # $5.00/share x 100 x 1: paid in full up front, so also the capital.
+    assert html =~ "Cost to buy"
+    assert html =~ "$500.00"
+    assert html =~ "capital at risk"
+    assert html =~ "Capital in use:"
+  end
+
+  # Found in review: a closed run with an exit but no entry price (bad or
+  # excluded data) must render, not crash the page.
+  test "a closed run with no entry price still renders", %{conn: conn} do
+    strategy = strategy_fixture()
+    pool = pool_fixture("DETAILCOST2")
+
+    version =
+      version_fixture(strategy, %{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: "DETAILCOST2",
+        expiry: "20271231",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    run
+    |> Ecto.Changeset.change(
+      status: "closed",
+      exit_at: DateTime.utc_now(),
+      exit_price: Decimal.new("6.00"),
+      exit_reason: "rule_exit"
+    )
+    |> TradingOptionsSim.Repo.update!()
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    assert html =~ "Last closed:"
+    assert html =~ "$6.00"
+  end
+
+  # The dollar round trip a person repricing the trade by hand would
+  # produce -- the per-share quote alone hides that a contract is 100
+  # shares.
+  test "the last closed trade shows cost, proceeds, fees, net and return", %{conn: conn} do
+    strategy = strategy_fixture()
+    pool = pool_fixture("DETAILCOST1")
+
+    version =
+      version_fixture(strategy, %{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: "DETAILCOST1",
+        expiry: "20271231",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    entry_at = ~U[2026-09-24 18:03:00Z]
+    exit_at = ~U[2026-09-24 18:25:00Z]
+
+    {:ok, {_fill, run}} =
+      Sim.record_entry_fill(
+        run,
+        %{
+          action: "buy",
+          quantity: 1,
+          fill_price: Decimal.new("28.36"),
+          filled_at: entry_at,
+          commission: Decimal.new("1.05")
+        },
+        %{entry_at: entry_at, entry_price: Decimal.new("28.36")}
+      )
+
+    {:ok, {_fill, _run}} =
+      Sim.record_exit_fill(
+        run,
+        %{
+          action: "sell",
+          quantity: 1,
+          fill_price: Decimal.new("29.41"),
+          filled_at: exit_at,
+          commission: Decimal.new("1.06")
+        },
+        %{
+          exit_at: exit_at,
+          exit_price: Decimal.new("29.41"),
+          exit_reason: "rule_exit",
+          realized_pnl: Decimal.new("105.00"),
+          realized_pnl_net: Decimal.new("102.89")
+        }
+      )
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    assert html =~ "$2836.00"
+    assert html =~ "$2941.00"
+    assert html =~ "+$105.00"
+    assert html =~ "$2.11"
+    assert html =~ "+$102.89"
+    assert html =~ "3.6% on capital"
+    assert html =~ "22 min"
+    # Recent Fills value column: 28.36 x 100 x 1
+    assert html =~ ">Value<"
   end
 
   describe "recent fills panel" do

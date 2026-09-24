@@ -16,6 +16,7 @@ defmodule TradingOptionsSimWeb.RunsLive do
   use TradingOptionsSimWeb, :live_view
 
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.Sim.TradeCost
 
   @refresh_ms :timer.seconds(5)
 
@@ -134,16 +135,24 @@ defmodule TradingOptionsSimWeb.RunsLive do
               <th>Contract</th>
               <th>Direction</th>
               <th>Status</th>
-              <th>Entry</th>
-              <th>Exit</th>
-              <th>Realized P&amp;L</th>
-              <th>Est. Commission</th>
+              <th title="Per share">Entry</th>
+              <th title="Per share">Exit</th>
+              <th title="Entry × 100 shares × contracts: the premium paid, which for a long option is also the capital at risk">
+                Cost
+              </th>
+              <th>Gross P&amp;L</th>
+              <th>Fees</th>
+              <th>Net P&amp;L</th>
+              <th title="Net P&amp;L ÷ cost (long positions only)">Return</th>
               <th>Exit reason</th>
               <th>Tags</th>
             </tr>
           </thead>
           <tbody>
-            <tr :for={run <- @runs} class="border-t border-base-300">
+            <tr
+              :for={{run, cost} <- Enum.map(@runs, &{&1, TradeCost.summary(&1)})}
+              class="border-t border-base-300"
+            >
               <td>
                 {run.strategy_version.strategy.name}
                 <span class="text-base-content/40">v{run.strategy_version.version}</span>
@@ -160,11 +169,14 @@ defmodule TradingOptionsSimWeb.RunsLive do
               </td>
               <td>{format_price(run.entry_price)}</td>
               <td>{format_price(run.exit_price)}</td>
+              <td class="tabular-nums">{format_price(cost.cost_to_buy)}</td>
               <td class={pnl_class(run.realized_pnl)}>
                 {format_price(run.realized_pnl)}
               </td>
-              <td class="text-base-content/50">
-                {format_price(Sim.total_run_commission(run))}
+              <td class="text-base-content/50">{format_price(cost.fees)}</td>
+              <td class={pnl_class(cost.net_pnl)}>{format_price(cost.net_pnl)}</td>
+              <td class={pnl_class(cost.return_pct)}>
+                {if cost.return_pct, do: "#{Decimal.to_string(cost.return_pct)}%", else: "—"}
               </td>
               <td class="text-base-content/60">{run.exit_reason || "—"}</td>
               <td>
