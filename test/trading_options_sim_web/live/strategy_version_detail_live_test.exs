@@ -258,6 +258,40 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "Capital in use:"
   end
 
+  # Found in review: a closed run with an exit but no entry price (bad or
+  # excluded data) must render, not crash the page.
+  test "a closed run with no entry price still renders", %{conn: conn} do
+    strategy = strategy_fixture()
+    pool = pool_fixture("DETAILCOST2")
+
+    version =
+      version_fixture(strategy, %{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: "DETAILCOST2",
+        expiry: "20271231",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    run
+    |> Ecto.Changeset.change(
+      status: "closed",
+      exit_at: DateTime.utc_now(),
+      exit_price: Decimal.new("6.00"),
+      exit_reason: "rule_exit"
+    )
+    |> TradingOptionsSim.Repo.update!()
+
+    {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+    assert html =~ "Last closed:"
+    assert html =~ "$6.00"
+  end
+
   # The dollar round trip a person repricing the trade by hand would
   # produce -- the per-share quote alone hides that a contract is 100
   # shares.

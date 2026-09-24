@@ -292,12 +292,6 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   defp format_snapshot_value(nil), do: "—"
   defp format_snapshot_value(value), do: to_string(value)
 
-  # "Current" price fallback shown while a position is open but its own
-  # SimRun hasn't resolved yet — reads straight from the monitor's own
-  # in-memory last_snapshot (always instantly available, no DB
-  # round-trip needed) rather than leaving the operator with no price
-  # at all during a real, briefly-open position on a fast-oscillating
-  # signal (confirmed live 2026-09-15).
   # Premium currently tied up across this version's open long legs, i.e.
   # what it would take to hold them all at once.
   defp capital_in_use(members) do
@@ -369,6 +363,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       underlying: number(values["run_underlying_price"]),
       unrealized: unrealized,
       cost_to_buy: cost_to_buy,
+      multiplier: multiplier,
       capital: if(sign == 1, do: cost_to_buy),
       entry_fee: entry_fill && decimal_to_float(entry_fill.commission),
       unrealized_pct:
@@ -840,7 +835,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
                   <td class="pr-3 py-0.5 tabular-nums">
                     {money(@entry.position.cost_to_buy)}
                     <span class="text-base-content/40">
-                      = {money(@entry.position.entry)} × 100 × {format_qty(@entry.position.qty)}
+                      = {money(@entry.position.entry)} × {@entry.position.multiplier} × {format_qty(
+                        @entry.position.qty
+                      )}
                     </span>
                     <span :if={@entry.position.capital} class="text-base-content/40">
                       · capital at risk
@@ -945,7 +942,8 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       <div>
         <span class="text-base-content/40">Last closed:</span>
         <span :if={@run.exit_price}>
-          ${Decimal.round(@run.entry_price, 2)} → ${Decimal.round(@run.exit_price, 2)}
+          <span :if={@run.entry_price}>${Decimal.round(@run.entry_price, 2)} →</span>
+          ${Decimal.round(@run.exit_price, 2)}
           <span class="text-base-content/40">per share</span>
         </span>
         <span :if={is_nil(@run.exit_price)} class="text-base-content/50">
@@ -954,7 +952,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       </div>
       <div :if={@run.exit_price && @cost.cost_to_buy} class="text-base-content/70">
         Cost {dollars(@cost.cost_to_buy)}
-        <span class="text-base-content/40">({@cost.contracts} × 100 sh)</span>
+        <span class="text-base-content/40">
+          ({@cost.contracts} × {@run.multiplier || 100} sh)
+        </span>
         → proceeds {dollars(@cost.proceeds)} · gross
         <span class={pnl_class(@cost.gross_pnl)}>{signed_dollars(@cost.gross_pnl)}</span>
         · fees {dollars(@cost.fees)}
