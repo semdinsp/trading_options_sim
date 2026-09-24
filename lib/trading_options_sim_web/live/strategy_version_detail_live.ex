@@ -554,6 +554,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             <tr class="text-base-content/40 uppercase tracking-wide text-left">
               <th class="pr-3 py-0.5">Symbol</th>
               <th class="pr-3 py-0.5">Contract</th>
+              <th class="pr-3 py-0.5">OCC</th>
               <th class="pr-3 py-0.5">Kind</th>
               <th class="pr-3 py-0.5">Action</th>
               <th class="pr-3 py-0.5 text-right">Qty</th>
@@ -566,6 +567,12 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
               <td class="pr-3 py-0.5 font-bold">{fill.sim_run.symbol}</td>
               <td class="pr-3 py-0.5 text-base-content/60">
                 {format_expiry(fill.sim_run.expiry)} {Decimal.to_string(fill.sim_run.strike)}{fill.sim_run.right}
+              </td>
+              <td class="pr-3 py-0.5 text-base-content/60">
+                <span
+                  class="whitespace-pre select-all"
+                  title="OCC symbol — click to select, paste into IBKR"
+                >{occ_symbol(fill.sim_run)}</span>
               </td>
               <td class="pr-3 py-0.5 uppercase">{fill.kind}</td>
               <td class="pr-3 py-0.5 uppercase">{fill.action}</td>
@@ -581,6 +588,18 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     </div>
     """
   end
+
+  # The contract's OCC symbol, for looking it up in IBKR. Padding spaces
+  # are significant ("SPY   261120C00770000"), hence whitespace-pre on an
+  # inner span holding ONLY the symbol -- on the <td> it would also render
+  # the template's own indentation, and select-all would copy it. Same builder IBKRLive subscribes with, so what's shown here is
+  # exactly the symbol trading_hub was asked for.
+  defp occ_symbol(%{symbol: symbol, expiry: expiry, strike: strike, right: right})
+       when is_binary(symbol) and is_binary(expiry) and right in ["C", "P"] do
+    TradingOptionsSim.OccSymbol.build(symbol, expiry, strike, right)
+  end
+
+  defp occ_symbol(_run), do: "—"
 
   attr :entry, :map, required: true
 
