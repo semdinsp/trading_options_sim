@@ -136,6 +136,30 @@ defmodule TradingOptionsSim.SimActivatorTest do
       assert [_one_entry] = Sim.list_sim_fills(run) |> Enum.filter(&(&1.kind == "entry"))
     end
 
+    # Only the old bug could leave several open runs on one symbol. The
+    # one holding a position wins, whatever order they were created in.
+    test "with several open runs, resumes the one holding a position" do
+      pool = pool_fixture(["RESUME7"])
+      version = always_enter_version(pool)
+      held = entered_run_on(version, "RESUME7", "145.00")
+
+      {:ok, _flat_newer} =
+        Sim.open_sim_run(version, %{
+          symbol: "RESUME7",
+          expiry: "20271231",
+          strike: Decimal.new("155.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.position_open?
+      assert Decimal.equal?(snap.strike, held.strike)
+    end
+
     test "a symbol with no open run still resolves and opens a new one" do
       pool = pool_fixture(["RESUME4"])
       version = always_enter_version(pool)

@@ -301,7 +301,12 @@ defmodule TradingOptionsSim.SimActivator do
     version
     |> Sim.list_open_sim_runs()
     |> Enum.filter(&(&1.symbol == symbol))
-    |> Enum.sort_by(&{not is_nil(&1.entry_at), &1.inserted_at}, :desc)
+    # A plain term sort on a DateTime compares struct fields, not time,
+    # so order on the unix timestamp.
+    |> Enum.sort_by(
+      &{not is_nil(&1.entry_at), DateTime.to_unix(&1.inserted_at, :microsecond)},
+      :desc
+    )
     |> List.first()
   end
 
