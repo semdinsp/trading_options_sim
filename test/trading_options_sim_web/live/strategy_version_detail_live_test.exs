@@ -220,6 +220,38 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
 
       assert html =~ "2 of 2"
     end
+
+    # For looking the contract up in IBKR. The padding spaces are part of
+    # the symbol, so they must survive rendering intact.
+    test "shows each fill's OCC symbol with its padding intact", %{conn: conn} do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      now = DateTime.utc_now()
+
+      {:ok, run} =
+        TradingOptionsSim.Sim.open_sim_run(version, %{
+          symbol: "TLT",
+          expiry: "20261120",
+          strike: Decimal.new("80.00"),
+          right: "P",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, {_fill, _run}} =
+        TradingOptionsSim.Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("1.80"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("1.80")}
+        )
+
+      {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      assert html =~ ">OCC<"
+      # Nothing but the symbol inside the selectable span: no template
+      # whitespace for select-all to copy along with it.
+      assert html =~ ">TLT   261120P00080000</span>"
+    end
   end
 
   # Regression test for a real race: build_member_entry/4's "no open
