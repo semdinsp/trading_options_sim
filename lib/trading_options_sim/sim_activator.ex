@@ -28,6 +28,7 @@ defmodule TradingOptionsSim.SimActivator do
   alias TradingOptionsSim.Pricing.UnderlyingSubscription
   alias TradingOptionsSim.PolygonRelay
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.Sim.SimRun
   alias TradingOptionsSim.Sim.StrategyVersion
 
   @doc """
@@ -138,21 +139,15 @@ defmodule TradingOptionsSim.SimActivator do
   @spec deactivate(StrategyVersion.t()) :: {:ok, non_neg_integer()}
   def deactivate(%StrategyVersion{} = version) do
     open_runs = Sim.list_open_sim_runs(version)
-    runs_by_symbol = Map.new(open_runs, &{&1.symbol, &1})
-    contract_template = resolve_contract_template(version.option_leg_config)
 
+    # Found through the registry, not rebuilt from the leg config or the
+    # open runs: for atm_offset neither names the contract a monitor is
+    # actually on, so the old lookup missed running monitors and left
+    # them trading after "deactivate".
     terminated_count =
-      version
-      |> monitored_symbols(runs_by_symbol, contract_template)
-      |> Enum.map(fn symbol ->
-        stop_monitor_for_symbol(
-          version.id,
-          symbol,
-          Map.get(runs_by_symbol, symbol),
-          contract_template
-        )
-      end)
-      |> Enum.count(& &1)
+      version.id
+      |> ContractMonitor.monitors_for_version()
+      |> Enum.count(fn {_symbol, pid} -> stop_monitor(pid, open_runs) end)
 
     # Release this version's hold on each underlying. Reference-counted,
     # so a symbol another active strategy still needs keeps its
@@ -178,59 +173,39 @@ defmodule TradingOptionsSim.SimActivator do
     end)
   end
 
-  # Every symbol worth checking for a running monitor: every open run's
-  # own symbol, plus (when the leg config resolves and a target pool is
-  # set) every target-pool member's symbol — a flat-but-active monitor
-  # has no open run to find it by, so deactivate/1 must also check by
-  # resolved contract, same as StrategyVersionDetailLive's own fallback
-  # (see that module's `build_member_entry/4`). Deliberately tolerant of
-  # an unresolvable leg config or missing target pool (a version can
-  # still be deactivated even if its own config has since become
-  # invalid) — falls back to open-run symbols alone in that case.
-  defp monitored_symbols(%{target_pool_id: nil}, runs_by_symbol, _contract_template) do
-    Map.keys(runs_by_symbol)
-  end
+  # Flattens pid's position (closing its run) and terminates it. The run
+  # is matched on the monitor's OWN contract, read from its snapshot.
+  defp stop_monitor(pid, open_runs) do
+    run =
+      case safe_snapshot(pid) do
+        %{} = snap ->
+          Enum.find(open_runs, &same_contract?(&1, snap))
 
-  defp monitored_symbols(_version, runs_by_symbol, {:error, :unsupported_leg_config}) do
-    Map.keys(runs_by_symbol)
-  end
+        nil ->
+          nil
+      end
 
-  defp monitored_symbols(version, runs_by_symbol, {:ok, _template}) do
-    member_symbols =
-      version.target_pool_id
-      |> Sim.get_target_pool!()
-      |> Map.fetch!(:target_pool_members)
-      |> Enum.map(& &1.symbol)
+    if run, do: flatten_and_close(pid, run)
 
-    (Map.keys(runs_by_symbol) ++ member_symbols) |> Enum.uniq()
-  end
-
-  defp stop_monitor_for_symbol(strategy_version_id, symbol, run, contract_template) do
-    contract_key = symbol_contract_key(symbol, run, contract_template)
-
-    case contract_key && ContractMonitor.whereis(strategy_version_id, contract_key) do
-      nil ->
-        false
-
-      pid ->
-        if run, do: flatten_and_close(pid, run)
-
-        case DynamicSupervisor.terminate_child(TradingOptionsSim.MonitorSupervisor, pid) do
-          :ok -> true
-          {:error, :not_found} -> false
-        end
+    case DynamicSupervisor.terminate_child(TradingOptionsSim.MonitorSupervisor, pid) do
+      :ok -> true
+      {:error, :not_found} -> false
     end
   end
 
-  defp symbol_contract_key(symbol, %{} = run, _contract_template) do
-    {symbol, run.expiry, run.strike, run.right}
+  @doc false
+  # Decimal.equal?, not ==: the same strike can carry a different scale
+  # depending on where it was read from ("735.0" vs "735.00").
+  def same_contract?(a, b) do
+    a.symbol == b.symbol and a.expiry == b.expiry and a.right == b.right and
+      Decimal.equal?(a.strike, b.strike)
   end
 
-  defp symbol_contract_key(symbol, nil, {:ok, template}) do
-    {symbol, template.expiry, template.strike, template.right}
+  defp safe_snapshot(pid) do
+    ContractMonitor.snapshot(pid)
+  catch
+    :exit, _ -> nil
   end
-
-  defp symbol_contract_key(_symbol, nil, {:error, :unsupported_leg_config}), do: nil
 
   # snapshot/1 read BEFORE force_close/2 — force_close/2 flips
   # position_open? to false as a side effect of flattening, so checking
@@ -304,6 +279,42 @@ defmodule TradingOptionsSim.SimActivator do
     ensure_underlying(member)
     ensure_polygon(member)
 
+    case open_run_for_symbol(version, member.symbol) do
+      %SimRun{} = run -> resume_run(version, member, run)
+      nil -> resolve_and_start(version, member)
+    end
+  end
+
+  # An open run means this symbol already has a contract (and possibly
+  # a position) in flight, so RESUME it rather than resolving ATM again.
+  #
+  # Re-resolving is what orphaned runs until 2026-09-24: for an
+  # atm_offset version the strike follows spot, so every restart after
+  # the underlying had moved a strike picked a new contract, opened a
+  # new run and monitor beside it, and left the old run open with
+  # nothing watching it -- 154 of 243 open runs, 45 of them holding a
+  # position that would never be exited or scored.
+  #
+  # With several open runs for one symbol (only possible from that old
+  # bug), prefer one holding a position, then the newest.
+  defp open_run_for_symbol(version, symbol) do
+    version
+    |> Sim.list_open_sim_runs()
+    |> Enum.filter(&(&1.symbol == symbol))
+    |> Enum.sort_by(&{not is_nil(&1.entry_at), &1.inserted_at}, :desc)
+    |> List.first()
+  end
+
+  defp resume_run(version, member, run) do
+    start_or_find_monitor(
+      version,
+      run,
+      {run.symbol, run.expiry, run.strike, run.right},
+      member.exchange
+    )
+  end
+
+  defp resolve_and_start(version, member) do
     case resolve_for_symbol(member.symbol, version.option_leg_config) do
       {:ok, contract_template} ->
         start_for_member(version, member, contract_template)
@@ -387,8 +398,8 @@ defmodule TradingOptionsSim.SimActivator do
       end)
 
     case existing_run do
-      %{id: run_id} ->
-        start_or_find_monitor(version, run_id, contract_key, member.exchange)
+      %SimRun{} = run ->
+        start_or_find_monitor(version, run, contract_key, member.exchange)
 
       nil ->
         start_new_run_and_monitor(version, member, contract_key)
@@ -405,7 +416,7 @@ defmodule TradingOptionsSim.SimActivator do
            direction: version.direction
          }) do
       {:ok, run} ->
-        start_or_find_monitor(version, run.id, {symbol, expiry, strike, right}, member.exchange)
+        start_or_find_monitor(version, run, {symbol, expiry, strike, right}, member.exchange)
 
       {:error, reason} ->
         Logger.error(
@@ -416,7 +427,12 @@ defmodule TradingOptionsSim.SimActivator do
     end
   end
 
-  defp start_or_find_monitor(version, run_id, contract_key, exchange) do
+  # The run's own position state goes to the monitor. Without it a
+  # resumed monitor started flat whatever the run held, and its next
+  # entry signal wrote a SECOND entry fill into the same run,
+  # overwriting entry_price/entry_at: 48 runs carried 248 extra entry
+  # fills (2026-09-18 to 09-24) before this was fixed.
+  defp start_or_find_monitor(version, %SimRun{id: run_id} = run, contract_key, exchange) do
     case ContractMonitor.whereis(version.id, contract_key) do
       nil ->
         spec = %{
@@ -430,7 +446,9 @@ defmodule TradingOptionsSim.SimActivator do
                  contract_key: contract_key,
                  strategy_version: version,
                  direction: version.direction,
-                 quantity: 1
+                 quantity: 1,
+                 position_open?: not is_nil(run.entry_at),
+                 entered_at: run.entry_at
                ] ++ pricing_opts(contract_key)
              ]},
           restart: :transient
