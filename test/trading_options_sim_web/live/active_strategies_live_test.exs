@@ -8,6 +8,8 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
   import Phoenix.LiveViewTest
 
   alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.Repo
+  alias TradingOptionsSim.Sim.StrategyVersion
   alias TradingOptionsSim.SimActivator
 
   defp fixed_leg_config do
@@ -209,5 +211,66 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     assert html =~ "Tagged Active"
     assert html =~ "TP-SL improved"
     assert html =~ "Untagged Active"
+  end
+
+  describe "stage filter pills" do
+    defp set_stage(version, stage) do
+      version
+      |> StrategyVersion.lifecycle_stage_changeset(%{lifecycle_stage: stage})
+      |> Repo.update!()
+    end
+
+    setup do
+      activated_version_fixture("Disco Pill Strategy", ["DPILL"])
+      "Quar Pill Strategy" |> activated_version_fixture(["QPILL"]) |> set_stage("quarantine")
+      "Test Pill Strategy" |> activated_version_fixture(["TPILL"]) |> set_stage("test_portfolio")
+      :ok
+    end
+
+    test "All shows every stage, with per-stage counts of active versions", %{conn: conn} do
+      {:ok, view, html} = live(conn, ~p"/active_strategies")
+
+      assert html =~ "Disco Pill Strategy"
+      assert html =~ "Quar Pill Strategy"
+      assert html =~ "Test Pill Strategy"
+      assert has_element?(view, "a[href='/active_strategies']", ~r/All\s+3/)
+
+      assert has_element?(
+               view,
+               "a[href='/active_strategies?stage=quarantine']",
+               ~r/Quarantine\s+1/
+             )
+    end
+
+    test "a stage pill shows only that stage", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/active_strategies?stage=quarantine")
+
+      assert html =~ "Quar Pill Strategy"
+      refute html =~ "Disco Pill Strategy"
+      refute html =~ "Test Pill Strategy"
+    end
+
+    test "clicking a pill patches the URL and filters", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/active_strategies")
+
+      html = view |> element("a", "Test Portfolio") |> render_click()
+      assert_patch(view, ~p"/active_strategies?stage=test_portfolio")
+      assert html =~ "Test Pill Strategy"
+      refute html =~ "Disco Pill Strategy"
+    end
+
+    test "an unknown stage param falls back to All", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/active_strategies?stage=bogus")
+
+      assert html =~ "Disco Pill Strategy"
+      assert html =~ "Quar Pill Strategy"
+    end
+
+    test "the stage filter combines with search", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/active_strategies?stage=discovery")
+
+      html = view |> form("form[phx-change=search]", %{q: "quar"}) |> render_change()
+      assert html =~ "No active strategy versions match this filter"
+    end
   end
 end

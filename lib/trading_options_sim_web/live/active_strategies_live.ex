@@ -39,6 +39,13 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   `Sim.today_stats_for_version/1`'s own doc for why "today," not
   cumulative).
 
+  Stage pills (All / Discovery / Quarantine / Test Portfolio) filter the
+  list by `lifecycle_stage` via `?stage=`, same URL shape as
+  `StrategyVersionsLive`'s filter. Each pill's count is the number of
+  *active* versions in that stage, unlike the header's
+  `stage_counts_strip`, which counts every version. Retired versions
+  are never active, so there is no Retired pill.
+
   Each version card also has a Deactivate button
   (`SimActivator.deactivate/1` — same action `StrategyVersionsLive`'s
   own button performs).
@@ -55,6 +62,13 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
 
   @refresh_ms :timer.seconds(5)
 
+  @stage_filters [
+    {"discovery", "Discovery"},
+    {"quarantine", "Quarantine"},
+    {"test_portfolio", "Test Portfolio"}
+  ]
+  @stages Enum.map(@stage_filters, &elem(&1, 0))
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket), do: :timer.send_interval(@refresh_ms, self(), :refresh)
@@ -63,7 +77,13 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
      socket
      |> assign(:page_title, "Active Strategies")
      |> assign(:search, "")
-     |> load_active_versions()}
+     |> assign(:stage_filter, nil)}
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    stage_filter = if params["stage"] in @stages, do: params["stage"]
+    {:noreply, socket |> assign(:stage_filter, stage_filter) |> load_active_versions()}
   end
 
   @impl true
@@ -90,8 +110,11 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   end
 
   defp load_active_versions(socket) do
+    all_active = Sim.list_active_strategy_versions()
+
     active_versions =
-      Sim.list_active_strategy_versions()
+      all_active
+      |> filter_stage(socket.assigns.stage_filter)
       |> StrategySearch.filter(
         socket.assigns.search,
         &{&1.strategy.name, [&1.id, &1.strategy_id]}
@@ -114,8 +137,15 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
 
     socket
     |> assign(:active_versions, active_versions)
+    |> assign(:active_stage_counts, Enum.frequencies_by(all_active, & &1.lifecycle_stage))
     |> assign(:stage_counts, Sim.strategy_version_stage_counts())
   end
+
+  defp filter_stage(versions, nil), do: versions
+  defp filter_stage(versions, stage), do: Enum.filter(versions, &(&1.lifecycle_stage == stage))
+
+  defp stage_path(nil), do: ~p"/active_strategies"
+  defp stage_path(stage), do: ~p"/active_strategies?stage=#{stage}"
 
   defp target_pool_members(%{target_pool_id: nil}), do: []
 
@@ -179,6 +209,8 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
     end
   end
 
+  defp stage_filters, do: @stage_filters
+
   defp chip_class(%{running?: true}), do: "border-success/40 text-success"
   defp chip_class(_chip), do: "border-base-content/15 text-base-content/40"
 
@@ -224,11 +256,25 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
         <h1 class="text-2xl font-bold uppercase tracking-wide">Active Strategies</h1>
         <.stage_counts_strip counts={@stage_counts} />
         <.search_box query={@search} />
+        <div class="flex gap-1 ml-auto">
+          <.link patch={stage_path(nil)} class={filter_link_class(@stage_filter, nil)}>
+            All {@active_stage_counts |> Map.values() |> Enum.sum()}
+          </.link>
+          <.link
+            :for={{stage, label} <- stage_filters()}
+            patch={stage_path(stage)}
+            class={filter_link_class(@stage_filter, stage)}
+          >
+            {label} {Map.get(@active_stage_counts, stage, 0)}
+          </.link>
+        </div>
       </div>
 
       <div :if={@active_versions == []} class="border border-base-300 p-8 text-center">
         <p class="font-data text-sm uppercase tracking-wide text-base-content/40">
-          No strategy versions are currently active
+          {if @stage_filter || @search != "",
+            do: "No active strategy versions match this filter",
+            else: "No strategy versions are currently active"}
         </p>
       </div>
 
