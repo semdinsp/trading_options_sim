@@ -1041,7 +1041,7 @@ defmodule TradingOptionsSim.Sim do
       not is_nil(v.activated_at) and is_nil(v.deactivated_at) and
         v.lifecycle_stage != "retired"
     )
-    |> preload([:strategy, sim_runs: ^from(r in SimRun, where: r.status == "open")])
+    |> preload([:strategy, :tags, sim_runs: ^from(r in SimRun, where: r.status == "open")])
     |> Repo.all()
   end
 

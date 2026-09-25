@@ -246,6 +246,13 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
               </h2>
             </.link>
             <.lifecycle_badge stage={entry.version.lifecycle_stage} />
+            <%!-- Read-only here; tags are added/removed on /strategy_versions. --%>
+            <span
+              :for={tag <- entry.version.tags}
+              class="px-1.5 py-0.5 border border-secondary/40 text-secondary bg-secondary/10 text-[11px] uppercase tracking-wide font-data"
+            >
+              {tag.name}
+            </span>
             <span class="font-data text-xs text-base-content/40">
               {length(entry.members)} members
             </span>
