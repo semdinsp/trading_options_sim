@@ -650,6 +650,33 @@ defmodule TradingOptionsSimWeb.CoreComponents do
   def format_expiry(other), do: other
 
   @doc """
+  Search box shared by the strategy versions, active strategies, runs and
+  candidates pages: filter by strategy name, or by a pasted UUID or UUID
+  prefix. Sends `"search"` with `%{"q" => text}` (debounced) on each
+  change; the page filters with `TradingOptionsSimWeb.StrategySearch`.
+  """
+  attr :query, :string, default: ""
+  attr :id, :string, default: "strategy-search"
+  attr :placeholder, :string, default: "Search strategy name or UUID…"
+
+  def search_box(assigns) do
+    ~H"""
+    <form id={@id} phx-change="search" phx-submit="search" class="inline-flex" role="search">
+      <input
+        type="search"
+        name="q"
+        value={@query}
+        placeholder={@placeholder}
+        phx-debounce="200"
+        autocomplete="off"
+        aria-label="Search strategy name or UUID"
+        class="input input-xs input-bordered font-data text-[11px] w-64"
+      />
+    </form>
+    """
+  end
+
+  @doc """
   A small button that copies `id` to the clipboard on click, with a
   brief "Copied!" confirmation — for the UUID strings shown throughout
   this app's detail pages (`StrategyVersionDetailLive`, and any future

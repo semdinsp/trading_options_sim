@@ -46,6 +46,8 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
 
   use TradingOptionsSimWeb, :live_view
 
+  alias TradingOptionsSimWeb.StrategySearch
+
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.ExchangeSessionCache
   alias TradingOptionsSim.Sim
@@ -60,6 +62,7 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
     {:ok,
      socket
      |> assign(:page_title, "Active Strategies")
+     |> assign(:search, "")
      |> load_active_versions()}
   end
 
@@ -69,6 +72,13 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   end
 
   @impl true
+  # Shared search box (<.search_box>): strategy name or UUID fragment,
+  # see TradingOptionsSimWeb.StrategySearch. Applied inside the load step
+  # so it survives the periodic refresh.
+  def handle_event("search", %{"q" => q}, socket) do
+    {:noreply, socket |> assign(:search, q) |> load_active_versions()}
+  end
+
   def handle_event("deactivate", %{"id" => id}, socket) do
     version = Sim.get_strategy_version!(id)
     {:ok, count} = SimActivator.deactivate(version)
@@ -82,6 +92,10 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   defp load_active_versions(socket) do
     active_versions =
       Sim.list_active_strategy_versions()
+      |> StrategySearch.filter(
+        socket.assigns.search,
+        &{&1.strategy.name, [&1.id, &1.strategy_id]}
+      )
       |> Enum.map(fn version ->
         contract_template = SimActivator.resolve_contract_template(version.option_leg_config)
 
@@ -209,6 +223,7 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
       <div class="flex items-center gap-4 mb-6">
         <h1 class="text-2xl font-bold uppercase tracking-wide">Active Strategies</h1>
         <.stage_counts_strip counts={@stage_counts} />
+        <.search_box query={@search} />
       </div>
 
       <div :if={@active_versions == []} class="border border-base-300 p-8 text-center">

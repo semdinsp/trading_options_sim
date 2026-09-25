@@ -28,6 +28,8 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
 
   use TradingOptionsSimWeb, :live_view
 
+  alias TradingOptionsSimWeb.StrategySearch
+
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.StrategyVersion
   alias TradingOptionsSim.SimActivator
@@ -37,6 +39,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
     {:ok,
      socket
      |> assign(:page_title, "Strategy Versions")
+     |> assign(:search, "")
      |> assign(:stage_filter, nil)
      |> assign(:tagging_version_id, nil)}
   end
@@ -53,6 +56,13 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
   end
 
   @impl true
+  # Shared search box (<.search_box>): strategy name or UUID fragment,
+  # see TradingOptionsSimWeb.StrategySearch. Applied inside the load step
+  # so it survives the periodic refresh.
+  def handle_event("search", %{"q" => q}, socket) do
+    {:noreply, socket |> assign(:search, q) |> load_versions()}
+  end
+
   def handle_event("toggle_tag_control", %{"id" => id}, socket) do
     next_id = if socket.assigns.tagging_version_id == id, do: nil, else: id
     {:noreply, assign(socket, :tagging_version_id, next_id)}
@@ -161,7 +171,15 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
 
   defp load_versions(socket) do
     socket
-    |> assign(:versions, list_versions(socket.assigns.stage_filter))
+    |> assign(
+      :versions,
+      socket.assigns.stage_filter
+      |> list_versions()
+      |> StrategySearch.filter(
+        socket.assigns.search,
+        &{&1.strategy.name, [&1.id, &1.strategy_id]}
+      )
+    )
     |> assign(:active_version_ids, Sim.active_strategy_version_ids())
     |> assign(:stage_counts, Sim.strategy_version_stage_counts())
   end
@@ -185,6 +203,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
         <div class="flex items-center gap-4">
           <h1 class="text-2xl font-bold uppercase tracking-wide">Strategy Versions</h1>
           <.stage_counts_strip counts={@stage_counts} />
+          <.search_box query={@search} />
         </div>
 
         <div class="flex gap-1">

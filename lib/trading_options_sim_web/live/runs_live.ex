@@ -15,6 +15,8 @@ defmodule TradingOptionsSimWeb.RunsLive do
 
   use TradingOptionsSimWeb, :live_view
 
+  alias TradingOptionsSimWeb.StrategySearch
+
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.TradeCost
 
@@ -27,6 +29,7 @@ defmodule TradingOptionsSimWeb.RunsLive do
     {:ok,
      socket
      |> assign(:page_title, "Runs")
+     |> assign(:search, "")
      |> assign(:status_filter, nil)
      |> assign(:tagging_run_id, nil)
      |> load_runs()}
@@ -49,6 +52,13 @@ defmodule TradingOptionsSimWeb.RunsLive do
   end
 
   @impl true
+  # Shared search box (<.search_box>): strategy name or UUID fragment,
+  # see TradingOptionsSimWeb.StrategySearch. Applied inside the load step
+  # so it survives the periodic refresh.
+  def handle_event("search", %{"q" => q}, socket) do
+    {:noreply, socket |> assign(:search, q) |> load_runs()}
+  end
+
   def handle_event("toggle_tag_control", %{"id" => id}, socket) do
     next_id = if socket.assigns.tagging_run_id == id, do: nil, else: id
     {:noreply, assign(socket, :tagging_run_id, next_id)}
@@ -74,7 +84,15 @@ defmodule TradingOptionsSimWeb.RunsLive do
   end
 
   defp load_runs(socket) do
-    assign(socket, :runs, Sim.list_sim_runs(socket.assigns.status_filter))
+    runs =
+      socket.assigns.status_filter
+      |> Sim.list_sim_runs()
+      |> StrategySearch.filter(socket.assigns.search, fn run ->
+        {run.strategy_version.strategy.name,
+         [run.id, run.strategy_version_id, run.strategy_version.strategy_id]}
+      end)
+
+    assign(socket, :runs, runs)
   end
 
   defp status_badge_class("open"), do: "border-info/40 text-info bg-info/10"
@@ -108,7 +126,10 @@ defmodule TradingOptionsSimWeb.RunsLive do
     ~H"""
     <Layouts.app flash={@flash}>
       <div class="flex items-center justify-between mb-6">
-        <h1 class="text-2xl font-bold uppercase tracking-wide">Runs</h1>
+        <div class="flex items-center gap-4">
+          <h1 class="text-2xl font-bold uppercase tracking-wide">Runs</h1>
+          <.search_box query={@search} />
+        </div>
 
         <div class="flex gap-1">
           <.link patch={~p"/runs"} class={filter_link_class(@status_filter, nil)}>All</.link>
