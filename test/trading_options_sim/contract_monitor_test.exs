@@ -1729,6 +1729,22 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.list_sim_fills(run) == []
     end
 
+    # Found in review: `dte <= nil` is true in Erlang term order, so a nil
+    # cutoff must not silently block every entry.
+    test "a nil expiry_close_dte does not block entries" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0}
+        })
+
+      {pid, _run} = start_monitor(version, contract_key("EXPWIN3"), expiry_close_dte: nil)
+
+      broadcast_underlying_price("EXPWIN3", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
     # Must not fire on healthy input: two days out still enters.
     test "a flat monitor two days before expiry still enters" do
       two_days =

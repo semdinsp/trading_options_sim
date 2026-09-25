@@ -894,8 +894,11 @@ defmodule TradingOptionsSim.ContractMonitor do
   # checks were `dte <= 0` -- so the sim held into expiry day and closed
   # at intrinsic. trading_live closes at 1 DTE; this keeps the two
   # comparable (its OPTIONS_PROMOTION_PLAN.md, D3).
+  #
+  # is_integer guard: in Erlang term order every number sorts below nil,
+  # so `dte <= nil` is TRUE and a nil cutoff would block entries forever.
   defp maybe_transition_before_expiry(%{position_open?: false} = state, _snapshot, dte)
-       when dte <= state.expiry_close_dte,
+       when is_integer(state.expiry_close_dte) and dte <= state.expiry_close_dte,
        do: state
 
   defp maybe_transition_before_expiry(state, snapshot, _dte),
