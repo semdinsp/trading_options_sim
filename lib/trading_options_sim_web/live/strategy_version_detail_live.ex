@@ -111,6 +111,26 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     {:noreply, load_version(socket, socket.assigns.version.id)}
   end
 
+  # The next stage is recomputed here, never taken from the client, so
+  # the button can only ever make the one valid forward transition.
+  def handle_event("promote", _params, socket) do
+    version = socket.assigns.version
+
+    socket =
+      case next_stage(version) do
+        nil ->
+          put_flash(socket, :error, "No further promotion from #{version.lifecycle_stage}")
+
+        to ->
+          case Sim.promote_strategy_version(version, to) do
+            {:ok, _promoted} -> put_flash(socket, :info, "Promoted to #{to}")
+            {:error, _reason} -> put_flash(socket, :error, "Could not promote to #{to}")
+          end
+      end
+
+    {:noreply, load_version(socket, socket.assigns.version.id)}
+  end
+
   def handle_event("unretire", _params, socket) do
     socket =
       case Sim.promote_strategy_version(socket.assigns.version, "discovery") do
@@ -168,6 +188,26 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       {:error, _changeset} -> {:noreply, put_flash(socket, :error, "Could not remove tag")}
     end
   end
+
+  # The one valid forward step, or nil. discovery -> quarantine needs a
+  # target pool (Sim.promote_strategy_version/2 refuses otherwise);
+  # test_portfolio is the last stage here (going live is a trading_live
+  # link, not a stage), and retired leaves only via Unretire.
+  defp next_stage(%{lifecycle_stage: "discovery", target_pool_id: pool}) when not is_nil(pool),
+    do: "quarantine"
+
+  defp next_stage(%{lifecycle_stage: "quarantine"}), do: "test_portfolio"
+  defp next_stage(_version), do: nil
+
+  defp promote_confirm("quarantine"),
+    do:
+      "Promote to quarantine? This starts the quarantine clock. After 20 trading days a " <>
+        "version whose losses outweigh its wins is retired automatically overnight."
+
+  defp promote_confirm("test_portfolio"),
+    do:
+      "Promote to test_portfolio? This marks it proven and eligible for promotion into " <>
+        "trading_live."
 
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(value), do: value
@@ -459,6 +499,24 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
           version_id={@version.id}
           class="px-2 py-1 text-[11px]"
         />
+
+        <button
+          :if={next_stage(@version) != nil}
+          type="button"
+          id="promote-button"
+          class="px-2 py-1 border border-primary/40 text-primary bg-primary/10 text-[11px] font-data uppercase tracking-wide hover:bg-primary/20"
+          phx-click="promote"
+          data-confirm={promote_confirm(next_stage(@version))}
+        >
+          Promote to {next_stage(@version)}
+        </button>
+        <span
+          :if={@version.lifecycle_stage == "discovery" and is_nil(@version.target_pool_id)}
+          class="text-[11px] font-data text-base-content/40"
+          title="discovery -> quarantine requires a target pool"
+        >
+          Set a target pool to promote
+        </span>
       </div>
 
       <div class="flex-1 overflow-y-auto flex flex-col gap-3">

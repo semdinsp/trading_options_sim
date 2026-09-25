@@ -360,6 +360,47 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ ">Value<"
   end
 
+  describe "promote button" do
+    test "walks discovery -> quarantine -> test_portfolio, one valid step at a time", %{
+      conn: conn
+    } do
+      strategy = strategy_fixture()
+      pool = pool_fixture("PROMO1")
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions/#{version.id}")
+      assert has_element?(view, "#promote-button", "Promote to quarantine")
+
+      view |> element("#promote-button") |> render_click()
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
+      assert has_element?(view, "#promote-button", "Promote to test_portfolio")
+
+      view |> element("#promote-button") |> render_click()
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "test_portfolio"
+
+      # test_portfolio is the last stage here; going live is a trading_live link.
+      refute has_element?(view, "#promote-button")
+    end
+
+    test "a discovery version without a target pool gets a hint, not a button", %{conn: conn} do
+      version = version_fixture(strategy_fixture())
+
+      {:ok, view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      refute has_element?(view, "#promote-button")
+      assert html =~ "Set a target pool to promote"
+    end
+
+    test "a retired version has no promote button (only Unretire)", %{conn: conn} do
+      version = version_fixture(strategy_fixture())
+      {:ok, retired} = Sim.downgrade_strategy_version(version, "retired")
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions/#{retired.id}")
+
+      refute has_element?(view, "#promote-button")
+    end
+  end
+
   describe "recent fills panel" do
     test "hidden when no fills exist yet", %{conn: conn} do
       strategy = strategy_fixture()
