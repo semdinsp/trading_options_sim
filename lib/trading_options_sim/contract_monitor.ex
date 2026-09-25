@@ -497,6 +497,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       position_open?: state.position_open?,
       entered_at: state.entered_at,
       min_hold_seconds: state.min_hold_seconds,
+      expiry_close_dte: state.expiry_close_dte,
       ibkr_live_subscribed?: state.ibkr_live_subscribed?,
       last_snapshot: state.last_snapshot
     }
@@ -681,7 +682,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
         state
         |> Map.put(:last_snapshot, snapshot)
-        |> maybe_transition(snapshot)
+        |> maybe_transition_before_expiry(snapshot, dte)
     end
   end
 
@@ -717,7 +718,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
               %{state | stale_warned?: false}
               |> Map.put(:last_snapshot, snapshot)
-              |> maybe_transition(snapshot)
+              |> maybe_transition_before_expiry(snapshot, dte)
             else
               warn_stale(state, tick[:at])
             end
@@ -805,11 +806,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Falls back to the stock tick's spot only if IBKR didn't send
   # und_price on this particular computation.
   defp build_ibkr_live_snapshot(tick, spot, signal_values) do
-    quote_values =
-      case Map.get(tick, :quote) do
-        nil -> %{}
-        q -> %{"run_bid" => q[:bid], "run_ask" => q[:ask], "run_quote_delayed" => q[:delayed]}
-      end
+    quote_values = quote_values(Map.get(tick, :quote))
 
     signal_values
     |> Map.merge(%{
@@ -832,6 +829,31 @@ defmodule TradingOptionsSim.ContractMonitor do
       )
     )
   end
+
+  # run_bid/run_ask only when they are a real market. IBKR sends -1.0 for
+  # a closed book; that reached the snapshot raw until 2026-09-24, so a
+  # rule like `run_bid lt 5` could fire on "no market". Absent instead,
+  # which fails closed, matching trading_live (D2). Fills already
+  # ignored it (quote_from/1), as did the derived spread keys.
+  defp quote_values(%{} = q) do
+    bid = q[:bid]
+    ask = q[:ask]
+    real? = &(is_number(&1) and &1 > 0)
+    crossed? = real?.(bid) and real?.(ask) and ask < bid
+
+    [
+      {"run_bid", (real?.(bid) and not crossed?) && bid},
+      {"run_ask", (real?.(ask) and not crossed?) && ask},
+      {"run_quote_delayed", q[:delayed]}
+    ]
+    |> Enum.reject(fn {_k, v} -> v in [nil, false] end)
+    |> Map.new()
+    |> then(fn m ->
+      if Map.has_key?(m, "run_bid") or Map.has_key?(m, "run_ask"), do: m, else: %{}
+    end)
+  end
+
+  defp quote_values(_quote), do: %{}
 
   # Values a rule needs but can't compute itself (RuleEngine only
   # compares): run_spread, run_spread_pct, run_theta_pct, run_lambda.
@@ -861,6 +883,23 @@ defmodule TradingOptionsSim.ContractMonitor do
     # BlackScholes' theta is per YEAR; derived_values/5 wants per day.
     |> Map.merge(derived_values(priced.price, spot, priced.delta, priced.theta / 365, nil))
   end
+
+  # Inside the expiry window (dte <= expiry_close_dte, 1 by default) a
+  # flat monitor opens nothing new: the position would have to be closed
+  # by EodCloser the same day. An open position keeps its normal rule
+  # exits; EodCloser flattens whatever is left in that day's close window
+  # with exit_reason "expiry", overriding overnight_hold.
+  #
+  # Until 2026-09-24 expiry_close_dte was stored but never read -- both
+  # checks were `dte <= 0` -- so the sim held into expiry day and closed
+  # at intrinsic. trading_live closes at 1 DTE; this keeps the two
+  # comparable (its OPTIONS_PROMOTION_PLAN.md, D3).
+  defp maybe_transition_before_expiry(%{position_open?: false} = state, _snapshot, dte)
+       when dte <= state.expiry_close_dte,
+       do: state
+
+  defp maybe_transition_before_expiry(state, snapshot, _dte),
+    do: maybe_transition(state, snapshot)
 
   defp maybe_transition(%{position_open?: false} = state, snapshot) do
     if RuleEngine.evaluate(state.entry_rule, snapshot) and session_open?(state) do
@@ -1414,12 +1453,18 @@ defmodule TradingOptionsSim.ContractMonitor do
     submit_exit(state, snapshot, "expiry")
   end
 
-  # "YYYYMMDD" wire-format string, per tws_api's own convention (plan §1)
-  # — parses without any Date/Calendar library dependency this app
-  # otherwise has no need for.
-  defp days_to_expiry(expiry) when is_binary(expiry) do
+  @doc """
+  Trading days' calendar distance from today to `expiry` ("YYYYMMDD"),
+  counted on the **US/Eastern** date. UTC flips at 8pm ET, so a UTC count
+  said "1 DTE" for the last four hours of the day before -- and disagreed
+  with trading_live, which counts on the ET trading date.
+  """
+  @spec days_to_expiry(String.t(), Date.t()) :: integer()
+  def days_to_expiry(expiry, today \\ et_today()) when is_binary(expiry) do
     <<y::binary-size(4), m::binary-size(2), d::binary-size(2)>> = expiry
     expiry_date = Date.new!(String.to_integer(y), String.to_integer(m), String.to_integer(d))
-    Date.diff(expiry_date, Date.utc_today())
+    Date.diff(expiry_date, today)
   end
+
+  defp et_today, do: DateTime.now!("America/New_York") |> DateTime.to_date()
 end

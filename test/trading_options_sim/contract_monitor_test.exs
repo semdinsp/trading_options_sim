@@ -705,7 +705,11 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       # Expiry is today (0 DTE) — days_to_expiry/1 returns 0, which is
       # <= the default expiry_close_dte cutoff of 1, so an already-open
       # position should force-close on the very next tick, not enter.
-      today = Date.utc_today() |> Date.to_string() |> String.replace("-", "")
+      # The ET trading date, as days_to_expiry/1 counts it (UTC flips at
+      # 8pm ET and would make this 1 DTE for the evening).
+      today =
+        DateTime.now!("America/New_York") |> DateTime.to_date() |> Calendar.strftime("%Y%m%d")
+
       key = {symbol, today, Decimal.new("150.00"), "C"}
 
       {:ok, run} =
@@ -1216,6 +1220,44 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert fill.pricing_snapshot["model_mid_divergence"] == nil
     end
 
+    # D2: IBKR's closed-book -1.0 must never reach a rule as a price.
+    test "a closed-book quote puts no run_bid/run_ask in the snapshot" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 1.0e9}
+        })
+
+      for {sym, bid, ask, expect_keys?} <- [
+            {"QPAR1", -1.0, -1.0, false},
+            {"QPAR2", 6.10, 5.90, false},
+            {"QPAR3", 5.95, 6.05, true}
+          ] do
+        occ = sym <> "_OCC"
+
+        {pid, _run} =
+          start_monitor(version, contract_key(sym), pricing_backend: :ibkr_live, occ_symbol: occ)
+
+        await_ibkr_live(occ)
+
+        broadcast_option_greeks(occ, %{
+          opt_price: 6.00,
+          delta: 0.5,
+          theta: -0.03,
+          und_price: 150.0
+        })
+
+        broadcast_option_quote(occ, %{bid: bid, bid_size: 10})
+        broadcast_option_quote(occ, %{ask: ask, ask_size: 10})
+        sync(pid)
+        broadcast_underlying_price(sym, 150.0)
+        sync(pid)
+
+        snap = ContractMonitor.snapshot(pid).last_snapshot
+        assert Map.has_key?(snap, "run_bid") == expect_keys?, "#{sym} run_bid"
+        assert Map.has_key?(snap, "run_ask") == expect_keys?, "#{sym} run_ask"
+      end
+    end
+
     # The point of run_spread_pct: gate entries on execution cost.
     test "an entry rule on run_spread_pct fires on a tight book and not on a wide one" do
       spread_rule = fn ->
@@ -1656,6 +1698,56 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       v = ContractMonitor.derived_values(20.73, nil, 0.57, nil, nil)
       assert v == %{}
+    end
+  end
+
+  describe "expiry window and quote parity (trading_live D2/D3)" do
+    test "days_to_expiry/2 counts calendar days on the given date" do
+      assert ContractMonitor.days_to_expiry("20261120", ~D[2026-11-19]) == 1
+      assert ContractMonitor.days_to_expiry("20261120", ~D[2026-11-20]) == 0
+      assert ContractMonitor.days_to_expiry("20261120", ~D[2026-09-24]) == 57
+    end
+
+    test "a flat monitor does not enter inside its expiry window" do
+      tomorrow =
+        DateTime.now!("America/New_York")
+        |> DateTime.to_date()
+        |> Date.add(1)
+        |> Calendar.strftime("%Y%m%d")
+
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0}
+        })
+
+      {pid, run} = start_monitor(version, {"EXPWIN1", tomorrow, Decimal.new("150.00"), "C"})
+
+      broadcast_underlying_price("EXPWIN1", 150.0)
+      sync(pid)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    # Must not fire on healthy input: two days out still enters.
+    test "a flat monitor two days before expiry still enters" do
+      two_days =
+        DateTime.now!("America/New_York")
+        |> DateTime.to_date()
+        |> Date.add(2)
+        |> Calendar.strftime("%Y%m%d")
+
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0}
+        })
+
+      {pid, _run} = start_monitor(version, {"EXPWIN2", two_days, Decimal.new("150.00"), "C"})
+
+      broadcast_underlying_price("EXPWIN2", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
     end
   end
 

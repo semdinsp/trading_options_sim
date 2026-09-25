@@ -125,7 +125,7 @@ defmodule TradingOptionsSim.EodCloser do
       %{exchange: nil} ->
         :ok
 
-      %{exchange: exchange} ->
+      %{exchange: exchange} = snapshot ->
         case ExchangeSessionCache.fetch(exchange) do
           nil ->
             :ok
@@ -134,6 +134,16 @@ defmodule TradingOptionsSim.EodCloser do
             cond do
               not within_close_window?(session, now, exchange) ->
                 :ok
+
+              # A contract inside its expiry window closes today whatever
+              # overnight_hold says: holding it would carry it into expiry
+              # day. Matches trading_live's 1-DTE close (D3).
+              expiring?(snapshot) ->
+                Logger.info(
+                  "EodCloser: closing strategy_version #{strategy_version_id} #{snapshot.symbol} #{snapshot.expiry} — inside its expiry window"
+                )
+
+                send(pid, {:force_close_eod, :expiry})
 
               overnight_hold?(strategy_version_id) ->
                 Logger.info(
@@ -166,6 +176,12 @@ defmodule TradingOptionsSim.EodCloser do
   defp overnight_hold?(strategy_version_id) do
     Sim.get_strategy_version!(strategy_version_id).overnight_hold
   end
+
+  defp expiring?(%{expiry: expiry, expiry_close_dte: cutoff})
+       when is_binary(expiry) and is_integer(cutoff),
+       do: TradingOptionsSim.ContractMonitor.days_to_expiry(expiry) <= cutoff
+
+  defp expiring?(_snapshot), do: false
 
   defp fetch_snapshot(pid) do
     TradingOptionsSim.ContractMonitor.snapshot(pid)
