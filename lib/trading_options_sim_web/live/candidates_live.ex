@@ -31,6 +31,8 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
 
   use TradingOptionsSimWeb, :live_view
 
+  alias TradingOptionsSimWeb.StrategySearch
+
   alias TradingOptionsSim.CandidateGates
   alias TradingOptionsSim.Sim
 
@@ -46,6 +48,7 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
     {:ok,
      socket
      |> assign(:page_title, "Candidates")
+     |> assign(:search, "")
      |> assign(:show_all?, false)
      |> assign(:near_miss_only?, false)
      |> assign(:tag_filter, nil)
@@ -67,6 +70,13 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   end
 
   @impl true
+  # Shared search box (<.search_box>): strategy name or UUID fragment,
+  # see TradingOptionsSimWeb.StrategySearch. Applied inside the load step
+  # so it survives the periodic refresh.
+  def handle_event("search", %{"q" => q}, socket) do
+    {:noreply, socket |> assign(:search, q) |> assign_candidates()}
+  end
+
   def handle_event("toggle_show_all", _params, socket) do
     {:noreply, socket |> assign(:show_all?, !socket.assigns.show_all?) |> assign_candidates()}
   end
@@ -133,6 +143,10 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
       |> maybe_filter_sample_floor(socket.assigns.show_all?)
       |> maybe_filter_near_miss(socket.assigns.near_miss_only?)
       |> maybe_filter_tag(socket.assigns.tag_filter)
+      |> StrategySearch.filter(
+        socket.assigns.search,
+        &{&1.strategy_name, [&1.strategy_version_id, &1[:strategy_id]]}
+      )
       |> sort_rows(socket.assigns.sort_by, socket.assigns.sort_dir)
 
     socket
@@ -242,6 +256,8 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
       </div>
 
       <div class="flex flex-wrap items-center gap-3 mb-3">
+        <.search_box query={@search} />
+
         <form id="tag-filter-form" phx-change="filter_tag" class="inline-flex">
           <select name="tag_id" class="select select-xs select-bordered font-data text-[11px]">
             <option value="all" selected={is_nil(@tag_filter)}>All Tags</option>
