@@ -69,9 +69,19 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscription do
 
   use GenServer
 
+  alias TradingOptionsSim.Pricing.ResubscribeBackoff
+
   require Logger
 
-  defstruct [:symbol, depend_count: 0, subscribed?: false, resubscribe_count: 0]
+  defstruct [
+    :symbol,
+    depend_count: 0,
+    subscribed?: false,
+    resubscribe_count: 0,
+    # Backoff state for retrying a failed subscribe; see ResubscribeBackoff.
+    retry_attempt: 0,
+    retry_timer: nil
+  ]
 
   @type symbol :: String.t()
 
@@ -195,7 +205,7 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscription do
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "system:health")
 
     state = %__MODULE__{symbol: symbol}
-    {:ok, %{state | subscribed?: subscribe(state) == :ok}}
+    {:ok, ResubscribeBackoff.after_attempt(%{state | subscribed?: subscribe(state) == :ok})}
   end
 
   @impl true
@@ -225,7 +235,7 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscription do
   def handle_info({:nodeup, node}, state) do
     if node == hub_node() do
       Logger.info("PolygonSubscription: #{state.symbol} — trading_hub back up, re-subscribing")
-      {:noreply, resubscribe(state)}
+      {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
     else
       {:noreply, state}
     end
@@ -240,7 +250,7 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscription do
         state
       ) do
     Logger.info("PolygonSubscription: #{state.symbol} — polygon re-authed, re-subscribing")
-    {:noreply, resubscribe(state)}
+    {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
   end
 
   # The hub rejected our symbol and has already dropped its own refcount
@@ -263,6 +273,14 @@ defmodule TradingOptionsSim.Pricing.PolygonSubscription do
   # connection GenServer crashed with FunctionClauseError on every
   # reconnect after taking "account:equity" broadcasts it had no clause
   # for.
+  # A failed subscribe keeps retrying with backoff until the hub accepts
+  # (see ResubscribeBackoff) -- a single attempt at :nodeup lands while
+  # the restarted hub isn't taking subscriptions yet.
+  def handle_info(:retry_subscribe, state) do
+    state = %{state | retry_timer: nil}
+    {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
 
   @impl true

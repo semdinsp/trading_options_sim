@@ -36,6 +36,13 @@ config :trading_options_sim, :underlying_first_tick_timeout_ms, 0
 # production timeout waiting for something impossible.
 config :trading_options_sim, :polygon_first_tick_timeout_ms, 0
 
+# No trading_hub exists in :test, so every subscription holder fails its
+# first subscribe and would retry for the whole run (see
+# ResubscribeBackoff). A 60s base keeps that out of the logs and keeps
+# "re-subscribes exactly once" assertions deterministic; tests that
+# exercise the retry itself lower it locally.
+config :trading_options_sim, :resubscribe_retry_base_ms, 60_000
+
 # A node name that will never actually exist, so nothing connects to it
 # -- but UnderlyingSubscription's :nodeup handler needs a configured
 # value to compare against, otherwise the hub-restart recovery path is
