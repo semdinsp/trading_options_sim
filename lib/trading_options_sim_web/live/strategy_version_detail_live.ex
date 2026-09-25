@@ -414,6 +414,42 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     }
   end
 
+  @doc false
+  # How old each piece of a monitor's data is, for the line under "Live
+  # ticks & signals". The monitor rebuilds its snapshot only on an
+  # underlying tick, and a quiet contract (TLT) can go 30s+ without a
+  # changed quote, so a still page is ambiguous. Ages past the monitor's
+  # own staleness limit (max_tick_age_ms) are flagged; that is the point
+  # at which it stops evaluating. Option tick and quote are omitted for a
+  # monitor that has no IBKR data (the Black-Scholes backend).
+  def data_ages(snapshot, now) do
+    limit_s = div(Map.get(snapshot, :max_tick_age_ms) || 60_000, 1000)
+
+    [
+      {"Evaluated", :evaluated_at, "When this snapshot was last rebuilt (on an underlying tick)"},
+      {"Option tick", :option_tick_at, "Last IBKR option price/greeks tick"},
+      {"Quote", :quote_at, "Last IBKR bid/ask update for the option"}
+    ]
+    |> Enum.flat_map(fn {label, key, title} ->
+      case Map.get(snapshot, key) do
+        %DateTime{} = at ->
+          age_s = max(DateTime.diff(now, at, :second), 0)
+          [%{label: label, age_s: age_s, stale?: age_s > limit_s, title: title}]
+
+        nil when key == :evaluated_at ->
+          [%{label: label, age_s: nil, stale?: false, title: title}]
+
+        nil ->
+          []
+      end
+    end)
+  end
+
+  defp format_age(nil), do: "never"
+  defp format_age(s) when s < 60, do: "#{s}s ago"
+  defp format_age(s) when s < 3600, do: "#{div(s, 60)}m #{rem(s, 60)}s ago"
+  defp format_age(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m ago"
+
   defp number(%Decimal{} = d), do: Decimal.to_float(d)
   defp number(n) when is_number(n), do: n
   defp number(_), do: nil
@@ -820,6 +856,16 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
         <div>
           <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50 mb-1">
             Live ticks &amp; signals
+          </div>
+
+          <div class="font-data text-[11px] text-base-content/50 mb-1 flex flex-wrap gap-x-3">
+            <span
+              :for={item <- data_ages(@entry.snapshot, DateTime.utc_now())}
+              class={if item.stale?, do: "text-error", else: nil}
+              title={item.title}
+            >
+              {item.label} {format_age(item.age_s)}
+            </span>
           </div>
 
           <div :if={map_size(@entry.snapshot.last_snapshot) == 0} class="text-base-content/30 text-sm">
