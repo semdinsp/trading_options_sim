@@ -1297,6 +1297,99 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       end
     end
 
+    # snapshot_keys/0 is exported to trading_live as the contract of what
+    # this app supplies. Pin each group against what is actually written,
+    # so adding or renaming a key without updating the list goes red.
+    test "snapshot_keys/0 matches the pricing keys a live monitor writes" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 1.0e9}
+        })
+
+      occ = "KEYS1_OCC"
+
+      {pid, _run} =
+        start_monitor(version, contract_key("KEYS1"),
+          pricing_backend: :ibkr_live,
+          occ_symbol: occ
+        )
+
+      await_ibkr_live(occ)
+
+      broadcast_option_greeks(occ, %{
+        opt_price: 6.00,
+        delta: 0.5,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        implied_vol: 0.3,
+        und_price: 150.0
+      })
+
+      broadcast_option_quote(occ, %{bid: 5.95, bid_size: 10, delayed: true})
+      broadcast_option_quote(occ, %{ask: 6.05, ask_size: 10})
+      sync(pid)
+      broadcast_underlying_price("KEYS1", 150.0)
+      sync(pid)
+
+      groups = ContractMonitor.snapshot_key_groups()
+
+      written =
+        ContractMonitor.snapshot(pid).last_snapshot
+        |> Map.keys()
+        |> Enum.filter(&String.starts_with?(&1, "run_"))
+        |> Kernel.--(groups.derived ++ groups.polygon)
+        |> Enum.sort()
+
+      assert written == Enum.sort(groups.pricing)
+    end
+
+    test "snapshot_keys/0 matches the derived keys" do
+      keys =
+        TradingCore.Options.Derived.values(6.0, 150.0, 0.5, -0.03, %{bid: 5.95, ask: 6.05})
+        |> Map.keys()
+        |> Enum.sort()
+
+      assert keys == Enum.sort(ContractMonitor.snapshot_key_groups().derived)
+    end
+
+    test "snapshot_keys/0 matches the Polygon keys of fully warmed features" do
+      alias TradingCore.Polygon.UnderlyingFeatures, as: UF
+      # 10:00 ET on a weekday, inside the regular session.
+      t0 = DateTime.to_unix(~U[2026-09-23 14:00:00Z], :millisecond)
+      at = fn ms -> DateTime.from_unix!(ms, :millisecond) end
+
+      f =
+        Enum.reduce(0..400, UF.new(), fn s, f ->
+          ms = t0 + s * 1_000
+
+          f
+          |> UF.apply_trade(
+            %{last: Decimal.new("100.00"), size: Decimal.new("10"), timestamp: at.(ms)},
+            ms
+          )
+          |> UF.apply_quote(
+            %{
+              bid: Decimal.new("99.99"),
+              ask: Decimal.new("100.01"),
+              bid_size: Decimal.new("3"),
+              ask_size: Decimal.new("1"),
+              timestamp: at.(ms)
+            },
+            ms
+          )
+          |> then(fn f ->
+            if rem(s, 60) == 0,
+              do: UF.apply_aggregate(f, %{volume: 1000, timestamp: at.(ms)}, ms),
+              else: f
+          end)
+        end)
+
+      keys = f |> UF.to_snapshot(t0 + 400_000) |> Map.keys() |> Enum.sort()
+
+      assert keys == Enum.sort(ContractMonitor.snapshot_key_groups().polygon)
+    end
+
     test "a separate ask tick does not erase the bid that preceded it" do
       {pid, run} = enter_with_quote("IBKRQ1", "IBKRQ1_OCC", [])
 
