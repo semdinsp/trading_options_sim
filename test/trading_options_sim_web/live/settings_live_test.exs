@@ -53,6 +53,28 @@ defmodule TradingOptionsSimWeb.SettingsLiveTest do
     assert html =~ "Give the token a label"
   end
 
+  # Regression, 2026-09-25: phx-change re-renders the form on every click,
+  # and the checkboxes had no `checked` binding, so ticking a second scope
+  # cleared the first -- it behaved like single-select.
+  test "ticking several scopes keeps all of them checked", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/settings")
+
+    view
+    |> form("#api-token-form",
+      api_token: %{
+        "label" => "trading_live",
+        "scopes" => ["strategies:read", "strategies:write", "target_pools:read"]
+      }
+    )
+    |> render_change()
+
+    for scope <- ["strategies:read", "strategies:write", "target_pools:read"] do
+      assert has_element?(view, "#api-token-form input[value='#{scope}'][checked]")
+    end
+
+    refute has_element?(view, "#api-token-form input[value='tags:write'][checked]")
+  end
+
   test "rejects no scopes selected", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/settings")
 

@@ -188,6 +188,12 @@ defmodule TradingOptionsSimWeb.SettingsLive do
     to_form(%{"label" => "", "scopes" => []}, as: "api_token")
   end
 
+  defp selected_scopes(form) do
+    form
+    |> Phoenix.HTML.Form.input_value(:scopes)
+    |> List.wrap()
+  end
+
   defp scopes_from_params(params) do
     params
     |> Map.get("scopes", [])
@@ -352,10 +358,15 @@ defmodule TradingOptionsSimWeb.SettingsLive do
               </span>
               <div class="flex flex-wrap gap-2">
                 <label :for={scope <- @available_scopes} class="label cursor-pointer gap-1">
+                  <%!-- checked must come from the form: phx-change re-renders on
+                       every click, and a checkbox with no checked binding is
+                       reset to unchecked -- so ticking one scope cleared the
+                       others, which looked like single-select. --%>
                   <input
                     type="checkbox"
                     name="api_token[scopes][]"
                     value={scope}
+                    checked={scope in selected_scopes(@token_form)}
                     class="checkbox checkbox-sm"
                   />
                   <span class="font-data text-xs">{scope}</span>
