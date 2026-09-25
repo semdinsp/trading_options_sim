@@ -71,20 +71,47 @@ defmodule TradingOptionsSim.SimActivator do
   def activate(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
 
   def activate(%StrategyVersion{} = version) do
+    case activate_report(version) do
+      {:ok, pids, unsubscribed_symbols, []} ->
+        {:ok, pids, unsubscribed_symbols}
+
+      {:ok, pids, unsubscribed_symbols, _transient} ->
+        TradingOptionsSim.SimReactivator.retry_later(version.id)
+        {:ok, pids, unsubscribed_symbols}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  `activate/1`, also returning the pool symbols skipped because the hub
+  didn't answer (`{:error, :hub_unavailable}` from ContractSelector) --
+  the ones worth retrying. `SimReactivator`'s retry loop uses this to
+  know when it's done; a symbol skipped for a real answer
+  (`:no_listed_contract`, `:no_spot`) is not in the list and is never
+  retried.
+  """
+  @spec activate_report(StrategyVersion.t()) ::
+          {:ok, [pid()], [String.t()], [String.t()]}
+          | {:error, :no_target_pool}
+          | {:error, :unsupported_leg_config}
+  def activate_report(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
+
+  def activate_report(%StrategyVersion{} = version) do
     with :ok <- validate_leg_config(version.option_leg_config) do
       pool = Sim.get_target_pool!(version.target_pool_id)
 
-      pids =
-        pool.target_pool_members
-        |> Enum.map(&start_for_resolved_member(version, &1))
-        |> Enum.reject(&is_nil/1)
+      results = Enum.map(pool.target_pool_members, &start_for_resolved_member(version, &1))
+      pids = Enum.filter(results, &is_pid/1)
+      transient = for {:transient, symbol} <- results, do: symbol
 
       unsubscribed_symbols =
         pids |> Enum.reject(&ibkr_live_subscribed?/1) |> Enum.map(&monitor_symbol/1)
 
       {:ok, _updated} = Sim.mark_activated(version)
 
-      {:ok, pids, unsubscribed_symbols}
+      {:ok, pids, unsubscribed_symbols, transient}
     end
   end
 
@@ -323,6 +350,14 @@ defmodule TradingOptionsSim.SimActivator do
     case resolve_for_symbol(member.symbol, version.option_leg_config) do
       {:ok, contract_template} ->
         start_for_member(version, member, contract_template)
+
+      {:error, :hub_unavailable} ->
+        Logger.warning(
+          "SimActivator: #{member.symbol} for version #{version.id} — trading_hub didn't " <>
+            "answer the contract lookup; will retry"
+        )
+
+        {:transient, member.symbol}
 
       {:error, reason} ->
         Logger.warning(

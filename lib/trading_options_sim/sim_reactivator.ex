@@ -61,13 +61,43 @@ defmodule TradingOptionsSim.SimReactivator do
   @max_attempts 5
   @retry_delay_ms 2_000
 
+  # Per-version retries after trading_hub failed to ANSWER a contract
+  # lookup (SimActivator's :hub_unavailable) -- distinct from the
+  # whole-pass retries above, which handle a pass that raised. Backoff
+  # doubles from the base: 30s, 60s, 120s, 240s, 480s by default.
+  @max_version_attempts 5
+  @default_version_retry_base_ms 30_000
+
   def start_link(_args \\ []) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end
 
+  @doc """
+  Re-activates `version_id` later, with backoff, because some pool
+  member's contract lookup went unanswered (a busy or unreachable hub),
+  not because the contract doesn't exist. Called by
+  `SimActivator.activate/1`. A no-op while a retry for that version is
+  already pending, and a no-op when this process isn't running (tests
+  run without it).
+  """
+  @spec retry_later(String.t()) :: :ok
+  def retry_later(version_id), do: GenServer.cast(__MODULE__, {:retry_later, version_id})
+
   @impl true
   def init(_args) do
-    {:ok, %{attempt: 1, trigger: :boot}, {:continue, :reactivate}}
+    {:ok, %{attempt: 1, trigger: :boot, pending: %{}}, {:continue, :reactivate}}
+  end
+
+  @impl true
+  def handle_cast({:retry_later, version_id}, state) do
+    pending = Map.get(state, :pending, %{})
+
+    if Map.has_key?(pending, version_id) do
+      {:noreply, state}
+    else
+      schedule_version_retry(version_id, 1)
+      {:noreply, Map.put(state, :pending, Map.put(pending, version_id, 1))}
+    end
   end
 
   @impl true
@@ -79,6 +109,32 @@ defmodule TradingOptionsSim.SimReactivator do
   @impl true
   def handle_info({:retry, attempt}, state) do
     do_reactivate(%{state | attempt: attempt})
+  end
+
+  def handle_info({:retry_version, version_id}, state) do
+    pending = Map.get(state, :pending, %{})
+    attempt = Map.get(pending, version_id, 1)
+    pending = Map.delete(pending, version_id)
+
+    pending =
+      case retry_version(version_id) do
+        :done ->
+          pending
+
+        :still_unanswered when attempt < @max_version_attempts ->
+          schedule_version_retry(version_id, attempt + 1)
+          Map.put(pending, version_id, attempt + 1)
+
+        :still_unanswered ->
+          Logger.error(
+            "SimReactivator: contract lookups for version #{version_id} still unanswered " <>
+              "after #{@max_version_attempts} retries -- giving up; re-activate it manually"
+          )
+
+          pending
+      end
+
+    {:noreply, Map.put(state, :pending, pending)}
   end
 
   # MonitorSupervisor restarted (crash, or its own restart-intensity
@@ -107,6 +163,47 @@ defmodule TradingOptionsSim.SimReactivator do
       pid ->
         Process.monitor(pid)
     end
+  end
+
+  # :done once no member is left unanswered -- or the version was
+  # deactivated or deleted meanwhile, when there's nothing to retry.
+  defp retry_version(version_id) do
+    version = TradingOptionsSim.Repo.get(TradingOptionsSim.Sim.StrategyVersion, version_id)
+
+    # Gone, deactivated or soft-deleted meanwhile: nothing to retry. (A
+    # hard delete used to raise here and be counted as "still
+    # unanswered" until the retries ran out.)
+    if is_nil(version) or is_nil(version.activated_at) or not is_nil(version.deactivated_at) or
+         not is_nil(version.deleted_at) do
+      :done
+    else
+      case SimActivator.activate_report(version) do
+        {:ok, _pids, _unsubscribed, []} ->
+          Logger.info("SimReactivator: version #{version_id} fully activated on retry")
+          :done
+
+        {:ok, _pids, _unsubscribed, _transient} ->
+          :still_unanswered
+
+        {:error, _reason} ->
+          :done
+      end
+    end
+  rescue
+    error ->
+      Logger.warning("SimReactivator: retry of #{version_id} raised #{inspect(error)}")
+      :still_unanswered
+  end
+
+  defp schedule_version_retry(version_id, attempt) do
+    base =
+      Application.get_env(
+        :trading_options_sim,
+        :version_retry_base_ms,
+        @default_version_retry_base_ms
+      )
+
+    Process.send_after(self(), {:retry_version, version_id}, base * Integer.pow(2, attempt - 1))
   end
 
   defp do_reactivate(state) do
