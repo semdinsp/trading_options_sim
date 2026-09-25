@@ -231,6 +231,13 @@ defmodule TradingOptionsSim.ContractMonitor do
     # with trading_system and trading_live: params["min_hold_seconds"].
     min_hold_seconds: nil,
     last_snapshot: %{},
+    # When last_snapshot was last rebuilt, and (:ibkr_live only) the
+    # hub timestamps of the option tick and bid/ask quote it was built
+    # from. Display only: the version page shows their ages so a quiet
+    # contract ("no new data") can be told apart from a stale one.
+    evaluated_at: nil,
+    option_tick_at: nil,
+    quote_at: nil,
     # Set once an unpriced fill has been skipped and logged, cleared by
     # the next priced fill -- one warning per episode, not one per tick.
     unpriced_warned?: false,
@@ -556,7 +563,11 @@ defmodule TradingOptionsSim.ContractMonitor do
       min_hold_seconds: state.min_hold_seconds,
       expiry_close_dte: state.expiry_close_dte,
       ibkr_live_subscribed?: state.ibkr_live_subscribed?,
-      last_snapshot: state.last_snapshot
+      last_snapshot: state.last_snapshot,
+      evaluated_at: state.evaluated_at,
+      option_tick_at: state.option_tick_at,
+      quote_at: state.quote_at,
+      max_tick_age_ms: max_tick_age_ms()
     }
 
     {:reply, reply, state}
@@ -739,6 +750,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
         state
         |> Map.put(:last_snapshot, snapshot)
+        |> Map.put(:evaluated_at, DateTime.utc_now())
         |> maybe_transition_before_expiry(snapshot, dte)
     end
   end
@@ -768,12 +780,13 @@ defmodule TradingOptionsSim.ContractMonitor do
 
           {:ok, tick} ->
             now = DateTime.utc_now()
+            state = %{state | option_tick_at: tick[:at], quote_at: quote_received_at(tick)}
 
             if fresh?(tick[:at], now) do
               tick = drop_stale_quote(tick, now)
               snapshot = build_ibkr_live_snapshot(tick, spot, signal_values(state))
 
-              %{state | stale_warned?: false}
+              %{state | stale_warned?: false, evaluated_at: now}
               |> Map.put(:last_snapshot, snapshot)
               |> maybe_transition_before_expiry(snapshot, dte)
             else
@@ -817,6 +830,9 @@ defmodule TradingOptionsSim.ContractMonitor do
     do: DateTime.diff(now, at, :millisecond) <= max_tick_age_ms()
 
   defp fresh?(_at, _now), do: false
+
+  defp quote_received_at(%{quote: %{received_at: at}}), do: at
+  defp quote_received_at(_tick), do: nil
 
   defp drop_stale_quote(%{quote: %{received_at: at}} = tick, now) do
     if fresh?(at, now), do: tick, else: %{tick | quote: nil}

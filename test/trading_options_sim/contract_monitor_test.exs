@@ -1095,6 +1095,40 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       {pid, run}
     end
 
+    test "snapshot reports when it was evaluated and how old its option data is" do
+      {pid, _run} = start_live("AGE1", "AGE1_OCC")
+
+      assert %{evaluated_at: nil, option_tick_at: nil, quote_at: nil} =
+               ContractMonitor.snapshot(pid)
+
+      broadcast_aged("AGE1_OCC", @greeks, 5_000)
+      broadcast_aged("AGE1_OCC", %{bid: 5.0, bid_size: 10}, 20_000)
+      before = DateTime.utc_now()
+      broadcast_underlying_price("AGE1", 150.0)
+      sync(pid)
+
+      snap = ContractMonitor.snapshot(pid)
+      assert DateTime.compare(snap.evaluated_at, before) != :lt
+      assert_in_delta DateTime.diff(before, snap.option_tick_at, :millisecond), 5_000, 1_000
+      assert_in_delta DateTime.diff(before, snap.quote_at, :millisecond), 20_000, 1_000
+      assert snap.max_tick_age_ms == 60_000
+    end
+
+    # A stale tick is still reported, so the page can show how stale.
+    test "a stale option tick updates option_tick_at but not evaluated_at" do
+      {pid, _run} = start_live("AGE2", "AGE2_OCC")
+      broadcast_aged("AGE2_OCC", @greeks, 120_000)
+
+      capture_log(fn ->
+        broadcast_underlying_price("AGE2", 150.0)
+        sync(pid)
+      end)
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.evaluated_at == nil
+      assert DateTime.diff(DateTime.utc_now(), snap.option_tick_at, :second) >= 119
+    end
+
     test "a stale option tick is not traded on" do
       {pid, run} = start_live("STALE1", "STALE1_OCC")
       broadcast_aged("STALE1_OCC", @greeks, 120_000)
