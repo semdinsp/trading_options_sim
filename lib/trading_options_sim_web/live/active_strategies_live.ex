@@ -291,6 +291,11 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
                 <span class="text-base-content/40">v{entry.version.version}</span>
               </h2>
             </.link>
+            <.copy_uuid_button
+              id={"copy-version-id-#{entry.version.id}"}
+              value={entry.version.id}
+              title="Copy version ID"
+            />
             <.lifecycle_badge stage={entry.version.lifecycle_stage} />
             <%!-- Read-only here; tags are added/removed on /strategy_versions. --%>
             <span

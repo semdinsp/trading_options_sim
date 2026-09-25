@@ -213,6 +213,17 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     assert html =~ "Untagged Active"
   end
 
+  test "each version has a button that copies its UUID", %{conn: conn} do
+    version = activated_version_fixture("Copy Id Strategy", ["COPYID1"])
+
+    {:ok, view, _html} = live(conn, ~p"/active_strategies")
+
+    assert has_element?(
+             view,
+             "button#copy-version-id-#{version.id}[data-copy-value='#{version.id}']"
+           )
+  end
+
   describe "stage filter pills" do
     defp set_stage(version, stage) do
       version
