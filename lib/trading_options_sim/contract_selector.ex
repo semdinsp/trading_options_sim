@@ -209,6 +209,11 @@ defmodule TradingOptionsSim.ContractSelector do
       # transient, same distinction as first_listed/3.
       {:error, _transient} ->
         {:error, :hub_unavailable}
+
+      # Some other reply shape: the hub did answer, just not with a
+      # price. Treated as "no spot" rather than raising CaseClauseError.
+      _other ->
+        {:error, :no_spot}
     end
   end
 

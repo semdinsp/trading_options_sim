@@ -168,9 +168,12 @@ defmodule TradingOptionsSim.SimReactivator do
   # :done once no member is left unanswered -- or the version was
   # deactivated or deleted meanwhile, when there's nothing to retry.
   defp retry_version(version_id) do
-    version = Sim.get_strategy_version!(version_id)
+    version = TradingOptionsSim.Repo.get(TradingOptionsSim.Sim.StrategyVersion, version_id)
 
-    if is_nil(version.activated_at) or not is_nil(version.deactivated_at) or
+    # Gone, deactivated or soft-deleted meanwhile: nothing to retry. (A
+    # hard delete used to raise here and be counted as "still
+    # unanswered" until the retries ran out.)
+    if is_nil(version) or is_nil(version.activated_at) or not is_nil(version.deactivated_at) or
          not is_nil(version.deleted_at) do
       :done
     else

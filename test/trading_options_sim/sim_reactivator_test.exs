@@ -160,6 +160,27 @@ defmodule TradingOptionsSim.SimReactivatorTest do
       )
     end
 
+    # Found in review: a version deleted before its retry fired used to
+    # raise, be counted as unanswered, and be retried until giving up.
+    test "a version that no longer exists is dropped, not retried" do
+      {:ok, pid} = SimReactivator.start_link()
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          SimReactivator.retry_later(Ecto.UUID.generate())
+
+          Enum.reduce_while(1..100, nil, fn _, _ ->
+            if :sys.get_state(pid).pending == %{},
+              do: {:halt, nil},
+              else: Process.sleep(10) && {:cont, nil}
+          end)
+        end)
+
+      assert :sys.get_state(pid).pending == %{}
+      refute log =~ "still unanswered"
+    end
+
     test "a version that resolves on retry is dropped after one attempt" do
       pool = pool_fixture(["RETRY4"])
 
