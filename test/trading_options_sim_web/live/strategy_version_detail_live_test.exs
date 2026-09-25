@@ -827,4 +827,30 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
       refute has_element?(view, "form[phx-submit=save_notes]")
     end
   end
+
+  describe "data_ages/2" do
+    alias TradingOptionsSimWeb.StrategyVersionDetailLive, as: Detail
+
+    @now ~U[2026-09-25 17:00:00Z]
+
+    test "reports each age in seconds and flags ones past the staleness limit" do
+      snap = %{
+        evaluated_at: DateTime.add(@now, -3, :second),
+        option_tick_at: DateTime.add(@now, -45, :second),
+        quote_at: DateTime.add(@now, -90, :second),
+        max_tick_age_ms: 60_000
+      }
+
+      assert [
+               %{label: "Evaluated", age_s: 3, stale?: false},
+               %{label: "Option tick", age_s: 45, stale?: false},
+               %{label: "Quote", age_s: 90, stale?: true}
+             ] = Detail.data_ages(snap, @now)
+    end
+
+    test "a monitor with no IBKR data shows only Evaluated, as never" do
+      snap = %{evaluated_at: nil, option_tick_at: nil, quote_at: nil, max_tick_age_ms: 60_000}
+      assert [%{label: "Evaluated", age_s: nil, stale?: false}] = Detail.data_ages(snap, @now)
+    end
+  end
 end
