@@ -179,4 +179,35 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     assert html =~ "D 1"
     assert html =~ "Q 0"
   end
+
+  # So the TP-SL improved / TPSL-none groups (and any other tag) are
+  # visible where the running strategies are listed.
+  test "shows each active version's tags", %{conn: conn} do
+    {:ok, strategy} = TradingOptionsSim.Sim.create_strategy(%{name: "Tagged Active"})
+
+    {:ok, v} =
+      TradingOptionsSim.Sim.create_strategy_version(strategy, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, v} = TradingOptionsSim.Sim.mark_activated(v)
+    {:ok, _} = TradingOptionsSim.Sim.add_tag_to_strategy_version_by_name(v, "TP-SL improved")
+
+    {:ok, other} = TradingOptionsSim.Sim.create_strategy(%{name: "Untagged Active"})
+
+    {:ok, u} =
+      TradingOptionsSim.Sim.create_strategy_version(other, %{
+        version: 1,
+        position_sizing: %{"method" => "fixed_qty", "qty" => 1}
+      })
+
+    {:ok, _} = TradingOptionsSim.Sim.mark_activated(u)
+
+    {:ok, _view, html} = live(conn, ~p"/active_strategies")
+
+    assert html =~ "Tagged Active"
+    assert html =~ "TP-SL improved"
+    assert html =~ "Untagged Active"
+  end
 end
