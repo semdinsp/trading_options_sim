@@ -1582,10 +1582,12 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       # own tracking key/PubSub topic, never resolvable by TWS as an OPT
       # symbol on its own (confirmed via trading_hub's own PR #105, which
       # now rejects a bare-ticker occ_symbol reused across sec_types).
-      # HubClient isn't started in test env, so the RPC itself always
-      # fails and logs its own attempted args — asserting on that log line
-      # is the only way to see the contract map this monitor actually
-      # tried to send without a live trading_hub connection.
+      # HubClient isn't started in test env, so the subscribe always fails,
+      # and IBKRLive's failure log includes the contract map it sent.
+      # Asserting on that line shows what this monitor tried to send
+      # without a live trading_hub connection. (Before ib_portfolio 8ac354d
+      # this relied on the GenServer.call exit reason carrying call_hub's
+      # args; call_hub now runs in the caller, so that no longer happens.)
       version =
         version_fixture(%{
           "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
