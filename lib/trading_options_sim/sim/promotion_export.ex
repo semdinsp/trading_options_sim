@@ -26,7 +26,7 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
     The encoding is Jason's: raw UTF-8 and Jason's number format. That
     matches Python's `json.dumps(d, sort_keys=True, separators=(",", ":"))`
     only for ASCII strings and integers or plain decimals. Python escapes
-    non-ASCII as `\uXXXX` and writes `1e-05` where Jason writes
+    non-ASCII as backslash-u escapes and writes `1e-05` where Jason writes
     `1.0e-5`. The golden-value test pins the ASCII case, the one current
     rule trees use.
   """
