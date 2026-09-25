@@ -189,6 +189,25 @@ defmodule TradingOptionsSim.EodCloser do
     :exit, _reason -> %{position_open?: false, exchange: nil}
   end
 
+  @doc """
+  True when `exchange` is within its configured close-before window
+  (`close_before_minutes`, 11 by default) of today's close -- the window
+  in which this module flattens positions. `ContractMonitor` asks the
+  same question before an ENTRY, so a monitor never opens a position
+  this module would flatten a minute later. An exchange that is nil or
+  unmapped is never "in the window" (fails open, like
+  `ContractMonitor.session_open?/1` for a nil exchange).
+  """
+  @spec in_close_window?(String.t() | nil, DateTime.t()) :: boolean()
+  def in_close_window?(nil, _now), do: false
+
+  def in_close_window?(exchange, now) do
+    case ExchangeSessionCache.fetch(exchange) do
+      nil -> false
+      session -> within_close_window?(session, now, exchange)
+    end
+  end
+
   defp within_close_window?(session, now, exchange) do
     case TradingCore.MarketHours.next_close(session, now) do
       nil ->

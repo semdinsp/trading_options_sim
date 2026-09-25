@@ -951,7 +951,8 @@ defmodule TradingOptionsSim.ContractMonitor do
     do: maybe_transition(state, snapshot)
 
   defp maybe_transition(%{position_open?: false} = state, snapshot) do
-    if RuleEngine.evaluate(state.entry_rule, snapshot) and session_open?(state) do
+    if RuleEngine.evaluate(state.entry_rule, snapshot) and session_open?(state) and
+         not closing_soon?(state) do
       submit_entry(state, snapshot)
     else
       state
@@ -966,6 +967,18 @@ defmodule TradingOptionsSim.ContractMonitor do
       state
     end
   end
+
+  # No new entries inside EodCloser's flatten window. Until 2026-09-24 a
+  # monitor flattened there re-entered on its next tick and was flattened
+  # again a minute later, over and over until the close -- a round trip
+  # of spread and fees each time, on every strategy, every day. Asked of
+  # EodCloser itself so the two use one definition of the window.
+  # overnight_hold versions are exempt: EodCloser doesn't flatten them,
+  # so a late entry held overnight is intended. Exits are unaffected.
+  defp closing_soon?(%{strategy_version: %{overnight_hold: true}}), do: false
+
+  defp closing_soon?(%{exchange: exchange}),
+    do: TradingOptionsSim.EodCloser.in_close_window?(exchange, DateTime.utc_now())
 
   @doc """
   `true` when the rule-based exit is allowed to fire.

@@ -231,6 +231,108 @@ defmodule TradingOptionsSim.EodCloserTest do
     end
   end
 
+  # Before 2026-09-24 a monitor flattened by EodCloser re-entered on its
+  # next tick and was flattened again a minute later, repeatedly, until
+  # the close: a spread-and-fees round trip each time, every day.
+  describe "no new entries inside the close window" do
+    defp start_flat_always_entering(exchange, symbol, opts \\ []) do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 999_999}
+        })
+
+      version =
+        if Keyword.get(opts, :overnight_hold) do
+          {:ok, v} = Sim.update_trading_hours_settings(version, %{overnight_hold: true})
+          v
+        else
+          version
+        end
+
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: symbol,
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, pid} =
+        start_supervised(
+          {ContractMonitor,
+           sim_run_id: run.id,
+           contract_key: contract_key(symbol),
+           strategy_version: version,
+           direction: "long",
+           quantity: 1,
+           exchange: exchange}
+        )
+
+      {pid, run}
+    end
+
+    defp tick(pid, symbol) do
+      message =
+        %{type: :price, symbol: symbol, source: :ibkr, data: %{last: 150.0}}
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{symbol}", message)
+      _ = ContractMonitor.snapshot(pid)
+    end
+
+    test "a flat monitor does not enter within the close window" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 5)
+
+      {pid, run} = start_flat_always_entering(exchange, "NOENTRY1")
+      tick(pid, "NOENTRY1")
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    # Must NOT fire on healthy input: an hour before the close, entries
+    # proceed as normal.
+    test "a flat monitor still enters outside the close window" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 60)
+
+      {pid, _run} = start_flat_always_entering(exchange, "NOENTRY2")
+      tick(pid, "NOENTRY2")
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
+    test "overnight_hold versions may still enter within the close window" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 5)
+
+      {pid, _run} = start_flat_always_entering(exchange, "NOENTRY3", overnight_hold: true)
+      tick(pid, "NOENTRY3")
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
+    test "after an EOD flatten the monitor does not re-enter" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 5)
+
+      {pid, run} = start_monitor_with_open_position(exchange, "NOENTRY4")
+      :ok = EodCloser.run_once()
+      _ = ContractMonitor.snapshot(pid)
+      assert Sim.get_sim_run!(run.id).exit_reason == "eod_flatten"
+
+      # The next ticks used to re-open immediately.
+      tick(pid, "NOENTRY4")
+      tick(pid, "NOENTRY4")
+
+      refute ContractMonitor.snapshot(pid).position_open?
+    end
+  end
+
   test "does not close a position when its exchange closes outside the window" do
     exchange = "EOD-#{System.unique_integer([:positive])}"
     :ok = seed_exchange_session(exchange, 120)
