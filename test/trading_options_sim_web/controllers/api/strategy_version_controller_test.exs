@@ -147,7 +147,9 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
 
       # Golden value computed independently, in Python:
       #   json.dumps(d, sort_keys=True, separators=(",", ":")) -> sha256 hex
-      # so a consumer in any language can reproduce the hash.
+      # Pins the canonical form for ASCII content. Non-ASCII strings and
+      # exponent-form floats encode differently in Python; see the
+      # moduledoc. Consumers compare returned hashes, not recompute.
       assert PromotionExport.content_hash(a) ==
                "33b4d8416fb50070a4a9b8cebb5b075d9e2350929bed6ecc3e63d47d9fca30e9"
 

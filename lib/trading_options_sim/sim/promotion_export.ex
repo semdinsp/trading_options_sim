@@ -20,9 +20,15 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
     `%{"option_leg_config", "params", "rules"}`: object keys sorted at
     every depth, no whitespace. Map ordering can't change it; any change
     to the three fields does. Lets trading_live spot a re-promotion of
-    changed rules. Reproducible anywhere; it equals Python's
-    `sha256(json.dumps(d, sort_keys=True, separators=(",", ":")))`, which
-    a golden-value test pins.
+    changed rules.
+
+    **Compare the hashes this endpoint returns; don't recompute them.**
+    The encoding is Jason's: raw UTF-8 and Jason's number format. That
+    matches Python's `json.dumps(d, sort_keys=True, separators=(",", ":"))`
+    only for ASCII strings and integers or plain decimals. Python escapes
+    non-ASCII as `\uXXXX` and writes `1e-05` where Jason writes
+    `1.0e-5`. The golden-value test pins the ASCII case, the one current
+    rule trees use.
   """
 
   alias TradingOptionsSim.ContractMonitor
