@@ -980,8 +980,11 @@ defmodule TradingOptionsSim.ContractMonitor do
           state
         end
 
+      # Same session gate as a rule exit: a real stop only executes in
+      # session, and outside it a model price can move on after-hours
+      # underlying ticks. (Stale IBKR data is already blocked upstream.)
       reason ->
-        submit_exit(state, snapshot, reason)
+        if session_open?(state), do: submit_exit(state, snapshot, reason), else: state
     end
   end
 
@@ -992,11 +995,12 @@ defmodule TradingOptionsSim.ContractMonitor do
   # TradingCore.RiskControls, the same code trading_system and
   # trading_live use. Checked against the option's price
   # (run_current_price), since the levels are percentages of the premium
-  # paid.
+  # paid -- or, when a tick carries a quote but no price, the quote mid,
+  # the same fallback fills use, so the levels are never left unchecked.
   defp risk_exit(%{stop_loss_price: nil, take_profit_price: nil}, _snapshot), do: nil
 
   defp risk_exit(state, snapshot) do
-    case decimal_price(snapshot["run_current_price"]) do
+    case decimal_price(snapshot["run_current_price"]) || quote_mid(snapshot) do
       nil ->
         nil
 
@@ -1035,6 +1039,13 @@ defmodule TradingOptionsSim.ContractMonitor do
   defp decimal_price(price) when is_integer(price), do: Decimal.new(price)
   defp decimal_price(%Decimal{} = price), do: price
   defp decimal_price(_price), do: nil
+
+  defp quote_mid(snapshot) do
+    case quote_from(snapshot) do
+      {bid, ask} -> bid |> Decimal.add(ask) |> Decimal.div(2)
+      nil -> nil
+    end
+  end
 
   # No new entries inside EodCloser's flatten window. Until 2026-09-24 a
   # monitor flattened there re-entered on its next tick and was flattened

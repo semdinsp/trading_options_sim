@@ -1933,6 +1933,30 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert run.stop_loss_price == nil
     end
 
+    # Found in review: like a rule exit, a stop only acts in session.
+    test "no stop exit while the exchange session is closed" do
+      exchange = closed_exchange_fixture()
+      version = risk_version(%{"risk_controls" => @risk})
+
+      {pid, run} =
+        start_monitor(version, contract_key("SLTP6"), exchange: exchange, position_open?: false)
+
+      :sys.replace_state(pid, fn st ->
+        %{
+          st
+          | position_open?: true,
+            stop_loss_price: Decimal.new("1000.00"),
+            take_profit_price: Decimal.new("2000.00")
+        }
+      end)
+
+      broadcast_underlying_price("SLTP6", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).status == "open"
+    end
+
     test "a small move inside the band keeps the position" do
       {pid, run} = enter_then_move("SLTP5", %{"risk_controls" => @risk}, 150.5)
       assert ContractMonitor.snapshot(pid).position_open?
