@@ -88,6 +88,11 @@ defmodule TradingOptionsSim.ContractSelector do
   to be at-the-money *of*), and `{:error, :no_listed_contract}` when no
   probed candidate resolves. Both fail closed: a strategy that cannot
   name a real contract must not activate against a guess.
+
+  `{:error, :hub_unavailable}` means the hub didn't answer (timeout,
+  unreachable, IBKR not connected) -- nothing was learned about the
+  contract. SimActivator retries those later; it never retries the two
+  answers above.
   """
   @spec resolve(String.t(), map(), Date.t()) :: {:ok, contract()} | {:error, atom()}
   def resolve(symbol, config, today \\ et_today())
@@ -106,9 +111,22 @@ defmodule TradingOptionsSim.ContractSelector do
   @doc false
   # `resolver` is the hub lookup, injectable so the probe order and the
   # fall-through are testable without a hub.
+  # The only replies that ANSWER "is this contract listed?" (no).
+  @definitive_misses [:not_found, :ambiguous]
+
   # Probes each candidate in the order ContractSelection gave, stopping
   # at the first one IBKR lists. Each miss costs ~10s on the shared
   # HubClient, which is why the list is short and ordered.
+  #
+  # Only :not_found / :ambiguous are ANSWERS ("IBKR has no such
+  # contract"). Anything else -- a HubClient timeout behind a backlog,
+  # :hub_unreachable, :not_connected -- means the question never got
+  # answered, so it stops at once with {:error, :hub_unavailable} rather
+  # than concluding :no_listed_contract. Until 2026-09-24 the two were
+  # treated alike, so a restart that reactivated 95 versions at once
+  # timed out probes for a listed contract and skipped the member
+  # permanently. It also stops rather than probing on: more calls would
+  # only deepen the backlog that caused the timeout.
   def first_listed(candidates, symbol, resolver) do
     Enum.reduce_while(candidates, {:error, :no_listed_contract}, fn
       %{expiry: expiry, strike: strike, right: right}, acc ->
@@ -116,8 +134,11 @@ defmodule TradingOptionsSim.ContractSelector do
           {:ok, _con_id} ->
             {:halt, {:ok, %{expiry: expiry, strike: to_decimal(strike), right: right}}}
 
-          {:error, _} ->
+          {:error, reason} when reason in @definitive_misses ->
             {:cont, acc}
+
+          {:error, _transient} ->
+            {:halt, {:error, :hub_unavailable}}
         end
     end)
   end
@@ -125,7 +146,8 @@ defmodule TradingOptionsSim.ContractSelector do
   defp resolve_via_hub(symbol, expiry, strike, right) do
     case call_hub(TradingHub.IBKR.ContractResolver, :resolve, [symbol, expiry, strike, right]) do
       {:ok, con_id} -> {:ok, con_id}
-      other -> {:error, other}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected, other}}
     end
   end
 
@@ -176,8 +198,17 @@ defmodule TradingOptionsSim.ContractSelector do
       {:ok, %{close: close}} when is_number(close) and close > 0 ->
         {:ok, close}
 
-      _other ->
+      # The hub answered: it has no usable price for this symbol.
+      {:ok, _no_price} ->
         {:error, :no_spot}
+
+      {:error, :not_found} ->
+        {:error, :no_spot}
+
+      # The question never got answered (timeout, unreachable hub) --
+      # transient, same distinction as first_listed/3.
+      {:error, _transient} ->
+        {:error, :hub_unavailable}
     end
   end
 

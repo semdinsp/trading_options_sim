@@ -83,6 +83,116 @@ defmodule TradingOptionsSim.SimReactivatorTest do
     run
   end
 
+  describe "retrying unanswered contract lookups" do
+    # :test has no trading_hub, so an atm_offset member's spot lookup
+    # goes unanswered -- exactly the transient failure a busy restart
+    # produced on 2026-09-24. fixed_strike needs no lookup at all.
+    setup do
+      previous = Application.get_env(:trading_options_sim, :version_retry_base_ms)
+      Application.put_env(:trading_options_sim, :version_retry_base_ms, 1)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:trading_options_sim, :version_retry_base_ms, previous),
+          else: Application.delete_env(:trading_options_sim, :version_retry_base_ms)
+      end)
+    end
+
+    defp atm_version(symbol) do
+      pool = pool_fixture([symbol])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: %{
+            "strike_selection" => "atm_offset",
+            "strike_offset" => 0,
+            "expiry_selection" => "dte_target",
+            "dte_target" => 45,
+            "right" => "C"
+          }
+        })
+
+      {:ok, version} = Sim.mark_activated(version)
+      version
+    end
+
+    defp await_log(fun, pattern, timeout_ms \\ 3_000) do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          fun.()
+
+          Enum.reduce_while(1..div(timeout_ms, 20), nil, fn _, _ ->
+            Process.sleep(20)
+            {:cont, nil}
+          end)
+        end)
+
+      assert log =~ pattern
+      log
+    end
+
+    test "activate_report/1 reports an unanswered lookup as transient" do
+      version = atm_version("RETRY1")
+
+      assert {:ok, [], [], ["RETRY1"]} = TradingOptionsSim.SimActivator.activate_report(version)
+    end
+
+    # Must NOT retry on healthy input: a member that resolves (here a
+    # fixed_strike, which needs no lookup) is never reported transient.
+    test "activate_report/1 reports nothing when every member resolves" do
+      pool = pool_fixture(["RETRY2"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      assert {:ok, [_pid], [], []} = TradingOptionsSim.SimActivator.activate_report(version)
+    end
+
+    test "retries an unanswered version with backoff, then gives up" do
+      version = atm_version("RETRY3")
+      {:ok, pid} = SimReactivator.start_link()
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      await_log(
+        fn -> SimReactivator.retry_later(version.id) end,
+        "still unanswered after 5 retries"
+      )
+    end
+
+    test "a version that resolves on retry is dropped after one attempt" do
+      pool = pool_fixture(["RETRY4"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, version} = Sim.mark_activated(version)
+      {:ok, pid} = SimReactivator.start_link()
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          SimReactivator.retry_later(version.id)
+
+          # The retry fires after 1ms; poll for its outcome rather than
+          # sleeping a fixed time.
+          Enum.reduce_while(1..150, nil, fn _, _ ->
+            done? =
+              TradingOptionsSim.ContractMonitor.monitors_for_version(version.id) != [] and
+                :sys.get_state(pid).pending == %{}
+
+            if done?, do: {:halt, nil}, else: Process.sleep(20) && {:cont, nil}
+          end)
+        end)
+
+      assert [{"RETRY4", _pid}] =
+               TradingOptionsSim.ContractMonitor.monitors_for_version(version.id)
+
+      assert :sys.get_state(pid).pending == %{}
+      refute log =~ "still unanswered"
+    end
+  end
+
   test "restarts monitors for every StrategyVersion with an open SimRun" do
     pool = pool_fixture(["REACTSYM1"])
 

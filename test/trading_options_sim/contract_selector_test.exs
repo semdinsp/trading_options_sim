@@ -77,6 +77,35 @@ defmodule TradingOptionsSim.ContractSelectorTest do
     refute_received {:probed, _, 775.0}
   end
 
+  # 2026-09-24: a busy restart timed out probes for a LISTED contract and
+  # the member was skipped for good. An unanswered probe is not a "no".
+  test "an unanswered probe stops with :hub_unavailable, not :no_listed_contract" do
+    {:ok, list} = candidates(@atm_120)
+    test_pid = self()
+
+    resolver = fn _s, expiry, strike, _r ->
+      send(test_pid, {:probed, expiry, strike})
+      if expiry == "20270219", do: {:error, :not_found}, else: {:error, :hub_unreachable}
+    end
+
+    assert ContractSelector.first_listed(list, "SPY", resolver) == {:error, :hub_unavailable}
+
+    # Stopped at the first unanswered probe instead of piling on.
+    assert_received {:probed, "20270219", 770.0}
+    assert_received {:probed, "20270319", 770.0}
+    refute_received {:probed, "20270416", _}
+  end
+
+  test ":ambiguous is an answer, like :not_found, so probing continues" do
+    {:ok, list} = candidates(@atm_120)
+
+    resolver = fn _s, expiry, _k, _r ->
+      if expiry == "20270219", do: {:error, :ambiguous}, else: {:ok, 1}
+    end
+
+    assert {:ok, %{expiry: "20270319"}} = ContractSelector.first_listed(list, "SPY", resolver)
+  end
+
   test "nothing listed anywhere is :no_listed_contract" do
     {:ok, list} = candidates(@atm_120)
     resolver = fn _s, _e, _k, _r -> {:error, :not_found} end
