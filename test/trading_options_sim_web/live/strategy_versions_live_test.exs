@@ -34,10 +34,14 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
     retired_version = version_fixture(strategy, %{version: 2})
     {:ok, _retired} = Sim.downgrade_strategy_version(retired_version, "retired")
 
-    {:ok, _view, html} = live(conn, ~p"/strategy_versions")
+    {:ok, view, _html} = live(conn, ~p"/strategy_versions")
 
-    assert html =~ "v1"
-    refute html =~ "v2"
+    # Scoped to the version headings. The whole-page HTML also carries
+    # random base64 tokens (the LiveView session, CSRF), and a bare
+    # `refute html =~ "v2"` failed whenever one happened to contain "v2"
+    # -- measured at 2 renders in 300 (e.g. "...CIv2Tpeg...").
+    assert has_element?(view, "h2", "v1")
+    refute has_element?(view, "h2", "v2")
     assert Sim.get_strategy_version!(retired_version.id).lifecycle_stage == "retired"
   end
 
