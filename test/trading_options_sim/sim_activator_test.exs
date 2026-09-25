@@ -257,7 +257,7 @@ defmodule TradingOptionsSim.SimActivatorTest do
       Application.put_env(:trading_options_sim, :pricing_backend, :ibkr_live)
       on_exit(fn -> Application.delete_env(:trading_options_sim, :pricing_backend) end)
 
-      pool = pool_fixture(["DEADLK1", "DEADLK2", "DEADLK3"])
+      pool = pool_fixture(["DLK1", "DLK2", "DLK3"])
 
       version =
         version_fixture(%{
@@ -273,8 +273,32 @@ defmodule TradingOptionsSim.SimActivatorTest do
 
       Enum.each(pids, fn pid ->
         snap = ContractMonitor.snapshot(pid)
-        assert snap.symbol in ["DEADLK1", "DEADLK2", "DEADLK3"]
+        assert snap.symbol in ["DLK1", "DLK2", "DLK3"]
       end)
+    end
+
+    # TradingContract.OccSymbol rejects roots over 6 characters (the old
+    # local builder padded but never truncated, producing an invalid
+    # symbol that silently never ticked). Such a member must be skipped
+    # on its own -- raising would abort SimReactivator's whole boot pass
+    # and leave every later version without monitors.
+    test "under :ibkr_live, an unbuildable OCC symbol skips only that member" do
+      Application.put_env(:trading_options_sim, :pricing_backend, :ibkr_live)
+      on_exit(fn -> Application.delete_env(:trading_options_sim, :pricing_backend) end)
+
+      pool = pool_fixture(["OCCOK1", "TOOLONG7"])
+
+      version =
+        version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, [pid], _unsubscribed} = SimActivator.activate(version)
+          assert ContractMonitor.snapshot(pid).symbol == "OCCOK1"
+        end)
+
+      assert log =~ "no valid OCC symbol"
+      assert [{"OCCOK1", _}] = ContractMonitor.monitors_for_version(version.id)
     end
 
     test "starts one monitor per pool member with fixed_strike selection" do

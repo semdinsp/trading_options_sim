@@ -347,13 +347,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
     %{
       contract: "#{snapshot.expiry} #{Decimal.to_string(snapshot.strike)}#{snapshot.right}",
-      occ:
-        TradingOptionsSim.OccSymbol.build(
-          snapshot.symbol,
-          snapshot.expiry,
-          snapshot.strike,
-          snapshot.right
-        ),
+      occ: occ_symbol(snapshot),
       entry: entry,
       qty: raw_qty,
       mark: mark,
@@ -712,9 +706,13 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   # inner span holding ONLY the symbol -- on the <td> it would also render
   # the template's own indentation, and select-all would copy it. Same builder IBKRLive subscribes with, so what's shown here is
   # exactly the symbol trading_hub was asked for.
-  defp occ_symbol(%{symbol: symbol, expiry: expiry, strike: strike, right: right})
-       when is_binary(symbol) and is_binary(expiry) and right in ["C", "P"] do
-    TradingOptionsSim.OccSymbol.build(symbol, expiry, strike, right)
+  # Display only: an unbuildable symbol shows "—" rather than crashing
+  # the page.
+  defp occ_symbol(%{symbol: symbol, expiry: expiry, strike: strike, right: right}) do
+    case SimActivator.occ_symbol({symbol, expiry, strike, right}) do
+      {:ok, occ} -> occ
+      :error -> "—"
+    end
   end
 
   defp occ_symbol(_run), do: "—"
