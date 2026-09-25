@@ -8,7 +8,7 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
   action_fallback TradingOptionsSimWeb.Api.FallbackController
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
-       [scope: "strategies:read"] when action in [:index, :show, :metrics]
+       [scope: "strategies:read"] when action in [:index, :show, :metrics, :promotion_export]
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "strategies:write"]
@@ -52,6 +52,20 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
   def show(conn, %{"id" => id}) do
     version = Sim.get_strategy_version!(id)
     json(conn, %{"strategy_version" => Serializer.strategy_version(version)})
+  end
+
+  @doc """
+  GET /api/v1/versions/:id/promotion_export
+
+  The single payload trading_live promotes from -- see
+  `TradingOptionsSim.Sim.PromotionExport` for the contract. 404 for an
+  unknown id.
+  """
+  def promotion_export(conn, %{"id" => id}) do
+    case TradingOptionsSim.Sim.PromotionExport.build(id) do
+      {:ok, payload} -> json(conn, payload)
+      {:error, :not_found} -> conn |> put_status(:not_found) |> json(%{"error" => "not_found"})
+    end
   end
 
   @doc """

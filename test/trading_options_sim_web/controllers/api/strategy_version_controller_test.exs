@@ -42,6 +42,120 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
     }
   end
 
+  # The promotion contract trading_live builds against (its
+  # OPTIONS_PROMOTION_PLAN.md). A field change here is a contract change.
+  describe "GET /api/v1/versions/:id/promotion_export" do
+    defp atm_leg do
+      %{
+        "expiry_selection" => "dte_target",
+        "dte_target" => 45,
+        "strike_selection" => "atm_offset",
+        "strike_offset" => 0,
+        "right" => "C"
+      }
+    end
+
+    defp export_version do
+      pool = pool_fixture(["SPY", "QQQ"])
+
+      version_fixture(%{
+        target_pool_id: pool.id,
+        option_leg_config: atm_leg(),
+        rules: %{"entry" => %{"signal" => "run_delta", "op" => "gt", "value" => 0.5}},
+        params: %{"min_hold_seconds" => 1800}
+      })
+    end
+
+    test "returns the full promotion payload", %{conn: conn} do
+      version = export_version()
+
+      body =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/#{version.id}/promotion_export")
+        |> json_response(200)
+
+      assert body["schema_version"] == 1
+      assert body["strategy_version_id"] == version.id
+      assert body["strategy_name"] == "Test Strategy"
+      assert body["rules"] == version.rules
+      assert body["params"] == %{"min_hold_seconds" => 1800}
+      assert body["option_leg_config"] == atm_leg()
+      assert body["position_sizing"] == %{"method" => "fixed_qty", "qty" => 1}
+
+      assert body["lineage"] == %{
+               "parent_version_id" => nil,
+               "generation" => 0,
+               "source" => "native"
+             }
+
+      assert Enum.map(body["target_pool"]["members"], & &1["symbol"]) == ["QQQ", "SPY"]
+      assert Enum.all?(body["target_pool"]["members"], &Map.has_key?(&1, "ib_conid"))
+
+      assert body["execution"] == %{
+               "worked_spread_fraction" => 0.25,
+               "forced_exit_spread_fraction" => 0.5,
+               "expiry_close_dte" => 1
+             }
+
+      assert body["snapshot_keys"] == TradingOptionsSim.ContractMonitor.snapshot_keys()
+      assert "run_spread_pct" in body["snapshot_keys"]
+      assert "run_poly_vwap_dev_bps" in body["snapshot_keys"]
+      refute "dte" in body["snapshot_keys"]
+      assert body["content_hash"] =~ ~r/\A[0-9a-f]{64}\z/
+    end
+
+    test "requires strategies:read", %{conn: conn} do
+      version = export_version()
+
+      assert conn
+             |> get(~p"/api/v1/versions/#{version.id}/promotion_export")
+             |> json_response(401)
+
+      assert build_conn()
+             |> token_conn(["tags:read"])
+             |> get(~p"/api/v1/versions/#{version.id}/promotion_export")
+             |> json_response(403)
+    end
+
+    test "404 for an unknown or malformed id", %{conn: conn} do
+      conn = token_conn(conn, ["strategies:read"])
+
+      assert get(conn, ~p"/api/v1/versions/#{Ecto.UUID.generate()}/promotion_export")
+             |> json_response(404)
+
+      assert get(conn, ~p"/api/v1/versions/not-a-uuid/promotion_export") |> json_response(404)
+    end
+
+    test "content_hash ignores key order and changes with the rules" do
+      alias TradingOptionsSim.Sim.PromotionExport
+
+      a = %{
+        rules: %{"entry" => %{"signal" => "x", "op" => "gt", "value" => 1}},
+        params: %{"min_hold_seconds" => 60},
+        option_leg_config: atm_leg()
+      }
+
+      # Same content, keys inserted in the reverse order at every level.
+      reordered = %{
+        rules: %{"entry" => %{"value" => 1, "op" => "gt", "signal" => "x"}},
+        params: %{"min_hold_seconds" => 60},
+        option_leg_config: atm_leg() |> Enum.reverse() |> Map.new()
+      }
+
+      changed = put_in(a, [:rules, "entry", "value"], 2)
+
+      # Golden value computed independently, in Python:
+      #   json.dumps(d, sort_keys=True, separators=(",", ":")) -> sha256 hex
+      # so a consumer in any language can reproduce the hash.
+      assert PromotionExport.content_hash(a) ==
+               "33b4d8416fb50070a4a9b8cebb5b075d9e2350929bed6ecc3e63d47d9fca30e9"
+
+      assert PromotionExport.content_hash(a) == PromotionExport.content_hash(reordered)
+      refute PromotionExport.content_hash(a) == PromotionExport.content_hash(changed)
+    end
+  end
+
   describe "GET /api/v1/versions" do
     test "lists versions with pagination metadata", %{conn: conn} do
       for v <- 1..3, do: version_fixture(%{version: v})

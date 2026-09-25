@@ -152,6 +152,52 @@ defmodule TradingOptionsSim.ContractMonitor do
   # as :implied_volatility.
   @default_worked_spread_fraction 0.25
 
+  # A forced close (see @forced_exit_reasons) crosses the full spread:
+  # 0.5 of it from mid is the touch.
+  @forced_exit_spread_fraction 0.5
+
+  # Every key this monitor can write into a rule snapshot (besides the
+  # trading_signal values it merges in under their own names). The
+  # contract a promoting app relies on: trading_live reads it from
+  # Sim.PromotionExport to check a rule tree only references keys it
+  # also supplies. ContractMonitorTest pins it against what is actually
+  # written, so it cannot drift from the code.
+  @pricing_keys ~w(run_current_price run_underlying_price run_delta run_gamma
+                   run_theta run_vega run_implied_vol run_bid run_ask run_quote_delayed)
+  @derived_keys ~w(run_spread run_spread_pct run_theta_pct run_lambda)
+  @polygon_keys ~w(run_poly_last run_poly_spread_bps run_poly_imbalance
+                   run_poly_imbalance_ema run_poly_ret_1m_bps run_poly_ret_5m_bps
+                   run_poly_vwap_dev_bps run_poly_minute_volume run_poly_rel_volume)
+
+  @doc """
+  Every snapshot key a rule tree can reference that this app supplies,
+  sorted. Pinned by ContractMonitorTest against what is actually
+  written; see the attribute comment above.
+  """
+  @spec snapshot_keys() :: [String.t()]
+  def snapshot_keys, do: Enum.sort(@pricing_keys ++ @derived_keys ++ @polygon_keys)
+
+  @doc false
+  def snapshot_key_groups,
+    do: %{pricing: @pricing_keys, derived: @derived_keys, polygon: @polygon_keys}
+
+  @doc """
+  How this simulator prices fills and when it closes for expiry. Exported
+  to trading_live so its paper fills and limit prices match: a rule fill
+  at mid + `worked_spread_fraction` of the spread toward the touch, a
+  forced close at `forced_exit_spread_fraction` (the touch), and a close
+  once DTE <= `expiry_close_dte`. These are the defaults every monitor
+  runs with; SimActivator never overrides them.
+  """
+  @spec execution_defaults() :: map()
+  def execution_defaults do
+    %{
+      worked_spread_fraction: @default_worked_spread_fraction,
+      forced_exit_spread_fraction: @forced_exit_spread_fraction,
+      expiry_close_dte: @default_expiry_close_dte
+    }
+  end
+
   defstruct [
     :sim_run_id,
     :contract_key,
@@ -1277,7 +1323,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp spread_fraction(state, reason) do
     if reason in @forced_exit_reasons do
-      Decimal.new("0.5")
+      Decimal.new(to_string(@forced_exit_spread_fraction))
     else
       state.worked_spread_fraction
     end
