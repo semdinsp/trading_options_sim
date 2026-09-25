@@ -35,16 +35,15 @@ defmodule TradingOptionsSim.ContractSelector do
   behind it — observed live as a 20-message backlog on that process.
 
   So the strike is ROUNDED to the underlying's known increment and
-  confirmed with ONE resolve. If that misses, the two neighbouring
-  grid points are tried and then it gives up. Worst case is three
-  calls (~20s), typical case one (~148ms).
+  confirmed with ONE resolve; the neighbouring grid points and the
+  next expiries are tried only on a miss. At most five probes, typical
+  case one (~148ms).
 
-  `@strike_increments` is therefore a real assumption rather than
+  The per-symbol grid is therefore a real assumption rather than
   something discovered at runtime, and a wrong entry produces a
-  `:no_listed_contract` rather than a bad fill. Each entry below is
-  verified against IBKR, and an unlisted symbol falls back to $1 —
-  the densest common grid, so a miss is a miss rather than a silent
-  skip past a strike that exists.
+  `:no_listed_contract` rather than a bad fill. It lives in
+  `TradingCore.Options.ContractSelection.strike_increment/1`, with the
+  IBKR evidence for each entry.
 
   ## Expiry
 
@@ -60,144 +59,66 @@ defmodule TradingOptionsSim.ContractSelector do
   That is not hypothetical: on 2026-09-23 SPY listed Dec, Jan and Mar
   but NOT Feb 2027, so every 120-DTE SPY leg (target 20270219) failed
   with `:no_listed_contract` from the day it was created, while QQQ,
-  which does list Feb, resolved fine. `candidates/3` orders the probes
-  so the fall-through stays cheap -- see its doc.
+  which does list Feb, resolved fine.
+
+  ## What lives where
+
+  The pure part -- expiry candidates, the per-symbol strike grid,
+  rounding and the probe order -- is
+  `TradingCore.Options.ContractSelection`, shared with trading_live
+  (its grid, and why XLK is absent from it, is documented there). This
+  module keeps what has side effects: reading spot from trading_hub and
+  probing each candidate against IBKR.
   """
+
+  alias TradingCore.Options.ContractSelection
 
   @type contract :: %{expiry: String.t(), strike: Decimal.t(), right: String.t()}
 
-  # Strike grid per underlying, probed against IBKR 2026-09-20 on the
-  # 20261120 monthly. Increments widen with price and vary by expiry,
-  # so these are a claim about the liquid monthlies this app targets,
-  # not about every listing.
-  #
-  #   SPY  760C ok, 762C/763C not found            -> 5.0
-  #   QQQ  715C/720C ok                            -> 5.0
-  #   XLF   53C ok,  53.5C not found,  54C ok      -> 1.0
-  #   XLK  275C ok, 276C/277.5C/280C not found     -> UNRESOLVED
-  #
-  # XLK is deliberately absent. 275 lists while 276, 277.5 and 280 do
-  # not, which fits no single increment, and pinning it down needs more
-  # probes than is reasonable against a shared HubClient at 10s per
-  # miss. It therefore takes @default_increment and will most likely
-  # return :no_listed_contract until someone measures it properly --
-  # which is the correct failure: no contract beats a wrong one.
-  @strike_increments %{"SPY" => 5.0, "QQQ" => 5.0, "XLF" => 1.0}
-
-  # $1 is the densest common grid, so an unknown symbol misses rather
-  # than silently skipping past a strike that exists.
-  @default_increment 1.0
-
   @doc """
-  Resolves `leg_config` for `symbol` into a concrete contract.
+  Resolves `leg_config` for `symbol` into a concrete, listed contract.
+
+  The probe list -- expiries, strike grid, rounding, order -- comes from
+  `TradingCore.Options.ContractSelection.candidates/4` (moved there
+  2026-09-24, trading_core PR #54) so trading_live selects contracts
+  with the same code. `today` is the US/Eastern trading date: UTC flips
+  at 8pm ET and would target the next day's expiry for the evening.
 
   Returns `{:error, :no_spot}` when the underlying has no price (nothing
   to be at-the-money *of*), and `{:error, :no_listed_contract}` when no
   probed candidate resolves. Both fail closed: a strategy that cannot
   name a real contract must not activate against a guess.
   """
-  @spec resolve(String.t(), map()) :: {:ok, contract()} | {:error, atom()}
-  def resolve(symbol, %{"strike_selection" => "atm_offset"} = config) do
-    with {:ok, spot} <- spot_price(symbol),
-         {:ok, expiry} <- resolve_expiry(config),
-         right when right in ["C", "P"] <- Map.get(config, "right") do
-      target = spot + (config["strike_offset"] || 0)
-      expiries = [expiry | fallback_expiries(expiry, config)]
+  @spec resolve(String.t(), map(), Date.t()) :: {:ok, contract()} | {:error, atom()}
+  def resolve(symbol, config, today \\ et_today())
 
-      symbol
-      |> candidates(target, expiries)
-      |> first_listed(symbol, right, &resolve_via_hub/4)
-    else
-      {:error, reason} -> {:error, reason}
-      _invalid_right -> {:error, :unsupported_leg_config}
+  def resolve(symbol, %{"strike_selection" => "atm_offset"} = config, today) do
+    with {:ok, spot} <- spot_price(symbol),
+         {:ok, candidates} <- ContractSelection.candidates(symbol, config, spot, today) do
+      first_listed(candidates, symbol, &resolve_via_hub/4)
     end
   end
 
-  def resolve(_symbol, _config), do: {:error, :unsupported_leg_config}
+  def resolve(_symbol, _config, _today), do: {:error, :unsupported_leg_config}
 
-  @doc """
-  The nearest third Friday at or beyond `dte_target` days from today,
-  as this app's `"YYYYMMDD"` wire format.
-
-  Exposed for tests and for callers that want the expiry without
-  resolving a strike.
-  """
-  @spec third_friday_on_or_after(Date.t(), non_neg_integer()) :: String.t()
-  def third_friday_on_or_after(from, dte_target) do
-    target = Date.add(from, dte_target)
-
-    Stream.iterate(target, &Date.add(&1, 1))
-    |> Enum.find(&third_friday?/1)
-    |> Calendar.strftime("%Y%m%d")
-  end
-
-  defp resolve_expiry(%{"expiry_selection" => "dte_target"} = config) do
-    dte = config["dte_target"] || 45
-    {:ok, third_friday_on_or_after(Date.utc_today(), dte)}
-  end
-
-  # A literal expiry is still honoured, so an ATM strike can be paired
-  # with a deliberately chosen expiry (a specific LEAPS, say).
-  defp resolve_expiry(%{"fixed_expiry" => expiry}) when is_binary(expiry), do: {:ok, expiry}
-
-  defp resolve_expiry(_config), do: {:error, :unsupported_leg_config}
-
-  defp third_friday?(date) do
-    Date.day_of_week(date) == 5 and date.day in 15..21
-  end
-
-  # Only a dte_target expiry falls through. A fixed_expiry is a
-  # deliberate choice (a specific LEAPS), and silently trading a
-  # different month would be worse than not trading at all.
-  defp fallback_expiries(expiry, %{"expiry_selection" => "dte_target"}) do
-    next = expiry |> wire_date() |> third_friday_on_or_after(1)
-    [next, next |> wire_date() |> third_friday_on_or_after(1)]
-  end
-
-  defp fallback_expiries(_expiry, _config), do: []
-
-  defp wire_date(<<y::binary-size(4), m::binary-size(2), d::binary-size(2)>>),
-    do: Date.new!(String.to_integer(y), String.to_integer(m), String.to_integer(d))
-
-  @doc """
-  The ordered `{expiry, strike}` probes for `symbol` at `target`.
-
-  The rounded strike on each expiry first, then one grid step either
-  side on the FIRST expiry only. At most `length(expiries) + 2` probes.
-
-  Ordered this way because an unlisted expiry and an off-grid strike
-  both cost a full 10s miss, and they are not equally likely: for SPY
-  and QQQ at a $5 grid, the rounded strike is essentially always
-  listed, so a miss on it almost always means the MONTH is missing.
-  Probing neighbours on a missing month first would spend 30s learning
-  nothing. Bounded deliberately -- see the moduledoc on why an
-  unbounded probe loop is a denial of service against the shared
-  HubClient rather than merely slow.
-  """
-  @spec candidates(String.t(), number(), [String.t()]) :: [{String.t(), float()}]
-  def candidates(symbol, target, [first | _] = expiries) do
-    increment = Map.get(@strike_increments, symbol, @default_increment)
-    rounded = Float.round(Float.round(target / increment) * increment, 2)
-
-    neighbours =
-      [rounded + increment, rounded - increment]
-      |> Enum.map(&{first, Float.round(&1, 2)})
-
-    (Enum.map(expiries, &{&1, rounded}) ++ neighbours) |> Enum.uniq()
-  end
+  defp et_today, do: DateTime.now!("America/New_York") |> DateTime.to_date()
 
   @doc false
   # `resolver` is the hub lookup, injectable so the probe order and the
   # fall-through are testable without a hub.
-  def first_listed(candidates, symbol, right, resolver) do
-    Enum.reduce_while(candidates, {:error, :no_listed_contract}, fn {expiry, strike}, acc ->
-      case resolver.(symbol, expiry, strike, right) do
-        {:ok, _con_id} ->
-          {:halt, {:ok, %{expiry: expiry, strike: to_decimal(strike), right: right}}}
+  # Probes each candidate in the order ContractSelection gave, stopping
+  # at the first one IBKR lists. Each miss costs ~10s on the shared
+  # HubClient, which is why the list is short and ordered.
+  def first_listed(candidates, symbol, resolver) do
+    Enum.reduce_while(candidates, {:error, :no_listed_contract}, fn
+      %{expiry: expiry, strike: strike, right: right}, acc ->
+        case resolver.(symbol, expiry, strike, right) do
+          {:ok, _con_id} ->
+            {:halt, {:ok, %{expiry: expiry, strike: to_decimal(strike), right: right}}}
 
-        {:error, _} ->
-          {:cont, acc}
-      end
+          {:error, _} ->
+            {:cont, acc}
+        end
     end)
   end
 
