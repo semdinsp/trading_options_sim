@@ -55,7 +55,7 @@ defmodule TradingOptionsSim.SimActivator do
   The backend comes from `pricing_opts/1`, driven by the
   `:pricing_backend` app env (default `:black_scholes`). With
   `:ibkr_live` configured, each monitor gets a real
-  `TradingOptionsSim.OccSymbol.build/4` symbol and subscribes to
+  `occ_symbol/1` (TradingContract.OccSymbol) symbol and subscribes to
   trading_hub's option ticks, so `unsubscribed_symbols` reports the
   contracts whose subscription did not come up. Under `:black_scholes`
   every monitor prices synthetically, never subscribes, and
@@ -472,7 +472,27 @@ defmodule TradingOptionsSim.SimActivator do
   # entry signal wrote a SECOND entry fill into the same run,
   # overwriting entry_price/entry_at: 48 runs carried 248 extra entry
   # fills (2026-09-18 to 09-24) before this was fixed.
-  defp start_or_find_monitor(version, %SimRun{id: run_id} = run, contract_key, exchange) do
+  # Always delegates, so an already-running monitor still goes through
+  # start_monitor/5's reuse branch (update_sim_run_id/2) below.
+  defp start_or_find_monitor(version, %SimRun{} = run, contract_key, exchange),
+    do: start_monitor(version, run, contract_key, exchange, pricing_opts(contract_key))
+
+  # An unbuildable OCC symbol skips THIS member only, logged. Raising
+  # instead would abort SimReactivator's whole boot pass and leave every
+  # later version without monitors.
+  defp start_monitor(version, _run, contract_key, _exchange, {:error, reason}) do
+    Logger.error("SimActivator: not starting #{version.id}/#{inspect(contract_key)} -- #{reason}")
+
+    nil
+  end
+
+  defp start_monitor(
+         version,
+         %SimRun{id: run_id} = run,
+         contract_key,
+         exchange,
+         {:ok, pricing_opts}
+       ) do
     case ContractMonitor.whereis(version.id, contract_key) do
       nil ->
         spec = %{
@@ -489,7 +509,7 @@ defmodule TradingOptionsSim.SimActivator do
                  quantity: 1,
                  position_open?: not is_nil(run.entry_at),
                  entered_at: run.entry_at
-               ] ++ pricing_opts(contract_key)
+               ] ++ pricing_opts
              ]},
           restart: :transient
         }
@@ -537,16 +557,42 @@ defmodule TradingOptionsSim.SimActivator do
   # `ContractMonitor.init/1` raises if `:ibkr_live` arrives without an
   # `:occ_symbol`, so the symbol is always built here, never left for
   # the caller to remember.
-  defp pricing_opts({symbol, expiry, strike, right}) do
+  @doc """
+  The OCC symbol for a `{symbol, expiry, strike, right}` contract key,
+  built by the shared `TradingContract.OccSymbol` (v0.2.1+), which
+  replaced this app's own copy.
+
+  It must stay **byte-identical** to what trading_hub was asked for:
+  these strings are subscription and Registry keys
+  (`{:ibkr_live, occ_symbol}`), so any drift is silent non-delivery. So
+  the Decimal strike goes in as exact thousandths, never via a float, with
+  the same rounding the old builder used. Verified identical across every
+  contract this app had traded plus edge cases (sub-cent strikes, 1- and
+  5-letter roots) when the swap was made.
+  """
+  @spec occ_symbol({String.t(), String.t(), Decimal.t(), String.t()}) ::
+          {:ok, String.t()} | :error
+  def occ_symbol({symbol, expiry, %Decimal{} = strike, right}) do
+    thousandths = strike |> Decimal.mult(1000) |> Decimal.round(0) |> Decimal.to_integer()
+    TradingContract.OccSymbol.build(symbol, expiry, {:thousandths, thousandths}, right)
+  end
+
+  def occ_symbol(_key), do: :error
+
+  # {:ok, opts}, or {:error, reason} when :ibkr_live needs an OCC symbol
+  # that can't be built (a root over 6 characters, a bad date). A monitor
+  # can't subscribe to option data without it, and any substitute would
+  # be silent non-delivery, so the member is skipped instead.
+  defp pricing_opts(contract_key) do
     case Application.get_env(:trading_options_sim, :pricing_backend, :black_scholes) do
       :ibkr_live ->
-        [
-          pricing_backend: :ibkr_live,
-          occ_symbol: TradingOptionsSim.OccSymbol.build(symbol, expiry, strike, right)
-        ]
+        case occ_symbol(contract_key) do
+          {:ok, occ} -> {:ok, [pricing_backend: :ibkr_live, occ_symbol: occ]}
+          :error -> {:error, "no valid OCC symbol for this contract"}
+        end
 
       _other ->
-        [pricing_backend: :black_scholes]
+        {:ok, [pricing_backend: :black_scholes]}
     end
   end
 end

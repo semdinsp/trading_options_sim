@@ -202,7 +202,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
   test "a monitor on a strike the leg config doesn't name shows Running with its position",
        %{conn: conn} do
     strategy = strategy_fixture()
-    pool = pool_fixture("DETAILRES1")
+    pool = pool_fixture("DTRES1")
 
     version =
       version_fixture(strategy, %{
@@ -218,7 +218,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
 
     {:ok, run} =
       Sim.open_sim_run(version, %{
-        symbol: "DETAILRES1",
+        symbol: "DTRES1",
         expiry: "20271231",
         strike: Decimal.new("145.00"),
         right: "C",
@@ -238,17 +238,17 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     {:ok, [pid], []} = TradingOptionsSim.SimActivator.activate(version)
 
     message =
-      %{type: :price, symbol: "DETAILRES1", source: :ibkr, data: %{last: 150.0}}
+      %{type: :price, symbol: "DTRES1", source: :ibkr, data: %{last: 150.0}}
       |> Map.put(:__struct__, TradingHub.Message)
 
-    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DETAILRES1", message)
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:DTRES1", message)
     sync_monitor(pid)
 
     {:ok, _view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
 
     assert html =~ "Running"
     refute html =~ "Not running"
-    assert html =~ "DETAILRES1271231C00145000"
+    assert html =~ "DTRES1271231C00145000"
     assert html =~ ~r/\$5\.00\s*×\s*1/
     assert html =~ "Mark"
     # $5.00/share x 100 x 1: paid in full up front, so also the capital.
