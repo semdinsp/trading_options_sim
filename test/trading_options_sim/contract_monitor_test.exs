@@ -1860,6 +1860,86 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "stop loss / take profit (params.risk_controls)" do
+    @risk %{
+      "method" => "percent_of_entry",
+      "stop_loss_percent" => 15,
+      "take_profit_percent" => 25
+    }
+    @always_in %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0}
+    @never_out %{"signal" => "run_underlying_price", "op" => "lt", "value" => 0}
+
+    defp risk_version(params) do
+      version_fixture(%{"entry" => @always_in, "exit" => @never_out}, params)
+    end
+
+    # Enter at spot 150 (Black-Scholes, deterministic), then move spot.
+    defp enter_then_move(symbol, params, new_spot) do
+      {pid, run} = start_monitor(risk_version(params), contract_key(symbol))
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+      assert ContractMonitor.snapshot(pid).position_open?
+      broadcast_underlying_price(symbol, new_spot)
+      sync(pid)
+      {pid, Sim.get_sim_run!(run.id)}
+    end
+
+    test "sets and persists the levels at entry" do
+      {pid, run} = start_monitor(risk_version(%{"risk_controls" => @risk}), contract_key("SLTP0"))
+      broadcast_underlying_price("SLTP0", 150.0)
+      sync(pid)
+
+      run = Sim.get_sim_run!(run.id)
+
+      assert Decimal.equal?(
+               run.stop_loss_price,
+               Decimal.mult(run.entry_price, Decimal.new("0.85"))
+             )
+
+      assert Decimal.equal?(
+               run.take_profit_price,
+               Decimal.mult(run.entry_price, Decimal.new("1.25"))
+             )
+    end
+
+    test "a large adverse move exits with stop_loss" do
+      {pid, run} = enter_then_move("SLTP1", %{"risk_controls" => @risk}, 120.0)
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert run.exit_reason == "stop_loss"
+    end
+
+    test "a large favorable move exits with take_profit" do
+      {pid, run} = enter_then_move("SLTP2", %{"risk_controls" => @risk}, 185.0)
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert run.exit_reason == "take_profit"
+    end
+
+    # A stop is risk control: min_hold only suppresses the RULE exit.
+    test "the stop fires even inside min_hold_seconds" do
+      {_pid, run} =
+        enter_then_move("SLTP3", %{"risk_controls" => @risk, "min_hold_seconds" => 3600}, 120.0)
+
+      assert run.exit_reason == "stop_loss"
+    end
+
+    # Must NOT fire on healthy input: TradingCore.RiskControls defaults to
+    # 5%/10% for a missing config, and that must never reach a version
+    # without risk_controls.
+    test "a version without risk_controls gets no stop, even on a large move" do
+      {pid, run} = enter_then_move("SLTP4", %{}, 120.0)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert run.status == "open"
+      assert run.stop_loss_price == nil
+    end
+
+    test "a small move inside the band keeps the position" do
+      {pid, run} = enter_then_move("SLTP5", %{"risk_controls" => @risk}, 150.5)
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert run.status == "open"
+    end
+  end
+
   describe "signal subscriptions across reconnects" do
     # Phoenix.PubSub.subscribe/2 is not idempotent. On 2026-09-24, 83
     # signal topics were held twice across 75 monitors after one

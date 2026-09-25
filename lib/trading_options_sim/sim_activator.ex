@@ -508,7 +508,9 @@ defmodule TradingOptionsSim.SimActivator do
                  direction: version.direction,
                  quantity: 1,
                  position_open?: not is_nil(run.entry_at),
-                 entered_at: run.entry_at
+                 entered_at: run.entry_at,
+                 stop_loss_price: run.stop_loss_price,
+                 take_profit_price: run.take_profit_price
                ] ++ pricing_opts
              ]},
           restart: :transient
