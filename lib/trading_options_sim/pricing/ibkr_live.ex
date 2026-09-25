@@ -69,6 +69,8 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   """
 
   use GenServer
+
+  alias TradingOptionsSim.Pricing.ResubscribeBackoff
   require Logger
 
   defstruct [
@@ -77,7 +79,11 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     depend_count: 0,
     subscribed?: false,
     last_tick: nil,
-    last_quote: nil
+    last_quote: nil,
+    # Recovery after a trading_hub restart; see handle_info({:nodeup, _}).
+    resubscribe_count: 0,
+    retry_attempt: 0,
+    retry_timer: nil
   ]
 
   @type occ_symbol :: String.t()
@@ -185,15 +191,16 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     occ_symbol = Keyword.fetch!(opts, :occ_symbol)
     contract = Keyword.fetch!(opts, :contract)
 
-    subscribed? =
-      case subscribe_to_hub(occ_symbol, contract) do
-        :ok -> true
-        {:error, _reason} -> false
-      end
+    # Exactly once per process: monitor_nodes/1 stacks, and each extra
+    # call would deliver another duplicate {:nodeup, _}.
+    :net_kernel.monitor_nodes(true)
+
+    subscribed? = subscribe_to_hub(occ_symbol, contract) == :ok
 
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{occ_symbol}")
 
-    {:ok, %__MODULE__{occ_symbol: occ_symbol, contract: contract, subscribed?: subscribed?}}
+    state = %__MODULE__{occ_symbol: occ_symbol, contract: contract, subscribed?: subscribed?}
+    {:ok, ResubscribeBackoff.after_attempt(state)}
   end
 
   @impl true
@@ -273,7 +280,38 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     end
   end
 
+  # A trading_hub restart drops every subscription it held, and nothing
+  # restarts this process, so without this the option's ticks stop for
+  # good and the monitor goes stale. That happened on 2026-09-25: 30 of 31
+  # listeners were stale until the node was restarted. Re-subscribe when
+  # the hub node comes back, and keep retrying until it accepts.
+  def handle_info({:nodeup, node}, state) do
+    if node == Application.get_env(:trading_options_sim, :hub_node) do
+      Logger.info("IBKRLive: #{state.occ_symbol} -- trading_hub back up, re-subscribing")
+      {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:nodedown, _node}, state), do: {:noreply, state}
+
+  def handle_info(:retry_subscribe, state) do
+    state = %{state | retry_timer: nil}
+    {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
+
+  # The hub refcounts by {symbol, caller}, so re-subscribing a caller
+  # tag it already holds is a harmless no-op.
+  defp resubscribe(state) do
+    %{
+      state
+      | subscribed?: subscribe_to_hub(state.occ_symbol, state.contract) == :ok,
+        resubscribe_count: state.resubscribe_count + 1
+    }
+  end
 
   # The single place this process ever unsubscribes from trading_hub —
   # GenServer guarantees this runs before the process actually exits,

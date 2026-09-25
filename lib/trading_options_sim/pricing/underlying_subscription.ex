@@ -65,6 +65,8 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
 
   use GenServer
 
+  alias TradingOptionsSim.Pricing.ResubscribeBackoff
+
   require Logger
 
   defstruct [
@@ -79,7 +81,10 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
     # cannot distinguish "re-subscribed and failed" from "never tried".
     # Also a genuine operational signal: a climbing count means the hub
     # or the Polygon socket is flapping.
-    resubscribe_count: 0
+    resubscribe_count: 0,
+    # Backoff state for retrying a failed subscribe; see ResubscribeBackoff.
+    retry_attempt: 0,
+    retry_timer: nil
   ]
 
   @type symbol :: String.t()
@@ -271,7 +276,7 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
     # IBKRLive startup: this is a plain hub RPC, not a start_child
     # against the same DynamicSupervisor that is currently starting this
     # process. See ContractMonitor.handle_continue/2 for that deadlock.
-    {:ok, %{state | subscribed?: subscribe(state) == :ok}}
+    {:ok, ResubscribeBackoff.after_attempt(%{state | subscribed?: subscribe(state) == :ok})}
   end
 
   @impl true
@@ -333,7 +338,7 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
     if node == hub_node() do
       Logger.info("UnderlyingSubscription: #{state.symbol} — trading_hub back up, re-subscribing")
 
-      {:noreply, resubscribe(state)}
+      {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
     else
       {:noreply, state}
     end
@@ -353,7 +358,7 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
       "UnderlyingSubscription: #{state.symbol} — polygon websocket re-authed, re-subscribing"
     )
 
-    {:noreply, resubscribe(state)}
+    {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
   end
 
   # Every other broadcast on "system:health", and anything else. A
@@ -363,6 +368,14 @@ defmodule TradingOptionsSim.Pricing.UnderlyingSubscription do
   # sibling app (trading_system's connection GenServer took
   # "account:equity" broadcasts it had no clause for and crashed with
   # FunctionClauseError on every reconnect).
+  # A failed subscribe keeps retrying with backoff until the hub accepts
+  # (see ResubscribeBackoff) -- a single attempt at :nodeup lands while
+  # the restarted hub isn't taking subscriptions yet.
+  def handle_info(:retry_subscribe, state) do
+    state = %{state | retry_timer: nil}
+    {:noreply, state |> resubscribe() |> ResubscribeBackoff.after_attempt()}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
 
   # Re-issue is deliberately broad rather than precise: both hub modules
