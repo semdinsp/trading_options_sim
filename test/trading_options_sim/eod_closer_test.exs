@@ -92,12 +92,13 @@ defmodule TradingOptionsSim.EodCloserTest do
         version
       end
 
-    key = contract_key(symbol)
+    expiry = Keyword.get(opts, :expiry, "20271231")
+    key = {symbol, expiry, Decimal.new("150.00"), "C"}
 
     {:ok, run} =
       Sim.open_sim_run(version, %{
         symbol: symbol,
-        expiry: "20271231",
+        expiry: expiry,
         strike: Decimal.new("150.00"),
         right: "C",
         multiplier: 100,
@@ -166,6 +167,68 @@ defmodule TradingOptionsSim.EodCloserTest do
 
     assert ContractMonitor.snapshot(pid).position_open? == true
     assert Sim.get_sim_run!(run.id).status == "open"
+  end
+
+  # D3 (trading_live OPTIONS_PROMOTION_PLAN.md): a contract inside its
+  # expiry window (<= expiry_close_dte, 1) must be flat by that day's
+  # close, overnight_hold or not -- holding it would carry it into
+  # expiry day.
+  describe "expiry window" do
+    defp et_date_plus(days) do
+      DateTime.now!("America/New_York")
+      |> DateTime.to_date()
+      |> Date.add(days)
+      |> Calendar.strftime("%Y%m%d")
+    end
+
+    test "closes an expiring contract even when overnight_hold is set" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 5)
+
+      {_pid, run} =
+        start_monitor_with_open_position(exchange, "EODEXP1",
+          overnight_hold: true,
+          expiry: et_date_plus(1)
+        )
+
+      :ok = EodCloser.run_once()
+      Process.sleep(50)
+
+      closed = Sim.get_sim_run!(run.id)
+      assert closed.status == "closed"
+      assert closed.exit_reason == "expiry"
+    end
+
+    test "labels an expiring contract's close \"expiry\", not eod_flatten" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 5)
+
+      {_pid, run} = start_monitor_with_open_position(exchange, "EODEXP2", expiry: et_date_plus(1))
+
+      :ok = EodCloser.run_once()
+      Process.sleep(50)
+
+      assert Sim.get_sim_run!(run.id).exit_reason == "expiry"
+    end
+
+    # Must NOT fire on healthy input: two days out is outside the window,
+    # so overnight_hold still keeps the position.
+    test "overnight_hold still holds a contract outside its expiry window" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 5)
+
+      {pid, run} =
+        start_monitor_with_open_position(exchange, "EODEXP3",
+          overnight_hold: true,
+          expiry: et_date_plus(2)
+        )
+
+      :ok = EodCloser.run_once()
+      Process.sleep(50)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).status == "open"
+    end
   end
 
   test "does not close a position when its exchange closes outside the window" do
