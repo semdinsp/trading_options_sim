@@ -339,6 +339,8 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   @doc false
   def caller_tag(occ_symbol), do: occ_symbol
 
+  # Every failure log includes the contract map that was sent, so a
+  # rejected or failed subscribe can be diagnosed from the log alone.
   defp subscribe_to_hub(occ_symbol, contract) do
     case IbPortfolio.HubClient.call_hub(
            TradingOptionsSim.HubClient,
@@ -352,13 +354,18 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
 
       {:ok, {:error, reason}} ->
         Logger.error(
-          "IBKRLive: subscribe_symbol(#{occ_symbol}) rejected by trading_hub: #{inspect(reason)}"
+          "IBKRLive: subscribe_symbol(#{occ_symbol}) rejected by trading_hub: #{inspect(reason)}, " <>
+            "contract: #{inspect(contract)}"
         )
 
         {:error, reason}
 
       {:error, reason} ->
-        Logger.error("IBKRLive: subscribe_symbol(#{occ_symbol}) RPC failed: #{inspect(reason)}")
+        Logger.error(
+          "IBKRLive: subscribe_symbol(#{occ_symbol}) RPC failed: #{inspect(reason)}, " <>
+            "contract: #{inspect(contract)}"
+        )
+
         {:error, reason}
     end
   catch
@@ -369,7 +376,8 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     # non-fatal) instead of crashing this listener's init/1.
     :exit, reason ->
       Logger.error(
-        "IBKRLive: subscribe_symbol(#{occ_symbol}) HubClient unreachable: #{inspect(reason)}"
+        "IBKRLive: subscribe_symbol(#{occ_symbol}) HubClient unreachable: #{inspect(reason)}, " <>
+          "contract: #{inspect(contract)}"
       )
 
       {:error, reason}
