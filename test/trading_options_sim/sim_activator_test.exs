@@ -160,6 +160,28 @@ defmodule TradingOptionsSim.SimActivatorTest do
       assert Decimal.equal?(snap.strike, held.strike)
     end
 
+    # A restart must not drop a position's stop: the levels saved on the
+    # run come back into the resumed monitor.
+    test "a resumed position keeps its stop-loss and take-profit levels" do
+      pool = pool_fixture(["RESUME8"])
+      version = always_enter_version(pool)
+      run = entered_run_on(version, "RESUME8", "145.00")
+
+      {:ok, run} =
+        run
+        |> Ecto.Changeset.change(
+          stop_loss_price: Decimal.new("4.25"),
+          take_profit_price: Decimal.new("6.25")
+        )
+        |> TradingOptionsSim.Repo.update()
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      state = :sys.get_state(pid)
+      assert Decimal.equal?(state.stop_loss_price, run.stop_loss_price)
+      assert Decimal.equal?(state.take_profit_price, run.take_profit_price)
+    end
+
     test "a symbol with no open run still resolves and opens a new one" do
       pool = pool_fixture(["RESUME4"])
       version = always_enter_version(pool)

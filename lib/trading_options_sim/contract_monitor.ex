@@ -143,7 +143,9 @@ defmodule TradingOptionsSim.ContractMonitor do
   # touch (sell the bid, buy the ask). Every other fill is a
   # rule-triggered transition a real desk would work, so it crosses only
   # @worked_spread_fraction of the spread.
-  @forced_exit_reasons ~w(expiry eod_flatten)
+  # stop_loss is here too: a stop is a market exit, so it crosses the
+  # full spread. take_profit is a resting limit, filled like a rule exit.
+  @forced_exit_reasons ~w(expiry eod_flatten stop_loss)
 
   # Fraction of the bid/ask spread a *worked* (rule-triggered) fill gives
   # up, measured from the mid. 0.5 would be the full touch; the default
@@ -232,6 +234,11 @@ defmodule TradingOptionsSim.ContractMonitor do
     # Set once an unpriced fill has been skipped and logged, cleared by
     # the next priced fill -- one warning per episode, not one per tick.
     unpriced_warned?: false,
+    # Stop-loss / take-profit levels for the open position, set at entry
+    # from params["risk_controls"] (nil when the version has none). See
+    # risk_exit/2.
+    stop_loss_price: nil,
+    take_profit_price: nil,
     # Same warn-once shape for the staleness gate in evaluate_ibkr_live/2.
     stale_warned?: false,
     signal_names: [],
@@ -420,6 +427,10 @@ defmodule TradingOptionsSim.ContractMonitor do
       # that already holds a position, so min_hold counts from the real
       # entry rather than from the restart.
       entered_at: Keyword.get(opts, :entered_at),
+      # A resumed run brings its own levels back (SimActivator passes them
+      # from the SimRun), so a restart can't drop a position's stop.
+      stop_loss_price: Keyword.get(opts, :stop_loss_price),
+      take_profit_price: Keyword.get(opts, :take_profit_price),
       min_hold_seconds: min_hold_seconds(strategy_version),
       signal_names: signal_names,
       canonical_names: canonical_names
@@ -960,11 +971,79 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp maybe_transition(%{position_open?: true} = state, snapshot) do
-    if min_hold_elapsed?(state) and RuleEngine.evaluate(state.exit_rule, snapshot) and
-         session_open?(state) do
-      submit_exit(state, snapshot, "rule_exit")
-    else
-      state
+    case risk_exit(state, snapshot) do
+      nil ->
+        if min_hold_elapsed?(state) and RuleEngine.evaluate(state.exit_rule, snapshot) and
+             session_open?(state) do
+          submit_exit(state, snapshot, "rule_exit")
+        else
+          state
+        end
+
+      # Same session gate as a rule exit: a real stop only executes in
+      # session, and outside it a model price can move on after-hours
+      # underlying ticks. (Stale IBKR data is already blocked upstream.)
+      reason ->
+        if session_open?(state), do: submit_exit(state, snapshot, reason), else: state
+    end
+  end
+
+  # Stop-loss / take-profit, checked on every priced tick BEFORE the rule
+  # exit, and deliberately NOT subject to min_hold_seconds: min_hold only
+  # stops a rule exit firing on noise; a stop is risk control and must
+  # act as soon as the price crosses. Levels and hit checks come from
+  # TradingCore.RiskControls, the same code trading_system and
+  # trading_live use. Checked against the option's price
+  # (run_current_price), since the levels are percentages of the premium
+  # paid -- or, when a tick carries a quote but no price, the quote mid,
+  # the same fallback fills use, so the levels are never left unchecked.
+  defp risk_exit(%{stop_loss_price: nil, take_profit_price: nil}, _snapshot), do: nil
+
+  defp risk_exit(state, snapshot) do
+    case decimal_price(snapshot["run_current_price"]) || quote_mid(snapshot) do
+      nil ->
+        nil
+
+      price ->
+        cond do
+          TradingCore.RiskControls.hit_stop_loss?(state.stop_loss_price, price, state.direction) ->
+            "stop_loss"
+
+          TradingCore.RiskControls.hit_take_profit?(
+            state.take_profit_price,
+            price,
+            state.direction
+          ) ->
+            "take_profit"
+
+          true ->
+            nil
+        end
+    end
+  end
+
+  # Levels for a new position -- ONLY when the version sets
+  # params["risk_controls"]. TradingCore.RiskControls.levels/3 falls back
+  # to a 5%/10% default for a missing config, which here would silently
+  # put stops on every existing strategy; a version without the key keeps
+  # its purely rule-driven exits.
+  defp risk_levels(
+         %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
+         price
+       ),
+       do: TradingCore.RiskControls.levels(price, config, state.direction)
+
+  defp risk_levels(_state, _price), do: {nil, nil}
+
+  defp decimal_price(price) when is_float(price), do: Decimal.from_float(price)
+  defp decimal_price(price) when is_integer(price), do: Decimal.new(price)
+  defp decimal_price(%Decimal{} = price), do: price
+  defp decimal_price(_price), do: nil
+
+  defp quote_mid(snapshot) do
+    case quote_from(snapshot) do
+      {bid, ask} -> bid |> Decimal.add(ask) |> Decimal.div(2)
+      nil -> nil
     end
   end
 
@@ -1183,6 +1262,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp record_entry(state, snapshot, action, price, fill_basis) do
     now = DateTime.utc_now()
+    {stop_loss_price, take_profit_price} = risk_levels(state, price)
 
     {run, state} = ensure_open_run(state)
 
@@ -1199,6 +1279,8 @@ defmodule TradingOptionsSim.ContractMonitor do
            %{
              entry_at: now,
              entry_price: price,
+             stop_loss_price: stop_loss_price,
+             take_profit_price: take_profit_price,
              risk_at_entry: Sim.compute_risk_at_entry(price, state.multiplier, state.quantity),
              entry_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis)),
              context: entry_context(state)
@@ -1211,7 +1293,14 @@ defmodule TradingOptionsSim.ContractMonitor do
 
         Sim.maybe_mark_prior_run_as_churn(state.strategy_version.id, run)
 
-        %{state | position_open?: true, entered_at: now, unpriced_warned?: false}
+        %{
+          state
+          | position_open?: true,
+            entered_at: now,
+            unpriced_warned?: false,
+            stop_loss_price: stop_loss_price,
+            take_profit_price: take_profit_price
+        }
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} entry fill failed: #{inspect(reason)}")
@@ -1276,7 +1365,14 @@ defmodule TradingOptionsSim.ContractMonitor do
           "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} exited at #{Decimal.to_string(price)} (#{exit_reason})"
         )
 
-        %{state | position_open?: false, entered_at: nil, unpriced_warned?: false}
+        %{
+          state
+          | position_open?: false,
+            entered_at: nil,
+            unpriced_warned?: false,
+            stop_loss_price: nil,
+            take_profit_price: nil
+        }
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} exit fill failed: #{inspect(reason)}")
