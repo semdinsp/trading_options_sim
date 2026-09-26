@@ -38,14 +38,15 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
       )
 
     now = DateTime.utc_now()
+    entry_at = Map.get(attrs, :entry_at, now)
     entry_price = Decimal.new("5.00")
     risk_at_entry = Sim.compute_risk_at_entry(entry_price, 100, 1)
 
     {:ok, {_fill, run}} =
       Sim.record_entry_fill(
         run,
-        %{action: "buy", quantity: 1, fill_price: entry_price, filled_at: now},
-        %{entry_at: now, entry_price: entry_price, risk_at_entry: risk_at_entry}
+        %{action: "buy", quantity: 1, fill_price: entry_price, filled_at: entry_at},
+        %{entry_at: entry_at, entry_price: entry_price, risk_at_entry: risk_at_entry}
       )
 
     {:ok, {_fill, run}} =
@@ -212,5 +213,67 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
       |> render_click()
 
     assert html =~ "strategy: #{strategy.id}"
+  end
+
+  describe "final_score and pnl_bps_h below the sample floor" do
+    alias TradingOptionsSimWeb.CandidatesLive
+
+    # Every run is held one hour on $500 of premium: 500 capital-hours.
+    defp closed_runs(version, count, pnl) do
+      hour_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      for _ <- 1..count do
+        candidate_run_fixture(version, %{
+          exit_price: Decimal.new("5.10"),
+          realized_pnl: Decimal.new(pnl),
+          entry_at: hour_ago
+        })
+      end
+    end
+
+    test "pnl_bps_per_hour is net P&L per $ of premium per hour, in bps" do
+      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("300"), Decimal.new("15000")) == 200.0
+      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("-9.46"), Decimal.new("27984")) < 0
+      assert CandidatesLive.pnl_bps_per_hour(nil, Decimal.new("1")) == nil
+      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("1"), nil) == nil
+      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("1"), Decimal.new("0.001")) == nil
+    end
+
+    test "a thin version's higher ratio sorts after a sampled one, and is greyed", %{conn: conn} do
+      sampled = version_fixture(strategy_fixture(%{name: "Sampled Strategy"}))
+      closed_runs(sampled, 30, "10")
+      thin = version_fixture(strategy_fixture(%{name: "Thin Lucky Strategy"}))
+      closed_runs(thin, 1, "200")
+
+      {:ok, view, _html} = live(conn, ~p"/candidates")
+      view |> element("button", "Show all") |> render_click()
+
+      for key <- ["final_score", "pnl_bps_h"] do
+        html = view |> element("th[phx-value-sort_by='#{key}']") |> render_click()
+
+        {sampled_at, _} = :binary.match(html, "Sampled Strategy")
+        {thin_at, _} = :binary.match(html, "Thin Lucky Strategy")
+        assert sampled_at < thin_at, "#{key}: thin version should sort last"
+      end
+
+      # 30 * $10 over 30 * 500 capital-hours = 200 bps/h.
+      assert render(view) =~ "200.00"
+      assert render(view) =~ "too few to rank on"
+    end
+
+    # Regression: a missing value used to sort FIRST on a descending sort.
+    test "a version with no lcb95 sorts last on the default descending sort", %{conn: conn} do
+      sampled = version_fixture(strategy_fixture(%{name: "Sampled Strategy"}))
+      closed_runs(sampled, 30, "10")
+      single = version_fixture(strategy_fixture(%{name: "Single Close Strategy"}))
+      closed_runs(single, 1, "50")
+
+      {:ok, view, _html} = live(conn, ~p"/candidates")
+      html = view |> element("button", "Show all") |> render_click()
+
+      {sampled_at, _} = :binary.match(html, "Sampled Strategy")
+      {single_at, _} = :binary.match(html, "Single Close Strategy")
+      assert sampled_at < single_at
+    end
   end
 end

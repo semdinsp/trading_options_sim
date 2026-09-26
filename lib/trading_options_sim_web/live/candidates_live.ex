@@ -27,6 +27,14 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   multiplier * quantity`) as the risk denominator — see
   `Sim.compute_risk_at_entry/3`'s own `TODO` for why (no strategy in
   this app sets a real stop-loss yet).
+
+  `final_score` is R per capital-hour, so dollars never enter it and a
+  version can rank on it with negative P&L (R weights every trade
+  equally; dollars weight by premium). `pnl_bps_h` sits beside it: net
+  realized P&L per dollar of premium per hour held, in basis points,
+  over the same population and capital-hours. Both are ratios that one
+  lucky trade on a cheap contract can dominate, so below the sample
+  floor they are greyed out and always sort last.
   """
 
   use TradingOptionsSimWeb, :live_view
@@ -37,6 +45,11 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   alias TradingOptionsSim.Sim
 
   @sample_floor 30
+
+  # Ratio columns that are not ranked on below the sample floor.
+  @floored_ratio_keys [:final_score, :pnl_bps_h]
+  # Same divisor guard as Sim's final_score (dollar-hours).
+  @min_capital_hours 0.01
   @refresh_ms :timer.seconds(30)
 
   @default_sort_dir %{"gates_failed" => :asc}
@@ -132,7 +145,9 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
           gates: gates,
           candidate?: CandidateGates.candidate?(gates),
           blocked_only_by_tenure?: CandidateGates.blocked_only_by_tenure?(gates),
-          gates_failed: CandidateGates.gates_failed(gates)
+          gates_failed: CandidateGates.gates_failed(gates),
+          pnl_bps_h: pnl_bps_per_hour(row.realized_pnl, row.capital_hours),
+          ratio_trusted?: row.n_closes >= @sample_floor
         })
       end)
 
@@ -154,6 +169,22 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
     |> assign(:total_unfiltered, total_unfiltered)
   end
 
+  @doc false
+  # Net realized P&L per dollar of premium at risk per hour held, in
+  # basis points: realized_pnl / capital_hours * 10_000. Same run
+  # population and capital_hours as final_score (Sim computes both in
+  # one query), so the two columns differ only in R vs dollars.
+  def pnl_bps_per_hour(nil, _capital_hours), do: nil
+  def pnl_bps_per_hour(_realized_pnl, nil), do: nil
+
+  def pnl_bps_per_hour(realized_pnl, capital_hours) do
+    hours = to_float(capital_hours)
+    if hours < @min_capital_hours, do: nil, else: to_float(realized_pnl) / hours * 10_000
+  end
+
+  defp to_float(%Decimal{} = d), do: Decimal.to_float(d)
+  defp to_float(n) when is_number(n), do: n / 1
+
   defp maybe_filter_sample_floor(rows, true), do: rows
 
   defp maybe_filter_sample_floor(rows, false),
@@ -170,20 +201,25 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
 
   defp sort_rows(rows, sort_by, sort_dir) do
     key = String.to_existing_atom(sort_by)
+    {missing, present} = Enum.split_with(rows, &(sort_value(&1, key) == :missing))
 
-    Enum.sort_by(rows, &sort_value(&1, key), sort_comparator(sort_dir))
+    Enum.sort_by(present, &sort_value(&1, key), sort_comparator(sort_dir)) ++ missing
   end
 
-  # nil (never computed) always sorts last, regardless of direction —
-  # matches the source page's own "unrated always sorts last" rule for
-  # its `rating` column, generalized to every nullable numeric column
-  # here (lcb95, expectancy_r, cost_margin, rating).
+  # A missing value (nil, or a ratio below the sample floor) always sorts
+  # last, regardless of direction — matches the source page's own
+  # "unrated always sorts last" rule for its `rating` column, generalized
+  # to every nullable numeric column here (lcb95, expectancy_r,
+  # cost_margin, rating, final_score, pnl_bps_h). It is split off before
+  # sorting: an earlier version encoded it as a {1, 0} sort key, which a
+  # descending sort put FIRST.
+  defp sort_value(%{ratio_trusted?: false}, key) when key in @floored_ratio_keys, do: :missing
+
   defp sort_value(row, key) do
     case Map.get(row, key) do
-      nil -> {1, 0}
-      %Decimal{} = value -> {0, Decimal.to_float(value)}
-      value when is_number(value) -> {0, value}
-      value -> {0, value}
+      nil -> :missing
+      %Decimal{} = value -> Decimal.to_float(value)
+      value -> value
     end
   end
 
@@ -193,6 +229,21 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   defp format_r(nil), do: "—"
   defp format_r(%Decimal{} = value), do: Decimal.round(value, 3) |> Decimal.to_string()
   defp format_r(value) when is_float(value), do: :erlang.float_to_binary(value, decimals: 3)
+
+  defp format_bps(nil), do: "—"
+  defp format_bps(value), do: :erlang.float_to_binary(value, decimals: 2)
+
+  defp ratio_class(%{ratio_trusted?: false}), do: "text-base-content/30"
+  defp ratio_class(_row), do: nil
+
+  defp ratio_title(%{ratio_trusted?: false}),
+    do: "Fewer than #{@sample_floor} closes: too few to rank on, so this sorts last"
+
+  defp ratio_title(_row), do: nil
+
+  defp pnl_bps_class(%{ratio_trusted?: false}), do: nil
+  defp pnl_bps_class(%{pnl_bps_h: v}) when is_float(v) and v < 0, do: "text-error"
+  defp pnl_bps_class(_row), do: nil
 
   defp format_price(nil), do: "—"
   defp format_price(%Decimal{} = value), do: "$#{Decimal.round(value, 2)}"
@@ -369,6 +420,14 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               </th>
               <th
                 phx-click="sort_by"
+                phx-value-sort_by="pnl_bps_h"
+                class={sort_link_class(@sort_by, "pnl_bps_h")}
+                title="Net realized P&L per $ of premium at risk per hour held, in basis points. The dollar counterpart of final_score, over the same runs and capital-hours."
+              >
+                pnl_bps_h
+              </th>
+              <th
+                phx-click="sort_by"
                 phx-value-sort_by="sr_annual"
                 class={sort_link_class(@sort_by, "sr_annual")}
                 title="Sharpe in R units (not an account Sharpe) — equals the account Sharpe only where risk per trade is a constant fraction of equity and positions do not overlap. A signal-quality measure."
@@ -427,7 +486,18 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
               <td class={["text-right tabular-nums", gate_cell_class(row.gates.dollars_agree)]}>
                 {format_price(row.realized_pnl)}
               </td>
-              <td class="text-right tabular-nums">{format_r(row.final_score)}</td>
+              <td
+                class={["text-right tabular-nums", ratio_class(row)]}
+                title={ratio_title(row)}
+              >
+                {format_r(row.final_score)}
+              </td>
+              <td
+                class={["text-right tabular-nums", ratio_class(row), pnl_bps_class(row)]}
+                title={ratio_title(row)}
+              >
+                {format_bps(row.pnl_bps_h)}
+              </td>
               <td class="text-right tabular-nums">{format_r(row.sr_annual)}</td>
               <td class="text-right tabular-nums">{format_hold_seconds(row.avg_hold_seconds)}</td>
               <td class={["normal-case", gate_cell_class(row.gates.exit_logic)]}>
