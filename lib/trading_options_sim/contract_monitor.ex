@@ -246,6 +246,11 @@ defmodule TradingOptionsSim.ContractMonitor do
     # risk_exit/2.
     stop_loss_price: nil,
     take_profit_price: nil,
+    # Premium paid for the open position, and the ExitStrategy running
+    # state (ratcheted_at / trailing_high_water_mark) for
+    # params["exit_strategy"]. See maybe_move_stop/2.
+    entry_price: nil,
+    exit_state: %{},
     # Same warn-once shape for the staleness gate in evaluate_ibkr_live/2.
     stale_warned?: false,
     signal_names: [],
@@ -438,6 +443,10 @@ defmodule TradingOptionsSim.ContractMonitor do
       # from the SimRun), so a restart can't drop a position's stop.
       stop_loss_price: Keyword.get(opts, :stop_loss_price),
       take_profit_price: Keyword.get(opts, :take_profit_price),
+      # The persisted stop already reflects any ratchet/trail before the
+      # restart; exit_state starts empty, which is safe because a moved
+      # stop only ever tightens (see apply_moved_stop/4).
+      entry_price: Keyword.get(opts, :entry_price),
       min_hold_seconds: min_hold_seconds(strategy_version),
       signal_names: signal_names,
       canonical_names: canonical_names
@@ -987,6 +996,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp maybe_transition(%{position_open?: true} = state, snapshot) do
+    state = maybe_move_stop(state, snapshot)
+
     case risk_exit(state, snapshot) do
       nil ->
         if min_hold_elapsed?(state) and RuleEngine.evaluate(state.exit_rule, snapshot) and
@@ -1016,7 +1027,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   defp risk_exit(%{stop_loss_price: nil, take_profit_price: nil}, _snapshot), do: nil
 
   defp risk_exit(state, snapshot) do
-    case decimal_price(snapshot["run_current_price"]) || quote_mid(snapshot) do
+    case premium(snapshot) do
       nil ->
         nil
 
@@ -1038,16 +1049,120 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
+  # The option's price, on which every stop and target here is set.
+  defp premium(snapshot), do: decimal_price(snapshot["run_current_price"]) || quote_mid(snapshot)
+
+  # Ratchet / trailing stops from params["exit_strategy"], via
+  # TradingCore.ExitStrategy.check/5 -- the same math and config shapes
+  # trading_system and trading_live use, so a promoted version exits the
+  # same way in both apps. Applied to the premium, the basis of the
+  # risk_controls levels:
+  #
+  #   * "ratchet" (trigger_pct, lock_pct): once the premium is up
+  #     trigger_pct, the stop moves to lock in lock_pct and the take
+  #     profit is removed, letting the winner run.
+  #   * "trailing" (trail_pct): the stop follows the best premium seen,
+  #     trail_pct behind it.
+  #
+  # Runs before risk_exit/2 on each priced tick, so the moved stop is the
+  # one checked. Like the stop itself it ignores min_hold_seconds, but it
+  # only moves in session: after hours the model price drifts on
+  # underlying ticks and would ratchet on prices nobody could trade.
+  defp maybe_move_stop(%{entry_price: nil} = state, _snapshot), do: state
+
+  defp maybe_move_stop(state, snapshot) do
+    with %{} = config <- exit_strategy_config(state),
+         true <- session_open?(state),
+         %Decimal{} = price <- premium(snapshot) do
+      case TradingCore.ExitStrategy.check(
+             state.entry_price,
+             price,
+             state.direction,
+             config,
+             state.exit_state
+           ) do
+        {:ratchet, stop, updates} -> apply_moved_stop(state, stop, updates, :clear_take_profit)
+        {:trail, stop, updates} -> apply_moved_stop(state, stop, updates, :keep_take_profit)
+        :no_ratchet -> state
+      end
+    else
+      _ -> state
+    end
+  end
+
+  defp exit_strategy_config(%{strategy_version: %{params: %{"exit_strategy" => %{} = config}}}),
+    do: config
+
+  defp exit_strategy_config(_state), do: nil
+
+  # The stop only ever tightens: a trail wider than the initial
+  # risk_controls stop, or a recomputation after a restart (exit_state
+  # starts empty, so the high-water mark restarts at entry), never loosens
+  # it. Rounded to the cent, the option's price increment, so a trend
+  # doesn't write a new stop on every sub-cent tick. Persisted on the
+  # SimRun whenever it changes, so a restart resumes the moved stop.
+  defp apply_moved_stop(state, stop, updates, take_profit) do
+    stop = Decimal.round(stop, 2)
+
+    take_profit_price =
+      if take_profit == :clear_take_profit, do: nil, else: state.take_profit_price
+
+    tighter? = tighter_stop?(stop, state.stop_loss_price, state.direction)
+    stop_loss_price = if tighter?, do: stop, else: state.stop_loss_price
+    state = %{state | exit_state: Map.merge(state.exit_state, updates)}
+
+    if tighter? or take_profit_price != state.take_profit_price do
+      Sim.update_sim_run_risk_levels(state.sim_run_id, stop_loss_price, take_profit_price)
+
+      Logger.info(
+        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+          "stop moved to #{Decimal.to_string(stop_loss_price)}" <>
+          if(is_nil(take_profit_price), do: ", take profit removed", else: "")
+      )
+
+      %{state | stop_loss_price: stop_loss_price, take_profit_price: take_profit_price}
+    else
+      state
+    end
+  end
+
+  defp tighter_stop?(_stop, nil, _direction), do: true
+  defp tighter_stop?(stop, current, "short"), do: Decimal.lt?(stop, current)
+  defp tighter_stop?(stop, current, _long), do: Decimal.gt?(stop, current)
+
   # Levels for a new position -- ONLY when the version sets
   # params["risk_controls"]. TradingCore.RiskControls.levels/3 falls back
   # to a 5%/10% default for a missing config, which here would silently
   # put stops on every existing strategy; a version without the key keeps
   # its purely rule-driven exits.
+  #
+  # Only "percent_of_entry" reaches here: StrategyVersion's changeset
+  # rejects any other method, since RiskControls would silently fall
+  # back to its default for one it can't resolve (and "volatility_multiple"
+  # is for underlying prices, not premiums).
+  #
+  # Opt-in `"round_numbers" => true` pulls the take-profit in front of a
+  # round premium ($0.05 grid) via TradingCore.RoundNumbers, where resting
+  # targets cluster and prices tend to turn (Osler, NY Fed SR125/SR150).
+  # Same flag name as trading_live. The stop is left alone.
   defp risk_levels(
          %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
          price
-       ),
-       do: TradingCore.RiskControls.levels(price, config, state.direction)
+       ) do
+    {stop_loss, take_profit} = TradingCore.RiskControls.levels(price, config, state.direction)
+
+    if config["round_numbers"] == true and take_profit do
+      {stop_loss,
+       TradingCore.RoundNumbers.adjust(take_profit, :take_profit, state.direction,
+         instrument: :option,
+         price: price,
+         entry: price,
+         tick_size: Decimal.new("0.01")
+       )}
+    else
+      {stop_loss, take_profit}
+    end
+  end
 
   defp risk_levels(_state, _price), do: {nil, nil}
 
@@ -1098,13 +1213,11 @@ defmodule TradingOptionsSim.ContractMonitor do
   ## Expiry is the close this must never delay
 
   In the equities apps the worst case for a wrongly-suppressed exit is
-  one delayed exit against a stop that still fires. Here there is no
-  stop: `stop_loss`/`take_profit` do not exist in this module, and
-  `SimRun.stop_loss_price` has no writer anywhere in this codebase
-  (see `Sim.compute_risk_at_entry/3`'s own TODO, which is also why R is
-  premium-at-risk rather than stop-distance). The backstop that makes
-  the equities argument safe is absent, so the cost of a wrongly
-  suppressed exit is bounded only by the premium.
+  one delayed exit against a stop that still fires. Here a stop exists
+  only when the version sets `params["risk_controls"]` (see
+  `risk_levels/2`; written at entry in `record_entry/5`). A version
+  without one has no backstop, so the cost of a wrongly suppressed exit
+  is bounded only by the premium.
 
   Worse, `force_close_expiry/3` exists specifically to flatten before
   assignment mechanics this simulator does not model. A gate in front
@@ -1315,7 +1428,9 @@ defmodule TradingOptionsSim.ContractMonitor do
             entered_at: now,
             unpriced_warned?: false,
             stop_loss_price: stop_loss_price,
-            take_profit_price: take_profit_price
+            take_profit_price: take_profit_price,
+            entry_price: price,
+            exit_state: %{}
         }
 
       {:error, reason} ->
@@ -1387,7 +1502,9 @@ defmodule TradingOptionsSim.ContractMonitor do
             entered_at: nil,
             unpriced_warned?: false,
             stop_loss_price: nil,
-            take_profit_price: nil
+            take_profit_price: nil,
+            entry_price: nil,
+            exit_state: %{}
         }
 
       {:error, reason} ->

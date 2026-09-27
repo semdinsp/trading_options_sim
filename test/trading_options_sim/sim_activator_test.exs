@@ -180,6 +180,8 @@ defmodule TradingOptionsSim.SimActivatorTest do
       state = :sys.get_state(pid)
       assert Decimal.equal?(state.stop_loss_price, run.stop_loss_price)
       assert Decimal.equal?(state.take_profit_price, run.take_profit_price)
+      # A ratchet/trailing stop is measured from the entry premium.
+      assert Decimal.equal?(state.entry_price, run.entry_price)
     end
 
     test "a symbol with no open run still resolves and opens a new one" do

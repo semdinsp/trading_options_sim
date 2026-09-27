@@ -199,6 +199,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     |> validate_inclusion(:source, @sources)
     |> validate_number(:generation, greater_than_or_equal_to: 0)
     |> validate_option_leg_config()
+    |> validate_params()
     |> unique_constraint([:strategy_id, :version])
     |> foreign_key_constraint(:parent_version_id)
     |> foreign_key_constraint(:target_pool_id)
@@ -311,6 +312,87 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   """
   def unlink_live_strategy_changeset(strategy_version, attrs) do
     cast(strategy_version, attrs, [:live_strategy_active, :live_unlinked_at])
+  end
+
+  @doc """
+  The stop / exit configs this app can actually run, as errors on
+  `:params` (empty when valid). Public so the promotion export applies
+  the same rules.
+
+    * `"risk_controls"`: `"method" => "percent_of_entry"` with positive
+      `"stop_loss_percent"` and `"take_profit_percent"` (percent of the
+      premium), and an optional boolean `"round_numbers"`. Any other
+      method is rejected rather than run: `TradingCore.RiskControls`
+      falls back to its 5%/10% default for a method it can't resolve,
+      and `"volatility_multiple"` is sized on the underlying's
+      volatility, not on a premium.
+    * `"exit_strategy"`: `"ratchet"` with positive `"trigger_pct"` and a
+      `"lock_pct"` from 0 up to `trigger_pct`, or `"trailing"` with a
+      `"trail_pct"` between 0 and 100 (exclusive). The shapes
+      `TradingCore.ExitStrategy` and trading_live accept.
+  """
+  @spec params_errors(map() | nil) :: [String.t()]
+  def params_errors(params) when is_map(params) do
+    risk_controls_errors(Map.get(params, "risk_controls", :absent)) ++
+      exit_strategy_errors(Map.get(params, "exit_strategy", :absent))
+  end
+
+  def params_errors(_params), do: []
+
+  defp risk_controls_errors(:absent), do: []
+
+  defp risk_controls_errors(%{"method" => "percent_of_entry"} = config) do
+    Enum.flat_map(["stop_loss_percent", "take_profit_percent"], fn key ->
+      if positive?(config[key]), do: [], else: ["risk_controls.#{key} must be a positive number"]
+    end) ++
+      if(Map.get(config, "round_numbers", false) in [true, false],
+        do: [],
+        else: ["risk_controls.round_numbers must be true or false"]
+      )
+  end
+
+  defp risk_controls_errors(%{"method" => "volatility_multiple"}),
+    do: [
+      "risk_controls.method volatility_multiple is not supported for option premiums; use percent_of_entry"
+    ]
+
+  defp risk_controls_errors(%{"method" => method}),
+    do: ["risk_controls.method #{inspect(method)} is not supported; use percent_of_entry"]
+
+  defp risk_controls_errors(_config),
+    do: ["risk_controls must be a map with \"method\" => \"percent_of_entry\""]
+
+  defp exit_strategy_errors(:absent), do: []
+
+  defp exit_strategy_errors(%{
+         "method" => "ratchet",
+         "trigger_pct" => trigger,
+         "lock_pct" => lock
+       })
+       when is_number(trigger) and is_number(lock) and trigger > 0 and lock >= 0 and
+              lock <= trigger,
+       do: []
+
+  defp exit_strategy_errors(%{"method" => "ratchet"}),
+    do: ["exit_strategy ratchet needs trigger_pct > 0 and 0 <= lock_pct <= trigger_pct"]
+
+  defp exit_strategy_errors(%{"method" => "trailing", "trail_pct" => trail})
+       when is_number(trail) and trail > 0 and trail < 100,
+       do: []
+
+  defp exit_strategy_errors(%{"method" => "trailing"}),
+    do: ["exit_strategy trailing needs 0 < trail_pct < 100"]
+
+  defp exit_strategy_errors(_config),
+    do: ["exit_strategy.method must be \"ratchet\" or \"trailing\""]
+
+  defp positive?(n), do: is_number(n) and n > 0
+
+  defp validate_params(changeset) do
+    changeset
+    |> get_field(:params)
+    |> params_errors()
+    |> Enum.reduce(changeset, &add_error(&2, :params, &1))
   end
 
   defp validate_option_leg_config(changeset) do

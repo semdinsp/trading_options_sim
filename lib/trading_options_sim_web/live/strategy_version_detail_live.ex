@@ -14,13 +14,10 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     * No IBKR reconcile / portfolio-risk-guardian sections — this is a
       simulator with no real broker positions to reconcile against and
       no cross-strategy risk system.
-    * No stop-loss/take-profit exit-levels table — `SimRun` carries
-      `stop_loss_price`/`take_profit_price` fields, but nothing in this
-      app currently computes or writes them (there's no
-      `risk_controls`-style config); exit is purely rule-driven via
-      `entry_rule`/`exit_rule` JSON evaluated by `TradingCore.RuleEngine`,
-      shown as-is rather than fabricating a levels table with no real
-      data behind it.
+    * No stop-loss/take-profit exit-levels table — levels exist only for
+      versions with `params["risk_controls"]` (set at entry, moved by
+      `params["exit_strategy"]`; see `ContractMonitor`), and are stored
+      on each `SimRun` rather than shown here.
     * One row per target-pool member (underlying), not per `SimRun` —
       a target pool member is always an underlying; the specific option
       contract for it is resolved at activation time (see

@@ -25,8 +25,8 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
   `expectancy_r`/`lcb95` here are dollar-R-multiples using
   `SimRun.risk_at_entry` = entry premium at risk (`entry_price *
   multiplier * quantity`) as the risk denominator — see
-  `Sim.compute_risk_at_entry/3`'s own `TODO` for why (no strategy in
-  this app sets a real stop-loss yet).
+  the comment above `Sim.compute_risk_at_entry/3` for why a stop, where a
+  version has one, doesn't change it.
 
   `final_score` is R per capital-hour, so dollars never enter it and a
   version can rank on it with negative P&L (R weights every trade

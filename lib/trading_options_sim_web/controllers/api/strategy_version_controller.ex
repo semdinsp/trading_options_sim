@@ -59,12 +59,21 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
 
   The single payload trading_live promotes from -- see
   `TradingOptionsSim.Sim.PromotionExport` for the contract. 404 for an
-  unknown id.
+  unknown id; 422 with `reasons` when the version's stop config can't be
+  promoted as-is (e.g. no `risk_controls`).
   """
   def promotion_export(conn, %{"id" => id}) do
     case TradingOptionsSim.Sim.PromotionExport.build(id) do
-      {:ok, payload} -> json(conn, payload)
-      {:error, :not_found} -> conn |> put_status(:not_found) |> json(%{"error" => "not_found"})
+      {:ok, payload} ->
+        json(conn, payload)
+
+      {:error, :not_found} ->
+        conn |> put_status(:not_found) |> json(%{"error" => "not_found"})
+
+      {:error, {:not_promotable, reasons}} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{"error" => "not_promotable", "reasons" => reasons})
     end
   end
 
