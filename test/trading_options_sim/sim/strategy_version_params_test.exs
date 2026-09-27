@@ -34,12 +34,30 @@ defmodule TradingOptionsSim.Sim.StrategyVersionParamsTest do
     end
   end
 
-  test "rejects volatility_multiple, which is sized on the underlying, not the premium" do
-    params = %{"risk_controls" => %{"method" => "volatility_multiple", "stop_multiple" => 2}}
+  @vol %{
+    "method" => "volatility_multiple",
+    "sl_vol_mult" => 0.5,
+    "tp_vol_mult" => 1.0,
+    "stop_loss_percent" => 15,
+    "take_profit_percent" => 25
+  }
 
-    assert {:error, changeset} = create(params)
+  test "accepts volatility_multiple with its multiples and fallback percents" do
+    assert StrategyVersion.params_errors(%{"risk_controls" => @vol}) == []
+    assert {:ok, _} = create(%{"risk_controls" => Map.put(@vol, "round_numbers", true)})
+  end
+
+  # Without the percents a missing premium vol would fall back to the
+  # library's 5%/10% default.
+  test "rejects volatility_multiple without its fallback percents or multiples" do
+    assert {:error, changeset} =
+             create(%{"risk_controls" => Map.delete(@vol, "stop_loss_percent")})
+
     assert [{msg, _}] = Keyword.get_values(changeset.errors, :params)
-    assert msg =~ "volatility_multiple is not supported for option premiums"
+    assert msg =~ "stop_loss_percent"
+
+    assert [_] =
+             StrategyVersion.params_errors(%{"risk_controls" => Map.delete(@vol, "sl_vol_mult")})
   end
 
   # RiskControls falls back to its 5%/10% default for an unknown method,

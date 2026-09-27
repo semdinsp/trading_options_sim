@@ -321,11 +321,13 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
 
     * `"risk_controls"`: `"method" => "percent_of_entry"` with positive
       `"stop_loss_percent"` and `"take_profit_percent"` (percent of the
-      premium), and an optional boolean `"round_numbers"`. Any other
-      method is rejected rather than run: `TradingCore.RiskControls`
-      falls back to its 5%/10% default for a method it can't resolve,
-      and `"volatility_multiple"` is sized on the underlying's
-      volatility, not on a premium.
+      premium), or `"volatility_multiple"` with positive `"sl_vol_mult"`
+      and `"tp_vol_mult"` (multiples of the premium's daily vol, see
+      `ContractMonitor.premium_vol_values/2`) AND the two percents, used
+      when that vol is unavailable. Optional boolean `"round_numbers"`
+      for either. Any other method is rejected rather than run:
+      `TradingCore.RiskControls` falls back to its 5%/10% default for a
+      method it can't resolve.
     * `"exit_strategy"`: `"ratchet"` with positive `"trigger_pct"` and a
       `"lock_pct"` from 0 up to `trigger_pct`, or `"trailing"` with a
       `"trail_pct"` between 0 and 100 (exclusive). The shapes
@@ -341,8 +343,32 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
 
   defp risk_controls_errors(:absent), do: []
 
-  defp risk_controls_errors(%{"method" => "percent_of_entry"} = config) do
-    Enum.flat_map(["stop_loss_percent", "take_profit_percent"], fn key ->
+  defp risk_controls_errors(%{"method" => "percent_of_entry"} = config),
+    do: levels_config_errors(config, ["stop_loss_percent", "take_profit_percent"])
+
+  # The percents are required too: they are the fallback when the entry
+  # tick has no premium vol, and without them RiskControls would use its
+  # own default.
+  defp risk_controls_errors(%{"method" => "volatility_multiple"} = config),
+    do:
+      levels_config_errors(config, [
+        "sl_vol_mult",
+        "tp_vol_mult",
+        "stop_loss_percent",
+        "take_profit_percent"
+      ])
+
+  defp risk_controls_errors(%{"method" => method}),
+    do: [
+      "risk_controls.method #{inspect(method)} is not supported; " <>
+        "use percent_of_entry or volatility_multiple"
+    ]
+
+  defp risk_controls_errors(_config),
+    do: ["risk_controls must be a map with a \"method\""]
+
+  defp levels_config_errors(config, keys) do
+    Enum.flat_map(keys, fn key ->
       if positive?(config[key]), do: [], else: ["risk_controls.#{key} must be a positive number"]
     end) ++
       if(Map.get(config, "round_numbers", false) in [true, false],
@@ -350,17 +376,6 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
         else: ["risk_controls.round_numbers must be true or false"]
       )
   end
-
-  defp risk_controls_errors(%{"method" => "volatility_multiple"}),
-    do: [
-      "risk_controls.method volatility_multiple is not supported for option premiums; use percent_of_entry"
-    ]
-
-  defp risk_controls_errors(%{"method" => method}),
-    do: ["risk_controls.method #{inspect(method)} is not supported; use percent_of_entry"]
-
-  defp risk_controls_errors(_config),
-    do: ["risk_controls must be a map with \"method\" => \"percent_of_entry\""]
 
   defp exit_strategy_errors(:absent), do: []
 

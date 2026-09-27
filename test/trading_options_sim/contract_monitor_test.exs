@@ -1372,10 +1372,23 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         ContractMonitor.snapshot(pid).last_snapshot
         |> Map.keys()
         |> Enum.filter(&String.starts_with?(&1, "run_"))
-        |> Kernel.--(groups.derived ++ groups.polygon)
+        |> Kernel.--(groups.derived ++ groups.vol ++ groups.polygon)
         |> Enum.sort()
 
       assert written == Enum.sort(groups.pricing)
+    end
+
+    test "snapshot_keys/0 matches the premium vol keys" do
+      keys = ContractMonitor.premium_vol_values(0.2, 10.0) |> Map.keys() |> Enum.sort()
+      assert keys == Enum.sort(ContractMonitor.snapshot_key_groups().vol)
+    end
+
+    test "run_premium_daily_vol is IV / sqrt(252) times |lambda|, absent without both" do
+      assert %{"run_premium_daily_vol" => v} = ContractMonitor.premium_vol_values(0.13, -20.0)
+      assert_in_delta v, 0.13 / :math.sqrt(252) * 20, 1.0e-12
+      assert ContractMonitor.premium_vol_values(nil, 20.0) == %{}
+      assert ContractMonitor.premium_vol_values(0.13, nil) == %{}
+      assert ContractMonitor.premium_vol_values(0.0, 20.0) == %{}
     end
 
     test "snapshot_keys/0 matches the derived keys" do
@@ -2013,6 +2026,34 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       # Outside the $0.02 buffer: left where it is.
       assert tp.("5.03", "long") == "5.03"
       assert tp.("5.04", "long") == "5.04"
+    end
+
+    test "volatility_multiple sizes the levels from the premium's daily vol" do
+      vol = %{
+        "method" => "volatility_multiple",
+        "sl_vol_mult" => 0.5,
+        "tp_vol_mult" => 1.0,
+        "stop_loss_percent" => 15,
+        "take_profit_percent" => 25
+      }
+
+      {pid, run} = start_monitor(risk_version(%{"risk_controls" => vol}), contract_key("VOLM1"))
+      broadcast_underlying_price("VOLM1", 150.0)
+      sync(pid)
+
+      run = Sim.get_sim_run!(run.id)
+      daily = ContractMonitor.snapshot(pid).last_snapshot["run_premium_daily_vol"]
+      assert is_float(daily) and daily > 0
+
+      assert run.context["risk_method"] == "volatility_multiple"
+      assert run.context["risk_fallback_reason"] == nil
+      assert_in_delta run.context["premium_daily_vol"], daily, 1.0e-9
+
+      entry = Decimal.to_float(run.entry_price)
+      assert_in_delta Decimal.to_float(run.stop_loss_price), entry * (1 - 0.5 * daily), 1.0e-6
+      assert_in_delta Decimal.to_float(run.take_profit_price), entry * (1 + 1.0 * daily), 1.0e-6
+      # Not the 15% / 25% fallback.
+      refute_in_delta Decimal.to_float(run.stop_loss_price), entry * 0.85, 1.0e-6
     end
 
     test "round_numbers applies the adjustment to the entry's take profit" do
