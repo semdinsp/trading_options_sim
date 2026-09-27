@@ -1,6 +1,7 @@
 defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
   use TradingOptionsSimWeb.ConnCase, async: true
 
+  alias TradingOptionsSim.Repo
   alias TradingOptionsSim.Sim
 
   defp token_conn(conn, scopes) do
@@ -55,14 +56,20 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       }
     end
 
-    defp export_version do
+    @export_risk %{
+      "method" => "percent_of_entry",
+      "stop_loss_percent" => 15,
+      "take_profit_percent" => 25
+    }
+
+    defp export_version(params \\ %{}) do
       pool = pool_fixture(["SPY", "QQQ"])
 
       version_fixture(%{
         target_pool_id: pool.id,
         option_leg_config: atm_leg(),
         rules: %{"entry" => %{"signal" => "run_delta", "op" => "gt", "value" => 0.5}},
-        params: %{"min_hold_seconds" => 1800}
+        params: Map.merge(%{"min_hold_seconds" => 1800, "risk_controls" => @export_risk}, params)
       })
     end
 
@@ -79,7 +86,7 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert body["strategy_version_id"] == version.id
       assert body["strategy_name"] == "Test Strategy"
       assert body["rules"] == version.rules
-      assert body["params"] == %{"min_hold_seconds" => 1800}
+      assert body["params"] == %{"min_hold_seconds" => 1800, "risk_controls" => @export_risk}
       assert body["option_leg_config"] == atm_leg()
       assert body["position_sizing"] == %{"method" => "fixed_qty", "qty" => 1}
 
@@ -116,6 +123,47 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
              |> token_conn(["tags:read"])
              |> get(~p"/api/v1/versions/#{version.id}/promotion_export")
              |> json_response(403)
+    end
+
+    # Without risk_controls this app runs with no stop, but the live apps
+    # fall back to a 5%/10% default, so exporting would change behaviour.
+    test "422 not_promotable for a version without risk_controls", %{conn: conn} do
+      version = export_version(%{})
+      {:ok, _} = Repo.update(Ecto.Changeset.change(version, params: %{"min_hold_seconds" => 1}))
+
+      body =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/#{version.id}/promotion_export")
+        |> json_response(422)
+
+      assert body["error"] == "not_promotable"
+      assert [reason] = body["reasons"]
+      assert reason =~ "risk_controls is missing"
+    end
+
+    test "not_promotable_reasons rejects volatility_multiple and a malformed exit_strategy" do
+      alias TradingOptionsSim.Sim.PromotionExport
+
+      assert PromotionExport.not_promotable_reasons(%{"risk_controls" => @export_risk}) == []
+
+      assert PromotionExport.not_promotable_reasons(%{
+               "risk_controls" => @export_risk,
+               "exit_strategy" => %{"method" => "trailing", "trail_pct" => 5}
+             }) == []
+
+      assert [vol] =
+               PromotionExport.not_promotable_reasons(%{
+                 "risk_controls" => %{"method" => "volatility_multiple", "stop_multiple" => 2}
+               })
+
+      assert vol =~ "volatility_multiple is not supported"
+
+      assert [_] =
+               PromotionExport.not_promotable_reasons(%{
+                 "risk_controls" => @export_risk,
+                 "exit_strategy" => %{"method" => "trailing"}
+               })
     end
 
     test "404 for an unknown or malformed id", %{conn: conn} do

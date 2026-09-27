@@ -29,6 +29,16 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
     non-ASCII as backslash-u escapes and writes `1e-05` where Jason writes
     `1.0e-5`. The golden-value test pins the ASCII case, the one current
     rule trees use.
+
+  **Refused (`{:error, {:not_promotable, reasons}}`, HTTP 422)** when the
+  version's stop config would behave differently in trading_live:
+
+    * no `params["risk_controls"]` -- this app then runs with no stop,
+      while the live apps fall back to a 5%/10%-of-entry default, which
+      on a premium is a very tight stop. Fork the version with an
+      explicit `risk_controls` and promote the fork.
+    * a `risk_controls` or `exit_strategy` this app can't run
+      (`StrategyVersion.params_errors/1`), e.g. `"volatility_multiple"`.
   """
 
   alias TradingOptionsSim.ContractMonitor
@@ -37,16 +47,37 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
 
   @schema_version 1
 
-  @spec build(String.t()) :: {:ok, map()} | {:error, :not_found}
+  @spec build(String.t()) ::
+          {:ok, map()} | {:error, :not_found} | {:error, {:not_promotable, [String.t()]}}
   def build(version_id) do
     # A malformed id is "not found", not a cast crash (500).
     with {:ok, uuid} <- Ecto.UUID.cast(version_id),
          %StrategyVersion{} = version <- Repo.get(StrategyVersion, uuid) do
-      {:ok,
-       version |> Repo.preload([:strategy, target_pool: :target_pool_members]) |> to_payload()}
+      case not_promotable_reasons(version.params) do
+        [] ->
+          {:ok,
+           version |> Repo.preload([:strategy, target_pool: :target_pool_members]) |> to_payload()}
+
+        reasons ->
+          {:error, {:not_promotable, reasons}}
+      end
     else
       _ -> {:error, :not_found}
     end
+  end
+
+  @doc "Why a version with these `params` can't be exported; see the moduledoc."
+  @spec not_promotable_reasons(map() | nil) :: [String.t()]
+  def not_promotable_reasons(params) do
+    missing =
+      if is_map(params) and Map.has_key?(params, "risk_controls"),
+        do: [],
+        else: [
+          "params.risk_controls is missing: this version runs with no stop here, " <>
+            "but live would apply its default; fork it with an explicit risk_controls"
+        ]
+
+    missing ++ StrategyVersion.params_errors(params)
   end
 
   defp to_payload(v) do
