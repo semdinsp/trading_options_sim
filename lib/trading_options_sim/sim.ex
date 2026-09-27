@@ -6,6 +6,8 @@ defmodule TradingOptionsSim.Sim do
 
   import Ecto.Query
 
+  require Logger
+
   alias TradingOptionsSim.Repo
 
   alias TradingOptionsSim.Sim.{
@@ -782,6 +784,34 @@ defmodule TradingOptionsSim.Sim do
   """
   def get_sim_run!(id), do: Repo.get!(SimRun, id) |> Repo.preload(:tags)
 
+  @doc """
+  Persists a moved stop-loss / take-profit for an open run (ratchet or
+  trailing stop), so a restarted monitor resumes from it. A missing run
+  is logged and ignored: the monitor keeps the level in memory either way.
+  """
+  @spec update_sim_run_risk_levels(String.t(), Decimal.t() | nil, Decimal.t() | nil) ::
+          :ok | {:error, term()}
+  def update_sim_run_risk_levels(run_id, stop_loss_price, take_profit_price) do
+    with %SimRun{} = run <- Repo.get(SimRun, run_id),
+         {:ok, _run} <-
+           run
+           |> SimRun.risk_levels_changeset(%{
+             stop_loss_price: stop_loss_price,
+             take_profit_price: take_profit_price
+           })
+           |> Repo.update() do
+      :ok
+    else
+      nil ->
+        Logger.warning("Sim: update_sim_run_risk_levels: run #{run_id} not found")
+        {:error, :not_found}
+
+      {:error, changeset} ->
+        Logger.error("Sim: update_sim_run_risk_levels failed: #{inspect(changeset.errors)}")
+        {:error, changeset}
+    end
+  end
+
   @doc "Records the entry fill: creates the `entry`-kind `SimFill` and stamps `SimRun`'s own entry fields together."
   def record_entry_fill(%SimRun{} = run, fill_attrs, run_entry_attrs) do
     Repo.transaction(fn ->
@@ -812,19 +842,19 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.insert()
   end
 
-  # TODO: once a strategy can actually set/exercise a real stop-loss
-  # (SimRun.stop_loss_price has no writer anywhere in this codebase as
-  # of 2026-09-15 — confirmed by grep), a stopped-out run's
-  # risk_at_entry should switch to (entry_price - stop_loss_price) *
-  # multiplier * quantity, the real defined-risk distance, rather than
-  # this premium-at-risk fallback. Until then, premium at risk is the
-  # standard convention for a defined-risk long option position with no
-  # stop (max loss on a long option is the premium paid) — real,
-  # computable today for every closed run, and not a placeholder value.
+  # R's denominator is premium at risk for every run, including those
+  # with a stop from params["risk_controls"] (written at entry since
+  # 2026-09-25, and moved by params["exit_strategy"]). Premium at risk is
+  # the standard convention for a defined-risk long option (its max loss
+  # is the premium paid) and is known for every closed run. Switching
+  # stopped runs to (entry_price - stop_loss_price) * multiplier *
+  # quantity would put runs with and without stops on different R
+  # scales, so it is deliberately not done; revisit only together with
+  # the perf contract (0_SPEC.md).
   @doc """
   The `expectancy_r`/`lcb95`/`ucb95` R-multiple denominator for one
-  entry fill — see this function's own `TODO` above for what it will
-  become once automatic stop-loss exercise exists.
+  entry fill: premium at risk. See the comment above for why a stop
+  doesn't change it.
   """
   @spec compute_risk_at_entry(Decimal.t(), integer(), integer()) :: Decimal.t()
   def compute_risk_at_entry(entry_price, multiplier, quantity) do

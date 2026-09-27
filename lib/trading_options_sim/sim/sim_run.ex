@@ -118,6 +118,16 @@ defmodule TradingOptionsSim.Sim.SimRun do
   end
 
   @doc """
+  Moves an open run's stop-loss / take-profit after entry: a ratchet or
+  trailing stop from `params["exit_strategy"]` (see
+  `ContractMonitor.maybe_move_stop/2`). Only the two levels, so nothing
+  else about the entry can change after the fill.
+  """
+  def risk_levels_changeset(sim_run, attrs) do
+    cast(sim_run, attrs, [:stop_loss_price, :take_profit_price])
+  end
+
+  @doc """
   Flags this run as churn — a flatten-and-reopen loop, not a genuine
   independent trade. See `Sim.maybe_mark_prior_run_as_churn/2`'s own doc
   for the detection thresholds. Applied retroactively to an

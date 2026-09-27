@@ -1998,6 +1998,146 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert ContractMonitor.snapshot(pid).position_open?
       assert run.status == "open"
     end
+
+    test "round_numbers pulls the take profit in front of a round premium" do
+      risk = Map.put(@risk, "round_numbers", true)
+      {pid, run} = start_monitor(risk_version(%{"risk_controls" => risk}), contract_key("SLTP7"))
+      broadcast_underlying_price("SLTP7", 150.0)
+      sync(pid)
+
+      run = Sim.get_sim_run!(run.id)
+      raw = Decimal.mult(run.entry_price, Decimal.new("1.25"))
+
+      expected =
+        TradingCore.RoundNumbers.adjust(raw, :take_profit, "long",
+          instrument: :option,
+          price: run.entry_price,
+          entry: run.entry_price,
+          tick_size: Decimal.new("0.01")
+        )
+
+      assert Decimal.equal?(run.take_profit_price, expected)
+      # Pulled in or left alone, never pushed further out (beyond the
+      # snap to the cent).
+      refute Decimal.gt?(run.take_profit_price, Decimal.round(raw, 2, :ceiling))
+    end
+  end
+
+  describe "ratchet / trailing stops (params.exit_strategy)" do
+    @risk %{
+      "method" => "percent_of_entry",
+      "stop_loss_percent" => 15,
+      "take_profit_percent" => 25
+    }
+    @always_in %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0}
+    @never_out %{"signal" => "run_underlying_price", "op" => "lt", "value" => 0}
+
+    defp exit_version(params),
+      do: version_fixture(%{"entry" => @always_in, "exit" => @never_out}, params)
+
+    defp enter(symbol, params, opts \\ []) do
+      {pid, run} = start_monitor(exit_version(params), contract_key(symbol), opts)
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+      assert ContractMonitor.snapshot(pid).position_open?
+      {pid, Sim.get_sim_run!(run.id)}
+    end
+
+    defp move(pid, symbol, spot, run) do
+      broadcast_underlying_price(symbol, spot)
+      sync(pid)
+      Sim.get_sim_run!(run.id)
+    end
+
+    # The same +23% spot move exits on take_profit without a ratchet
+    # ("a large favorable move exits with take_profit" above).
+    test "ratchet locks in a gain and removes the take profit, so the winner runs" do
+      ratchet = %{"method" => "ratchet", "trigger_pct" => 10, "lock_pct" => 2}
+      {pid, run} = enter("RATCH1", %{"risk_controls" => @risk, "exit_strategy" => ratchet})
+
+      run = move(pid, "RATCH1", 185.0, run)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert run.status == "open"
+      assert run.take_profit_price == nil
+
+      assert Decimal.equal?(
+               run.stop_loss_price,
+               run.entry_price |> Decimal.mult(Decimal.new("1.02")) |> Decimal.round(2)
+             )
+    end
+
+    test "trailing follows the premium up, and a pullback exits on stop_loss" do
+      trailing = %{"method" => "trailing", "trail_pct" => 10}
+      {pid, run} = enter("TRAIL1", %{"exit_strategy" => trailing})
+      assert run.stop_loss_price == nil
+
+      run = move(pid, "TRAIL1", 160.0, run)
+
+      high =
+        Decimal.new(to_string(ContractMonitor.snapshot(pid).last_snapshot["run_current_price"]))
+
+      assert Decimal.equal?(
+               run.stop_loss_price,
+               high |> Decimal.mult(Decimal.new("0.9")) |> Decimal.round(2)
+             )
+
+      assert Decimal.gt?(run.stop_loss_price, run.entry_price)
+
+      run = move(pid, "TRAIL1", 150.0, run)
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert run.exit_reason == "stop_loss"
+    end
+
+    # Must not fire on healthy input: a trail wider than the initial stop
+    # never loosens it.
+    test "a moved stop only tightens" do
+      trailing = %{"method" => "trailing", "trail_pct" => 50}
+      {pid, run} = enter("TRAIL2", %{"risk_controls" => @risk, "exit_strategy" => trailing})
+      initial = run.stop_loss_price
+
+      run = move(pid, "TRAIL2", 152.0, run)
+
+      assert Decimal.equal?(run.stop_loss_price, initial)
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
+    test "no ratchet while the exchange session is closed" do
+      ratchet = %{"method" => "ratchet", "trigger_pct" => 10, "lock_pct" => 2}
+      version = exit_version(%{"risk_controls" => @risk, "exit_strategy" => ratchet})
+
+      {pid, run} =
+        start_monitor(version, contract_key("RATCH2"),
+          exchange: closed_exchange_fixture(),
+          position_open?: true,
+          entry_price: Decimal.new("1.00"),
+          stop_loss_price: Decimal.new("0.85"),
+          take_profit_price: Decimal.new("100.00")
+        )
+
+      run = move(pid, "RATCH2", 185.0, run)
+
+      assert run.stop_loss_price == nil
+      assert Decimal.equal?(:sys.get_state(pid).take_profit_price, Decimal.new("100.00"))
+    end
+
+    # SimActivator resumes a held position with its entry price and
+    # persisted levels; the moved stop keeps working from there.
+    test "a resumed position keeps moving its stop" do
+      trailing = %{"method" => "trailing", "trail_pct" => 10}
+      version = exit_version(%{"exit_strategy" => trailing})
+
+      {pid, run} =
+        start_monitor(version, contract_key("TRAIL3"),
+          position_open?: true,
+          entry_price: Decimal.new("0.50"),
+          stop_loss_price: Decimal.new("0.45")
+        )
+
+      run = move(pid, "TRAIL3", 160.0, run)
+
+      assert Decimal.gt?(run.stop_loss_price, Decimal.new("0.45"))
+    end
   end
 
   describe "signal subscriptions across reconnects" do
