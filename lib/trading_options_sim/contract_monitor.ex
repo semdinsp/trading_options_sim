@@ -167,6 +167,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   @pricing_keys ~w(run_current_price run_underlying_price run_delta run_gamma
                    run_theta run_vega run_implied_vol run_bid run_ask run_quote_delayed)
   @derived_keys ~w(run_spread run_spread_pct run_theta_pct run_lambda)
+  # App-local, not in TradingCore.Options.Derived: see premium_vol_values/2.
+  @vol_keys ~w(run_premium_daily_vol)
   @polygon_keys ~w(run_poly_last run_poly_spread_bps run_poly_imbalance
                    run_poly_imbalance_ema run_poly_ret_1m_bps run_poly_ret_5m_bps
                    run_poly_vwap_dev_bps run_poly_minute_volume run_poly_rel_volume)
@@ -177,11 +179,16 @@ defmodule TradingOptionsSim.ContractMonitor do
   written; see the attribute comment above.
   """
   @spec snapshot_keys() :: [String.t()]
-  def snapshot_keys, do: Enum.sort(@pricing_keys ++ @derived_keys ++ @polygon_keys)
+  def snapshot_keys, do: Enum.sort(@pricing_keys ++ @derived_keys ++ @vol_keys ++ @polygon_keys)
 
   @doc false
   def snapshot_key_groups,
-    do: %{pricing: @pricing_keys, derived: @derived_keys, polygon: @polygon_keys}
+    do: %{
+      pricing: @pricing_keys,
+      derived: @derived_keys,
+      vol: @vol_keys,
+      polygon: @polygon_keys
+    }
 
   @doc """
   How this simulator prices fills and when it closes for expiry. Exported
@@ -755,7 +762,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
       true ->
         priced = price_contract_black_scholes(state, spot, dte)
-        snapshot = build_snapshot(priced, spot, signal_values(state))
+        snapshot = build_snapshot(priced, spot, signal_values(state), state.implied_volatility)
 
         state
         |> Map.put(:last_snapshot, snapshot)
@@ -910,6 +917,7 @@ defmodule TradingOptionsSim.ContractMonitor do
         Map.get(tick, :quote)
       )
     )
+    |> then(&Map.merge(&1, premium_vol_values(tick.implied_vol, &1["run_lambda"])))
   end
 
   # run_bid/run_ask only when they are a real market. IBKR sends -1.0 for
@@ -953,7 +961,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   # own signal name) are merged in first so a run_-prefixed pricing key
   # of the same name always wins — matches TradingCore.RuleEngine's own
   # documented run_ precedence convention.
-  defp build_snapshot(priced, spot, signal_values) do
+  defp build_snapshot(priced, spot, signal_values, implied_vol) do
     Map.merge(signal_values, %{
       "run_current_price" => priced.price,
       "run_underlying_price" => spot,
@@ -964,7 +972,27 @@ defmodule TradingOptionsSim.ContractMonitor do
     })
     # BlackScholes' theta is per YEAR; derived_values/5 wants per day.
     |> Map.merge(derived_values(priced.price, spot, priced.delta, priced.theta / 365, nil))
+    |> then(&Map.merge(&1, premium_vol_values(implied_vol, &1["run_lambda"])))
   end
+
+  @doc false
+  # run_premium_daily_vol: the option premium's expected one-day move, as
+  # a fraction of the premium -- the underlying's implied daily vol
+  # (annual IV / sqrt(252)) times the option's leverage |run_lambda|
+  # (% premium move per 1% underlying move). E.g. IV 13%, lambda 20:
+  # 0.13 / 15.87 * 20 = 0.16, a 16% daily premium move.
+  #
+  # It is the daily_vol that sizes a "volatility_multiple" stop
+  # (risk_levels/3), and a snapshot key so a rule can filter on it.
+  # Forward-looking (IV), so it needs no bar history. App-local for now:
+  # trading_live has no equivalent, which is why PromotionExport refuses
+  # volatility_multiple versions. Absent when IV or lambda is missing or
+  # not positive, which fails a rule closed.
+  def premium_vol_values(implied_vol, lambda)
+      when is_number(implied_vol) and is_number(lambda) and implied_vol > 0 and lambda != 0,
+      do: %{"run_premium_daily_vol" => implied_vol / :math.sqrt(252) * abs(lambda)}
+
+  def premium_vol_values(_implied_vol, _lambda), do: %{}
 
   # Inside the expiry window (dte <= expiry_close_dte, 1 by default) a
   # flat monitor opens nothing new: the position would have to be closed
@@ -1136,10 +1164,19 @@ defmodule TradingOptionsSim.ContractMonitor do
   # put stops on every existing strategy; a version without the key keeps
   # its purely rule-driven exits.
   #
-  # Only "percent_of_entry" reaches here: StrategyVersion's changeset
-  # rejects any other method, since RiskControls would silently fall
-  # back to its default for one it can't resolve (and "volatility_multiple"
-  # is for underlying prices, not premiums).
+  # Only "percent_of_entry" and "volatility_multiple" reach here:
+  # StrategyVersion's changeset rejects any other method, since
+  # RiskControls would silently fall back to its default for one it
+  # can't resolve.
+  #
+  # "volatility_multiple" (sl_vol_mult / tp_vol_mult) sizes the levels
+  # from the premium's own daily vol, run_premium_daily_vol at the entry
+  # tick (see premium_vol_values/2). When that is missing, RiskControls
+  # falls back to the config's own percents, which StrategyVersion
+  # requires alongside the multiples so a fallback is never the
+  # library's default. The method used, the vol, and any fallback reason
+  # go into the run's context so an A/B review can see which runs were
+  # really vol-sized.
   #
   # Opt-in `"round_numbers" => true` pulls the take-profit in front of a
   # round premium ($0.05 grid) via TradingCore.RoundNumbers, where resting
@@ -1153,18 +1190,33 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp risk_levels(
          %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
-         price
+         price,
+         snapshot
        ) do
-    {stop_loss, take_profit} = TradingCore.RiskControls.levels(price, config, state.direction)
+    resolved =
+      TradingCore.RiskControls.resolve_levels(price, config, state.direction,
+        daily_vol: snapshot["run_premium_daily_vol"]
+      )
 
-    if config["round_numbers"] == true and take_profit do
-      {stop_loss, round_number_take_profit(take_profit, price, state.direction)}
-    else
-      {stop_loss, take_profit}
-    end
+    take_profit =
+      if config["round_numbers"] == true and resolved.take_profit,
+        do: round_number_take_profit(resolved.take_profit, price, state.direction),
+        else: resolved.take_profit
+
+    {resolved.stop_loss, take_profit, risk_context(config, resolved)}
   end
 
-  defp risk_levels(_state, _price), do: {nil, nil}
+  defp risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
+
+  defp risk_context(%{"method" => "volatility_multiple"}, resolved) do
+    %{
+      "risk_method" => resolved.method,
+      "premium_daily_vol" => resolved.daily_vol && Decimal.to_float(resolved.daily_vol),
+      "risk_fallback_reason" => resolved.fallback_reason && to_string(resolved.fallback_reason)
+    }
+  end
+
+  defp risk_context(_config, _resolved), do: %{}
 
   @doc false
   # The round_numbers take-profit adjustment; see the comment above
@@ -1404,7 +1456,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp record_entry(state, snapshot, action, price, fill_basis) do
     now = DateTime.utc_now()
-    {stop_loss_price, take_profit_price} = risk_levels(state, price)
+    {stop_loss_price, take_profit_price, risk_context} = risk_levels(state, price, snapshot)
 
     {run, state} = ensure_open_run(state)
 
@@ -1425,7 +1477,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              take_profit_price: take_profit_price,
              risk_at_entry: Sim.compute_risk_at_entry(price, state.multiplier, state.quantity),
              entry_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis)),
-             context: entry_context(state)
+             context: Map.merge(entry_context(state), risk_context)
            }
          ) do
       {:ok, {_fill, run}} ->

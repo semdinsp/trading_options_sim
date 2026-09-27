@@ -38,7 +38,10 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
       on a premium is a very tight stop. Fork the version with an
       explicit `risk_controls` and promote the fork.
     * a `risk_controls` or `exit_strategy` this app can't run
-      (`StrategyVersion.params_errors/1`), e.g. `"volatility_multiple"`.
+      (`StrategyVersion.params_errors/1`).
+    * `"volatility_multiple"`: sized on this app's premium vol
+      (`ContractMonitor.premium_vol_values/2`), which trading_live
+      doesn't compute. Sim-only until it does.
   """
 
   alias TradingOptionsSim.ContractMonitor
@@ -77,7 +80,15 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
             "but live would apply its default; fork it with an explicit risk_controls"
         ]
 
-    missing ++ StrategyVersion.params_errors(params)
+    vol =
+      if get_in(params || %{}, ["risk_controls", "method"]) == "volatility_multiple",
+        do: [
+          "risk_controls.method volatility_multiple is sim-only: trading_live doesn't " <>
+            "compute the premium daily vol (IV / sqrt(252) * |lambda|) it is sized on"
+        ],
+        else: []
+
+    missing ++ StrategyVersion.params_errors(params) ++ vol
   end
 
   defp to_payload(v) do
