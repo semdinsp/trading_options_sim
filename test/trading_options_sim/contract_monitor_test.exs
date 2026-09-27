@@ -1999,7 +1999,23 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert run.status == "open"
     end
 
-    test "round_numbers pulls the take profit in front of a round premium" do
+    # Without an explicit buffer RoundNumbers only snaps to the cent, so
+    # these pin that the take-profit really moves (found after #96).
+    test "round_number_take_profit pulls a target 0-2 cents above a nickel to 1 cent below" do
+      tp = fn level, dir ->
+        ContractMonitor.round_number_take_profit(Decimal.new(level), Decimal.new("4.00"), dir)
+        |> Decimal.to_string()
+      end
+
+      assert tp.("5.00", "long") == "4.99"
+      assert tp.("5.01", "long") == "4.99"
+      assert tp.("5.02", "long") == "4.99"
+      # Outside the $0.02 buffer: left where it is.
+      assert tp.("5.03", "long") == "5.03"
+      assert tp.("5.04", "long") == "5.04"
+    end
+
+    test "round_numbers applies the adjustment to the entry's take profit" do
       risk = Map.put(@risk, "round_numbers", true)
       {pid, run} = start_monitor(risk_version(%{"risk_controls" => risk}), contract_key("SLTP7"))
       broadcast_underlying_price("SLTP7", 150.0)
@@ -2008,18 +2024,10 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       run = Sim.get_sim_run!(run.id)
       raw = Decimal.mult(run.entry_price, Decimal.new("1.25"))
 
-      expected =
-        TradingCore.RoundNumbers.adjust(raw, :take_profit, "long",
-          instrument: :option,
-          price: run.entry_price,
-          entry: run.entry_price,
-          tick_size: Decimal.new("0.01")
-        )
-
-      assert Decimal.equal?(run.take_profit_price, expected)
-      # Pulled in or left alone, never pushed further out (beyond the
-      # snap to the cent).
-      refute Decimal.gt?(run.take_profit_price, Decimal.round(raw, 2, :ceiling))
+      assert Decimal.equal?(
+               run.take_profit_price,
+               ContractMonitor.round_number_take_profit(raw, run.entry_price, "long")
+             )
     end
   end
 

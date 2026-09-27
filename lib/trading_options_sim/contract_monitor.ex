@@ -1143,8 +1143,14 @@ defmodule TradingOptionsSim.ContractMonitor do
   #
   # Opt-in `"round_numbers" => true` pulls the take-profit in front of a
   # round premium ($0.05 grid) via TradingCore.RoundNumbers, where resting
-  # targets cluster and prices tend to turn (Osler, NY Fed SR125/SR150).
-  # Same flag name as trading_live. The stop is left alone.
+  # targets cluster and prices tend to turn (Osler, NY Fed SR125/SR150):
+  # a target 0-2 cents above a nickel moves to 1 cent below it. The
+  # buffer must be passed explicitly -- without :buffer or :daily_vol,
+  # RoundNumbers only snaps to the tick. $0.02 rather than the full grid,
+  # which would pull nearly every target down and act as a flat haircut.
+  # Same flag name and buffer as trading_live. The stop is left alone.
+  @round_number_buffer Decimal.new("0.02")
+
   defp risk_levels(
          %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
          price
@@ -1152,19 +1158,26 @@ defmodule TradingOptionsSim.ContractMonitor do
     {stop_loss, take_profit} = TradingCore.RiskControls.levels(price, config, state.direction)
 
     if config["round_numbers"] == true and take_profit do
-      {stop_loss,
-       TradingCore.RoundNumbers.adjust(take_profit, :take_profit, state.direction,
-         instrument: :option,
-         price: price,
-         entry: price,
-         tick_size: Decimal.new("0.01")
-       )}
+      {stop_loss, round_number_take_profit(take_profit, price, state.direction)}
     else
       {stop_loss, take_profit}
     end
   end
 
   defp risk_levels(_state, _price), do: {nil, nil}
+
+  @doc false
+  # The round_numbers take-profit adjustment; see the comment above
+  # risk_levels/2. Public so the buffer is tested on exact premiums.
+  def round_number_take_profit(take_profit, entry_price, direction) do
+    TradingCore.RoundNumbers.adjust(take_profit, :take_profit, direction,
+      instrument: :option,
+      price: entry_price,
+      entry: entry_price,
+      tick_size: Decimal.new("0.01"),
+      buffer: @round_number_buffer
+    )
+  end
 
   defp decimal_price(price) when is_float(price), do: Decimal.from_float(price)
   defp decimal_price(price) when is_integer(price), do: Decimal.new(price)
