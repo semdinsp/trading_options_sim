@@ -69,6 +69,9 @@ defmodule TradingOptionsSim.Application do
         # to watch a symbol, so it costs one idle process when unused.
         TradingOptionsSim.PolygonRelay,
         TradingOptionsSim.SignalConnection,
+        # Regime label for rules' regime_trend_ordinal/regime_vol_ordinal;
+        # seeded on SignalConnection's connect broadcast.
+        TradingOptionsSim.RegimeCache,
         # Exchange-hours support (OPTIONS_SIM_ARCHITECTURE_PLAN.md §5c) —
         # ExchangeSessionCache backs every ContractMonitor's session-open
         # check, EodCloser force-closes open positions near session
