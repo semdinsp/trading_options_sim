@@ -63,6 +63,10 @@ config :trading_options_sim, :reactivate_strategies_on_boot, false
 # Ported from trading_system's identical test override.
 config :trading_options_sim, :mcp_force_start, true
 
+# No SSE stream reaper in test: it would write keepalives into the MCP
+# integration tests' streams.
+config :trading_options_sim, :mcp_sse_reaper, false
+
 # No real trading_signal node to connect to in test — ContractMonitor
 # tests drive SignalBus.Test directly (stub_topic/2) rather than a live
 # distributed-Erlang connection. Same adapter-swap pattern trading_live's
