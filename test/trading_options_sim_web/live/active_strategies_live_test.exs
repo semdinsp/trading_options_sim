@@ -109,6 +109,36 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     refute html =~ "Flat"
   end
 
+  # Same numbers as the version page's position box (position_view/3),
+  # and what trading_live's dashboard shows since its PR #272.
+  test "an open position shows its OCC contract and unrealized P&L", %{conn: conn} do
+    activated_version_fixture("OCC Strategy", ["OCCX"])
+
+    message =
+      %{type: :price, symbol: "OCCX", source: :ibkr, data: %{last: 130.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:OCCX", message)
+    Process.sleep(50)
+
+    {:ok, _view, html} = live(conn, ~p"/active_strategies")
+
+    assert html =~ "Position: Long"
+    assert html =~ "OCCX  271231C00150000"
+    assert html =~ ~r/Unrl [+-]\$\d+\.\d{2}/
+    assert html =~ ~r/Unrealized [+-]\$\d+\.\d{2}/
+  end
+
+  test "a flat member shows no contract or unrealized P&L", %{conn: conn} do
+    activated_version_fixture("Flat OCC Strategy", ["FLATOCC"])
+
+    {:ok, _view, html} = live(conn, ~p"/active_strategies")
+
+    assert html =~ "Flat"
+    refute html =~ "Unrl"
+    refute html =~ "Unrealized"
+  end
+
   test "shows Last exit after a closed trade, with no open position", %{conn: conn} do
     version = activated_version_fixture("Exited Strategy", ["EXITCHIP1"])
 
