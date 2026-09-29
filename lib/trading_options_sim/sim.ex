@@ -1029,6 +1029,97 @@ defmodule TradingOptionsSim.Sim do
     {runs, total_count}
   end
 
+  @runs_page_fields [
+    :id,
+    :strategy_version_id,
+    :symbol,
+    :expiry,
+    :strike,
+    :right,
+    :multiplier,
+    :direction,
+    :status,
+    :entry_at,
+    :entry_price,
+    :exit_at,
+    :exit_price,
+    :exit_reason,
+    :realized_pnl,
+    :realized_pnl_net,
+    :inserted_at
+  ]
+
+  @doc """
+  One page of runs for the `/runs` page, newest first: `{runs, total}`,
+  where `total` counts every run matching `status` and `search`.
+
+  Everything happens in the database, so a page costs the same however
+  many runs exist. Until 2026-09-29 the page loaded every run (14,850,
+  ~170 MB with snapshots and fills, 1.2 s) every 5 seconds per open tab
+  and filtered in memory.
+
+    * `search` matches like `TradingOptionsSimWeb.StrategySearch`: the
+      strategy name (case-insensitive substring), or, for a query of 6+
+      hex/dash characters, a fragment of the run, version or strategy id.
+    * Only the columns the page shows are loaded, not the entry/exit
+      snapshots or context. Fills are preloaded because
+      `TradeCost.summary/2` needs them (fees, spread paid).
+    * `per_page` is clamped to 1..100; `page` starts at 1.
+  """
+  @spec runs_page(keyword()) :: {[SimRun.t()], non_neg_integer()}
+  def runs_page(opts \\ []) do
+    per_page = opts |> Keyword.get(:per_page, 50) |> clamp_page_size()
+    page = max(Keyword.get(opts, :page, 1), 1)
+
+    base =
+      from(r in SimRun,
+        join: v in assoc(r, :strategy_version),
+        join: s in assoc(v, :strategy),
+        as: :strategy
+      )
+      |> maybe_filter_status(Keyword.get(opts, :status))
+      |> maybe_search_runs(Keyword.get(opts, :search))
+
+    total = base |> select([r], count(r.id)) |> Repo.one()
+
+    runs =
+      base
+      |> order_by([r], desc: r.inserted_at, desc: r.id)
+      |> limit(^per_page)
+      |> offset(^((page - 1) * per_page))
+      |> select([r], struct(r, ^@runs_page_fields))
+      |> Repo.all()
+      |> Repo.preload([:tags, :sim_fills, strategy_version: :strategy])
+
+    {runs, total}
+  end
+
+  @uuid_fragment ~r/\A[0-9a-f-]{6,}\z/
+
+  defp maybe_search_runs(query, search) do
+    case search |> to_string() |> String.trim() |> String.downcase() do
+      "" ->
+        query
+
+      q ->
+        pattern = "%" <> escape_like(q) <> "%"
+
+        if Regex.match?(@uuid_fragment, q) do
+          where(
+            query,
+            [r, strategy: s],
+            ilike(s.name, ^pattern) or ilike(type(r.id, :string), ^pattern) or
+              ilike(type(r.strategy_version_id, :string), ^pattern) or
+              ilike(type(s.id, :string), ^pattern)
+          )
+        else
+          where(query, [strategy: s], ilike(s.name, ^pattern))
+        end
+    end
+  end
+
+  defp escape_like(q), do: String.replace(q, ~r/([\\%_])/, "\\\\\\1")
+
   defp maybe_filter_status(query, nil), do: query
   defp maybe_filter_status(query, status), do: where(query, [r], r.status == ^status)
 
