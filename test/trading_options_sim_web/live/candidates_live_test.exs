@@ -75,6 +75,23 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
     assert html =~ "No candidates match the current filters"
   end
 
+  test "each row has a button that copies its version UUID", %{conn: conn} do
+    version = version_fixture(strategy_fixture(%{name: "Copy Id Candidate"}))
+
+    candidate_run_fixture(version, %{
+      exit_price: Decimal.new("5.10"),
+      realized_pnl: Decimal.new("10")
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/candidates")
+    view |> element("button", "Show all") |> render_click()
+
+    assert has_element?(
+             view,
+             "button#copy-version-id-#{version.id}[data-copy-value='#{version.id}']"
+           )
+  end
+
   test "shows a discovery version with at least 30 closed runs by default", %{conn: conn} do
     strategy = strategy_fixture(%{name: "Candidate Strategy"})
     version = version_fixture(strategy)

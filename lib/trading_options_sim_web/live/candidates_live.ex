@@ -459,6 +459,12 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
                 >
                   {row.strategy_name}
                 </.link>
+                <.copy_uuid_button
+                  id={"copy-version-id-#{row.strategy_version_id}"}
+                  value={row.strategy_version_id}
+                  title="Copy version ID"
+                  class="ml-1 align-middle"
+                />
                 <span :if={row.blocked_only_by_tenure?} class="ml-1 text-warning normal-case">tenure-only</span>
               </td>
               <td>v{row.version}</td>
