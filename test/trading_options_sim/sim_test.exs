@@ -733,6 +733,84 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
+  describe "runs_page/1" do
+    defp page_run(version, symbol) do
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: symbol,
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      run
+    end
+
+    setup do
+      {:ok, strategy} = Sim.create_strategy(%{name: "Paging 100%_Test"})
+
+      {:ok, version} =
+        Sim.create_strategy_version(strategy, %{version: 1, position_sizing: %{"qty" => 1}})
+
+      runs = for s <- ~w(RP1 RP2 RP3), do: page_run(version, s)
+      %{runs: runs, strategy: strategy}
+    end
+
+    # Runs created in the same millisecond have no creation order to
+    # recover (UUIDv7 is ordered only to the ms), but (inserted_at, id)
+    # is a total order, so paging covers every run exactly once.
+    test "pages cover every run exactly once, with the total", %{runs: runs} do
+      assert {page1, 3} = Sim.runs_page(per_page: 2, page: 1)
+      assert {page2, 3} = Sim.runs_page(per_page: 2, page: 2)
+      assert {[], 3} = Sim.runs_page(per_page: 2, page: 3)
+      assert length(page1) == 2
+
+      assert Enum.sort(Enum.map(page1 ++ page2, & &1.id)) == Enum.sort(Enum.map(runs, & &1.id))
+    end
+
+    test "orders newest first" do
+      {:ok, strategy} = Sim.create_strategy(%{name: "Order Test"})
+
+      {:ok, version} =
+        Sim.create_strategy_version(strategy, %{version: 1, position_sizing: %{"qty" => 1}})
+
+      older = page_run(version, "OLDER")
+
+      {:ok, _} =
+        older
+        |> Ecto.Changeset.change(inserted_at: DateTime.add(older.inserted_at, -60, :second))
+        |> TradingOptionsSim.Repo.update()
+
+      newer = page_run(version, "NEWER")
+      {[first, second], 2} = Sim.runs_page(search: "Order Test")
+      assert {first.id, second.id} == {newer.id, older.id}
+    end
+
+    test "preloads what the runs page renders", %{runs: [r1 | _]} do
+      {runs, _} = Sim.runs_page(search: String.slice(r1.id, -12, 12))
+
+      assert [
+               %{
+                 tags: [],
+                 sim_fills: [],
+                 strategy_version: %{strategy: %{name: "Paging 100%_Test"}}
+               }
+             ] = runs
+    end
+
+    # LIKE metacharacters in a search are literal, not wildcards.
+    test "search escapes % and _" do
+      assert {_, 3} = Sim.runs_page(search: "100%_t")
+      assert {[], 0} = Sim.runs_page(search: "100_%")
+    end
+
+    test "a short hex word matches names only, not ids" do
+      assert {[], 0} = Sim.runs_page(search: "dead")
+    end
+  end
+
   describe "list_sim_runs_page/2" do
     defp page_run_fixture(version, attrs \\ %{}) do
       {:ok, run} =

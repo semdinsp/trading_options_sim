@@ -179,4 +179,104 @@ defmodule TradingOptionsSimWeb.RunsLiveTest do
       refute html =~ "hot"
     end
   end
+
+  describe "pagination" do
+    alias TradingOptionsSim.Sim
+
+    # Runs P000..P0nn, oldest first; the page lists newest first.
+    defp runs(version, count) do
+      for i <- 0..(count - 1) do
+        {:ok, run} =
+          Sim.open_sim_run(version, %{
+            symbol: "P" <> String.pad_leading(to_string(i), 3, "0"),
+            expiry: "20271231",
+            strike: Decimal.new("150.00"),
+            right: "C",
+            multiplier: 100,
+            direction: "long"
+          })
+
+        run
+      end
+    end
+
+    # Runs created together share a timestamp, so check that the two
+    # pages together show every run exactly once rather than an order.
+    test "shows 50 runs per page, with a range and page links", %{conn: conn} do
+      runs(version_fixture(strategy_fixture()), 60)
+      symbols = fn html -> Regex.scan(~r/>(P\d{3}) /, html) |> Enum.map(fn [_, s] -> s end) end
+
+      {:ok, view, html} = live(conn, ~p"/runs")
+      assert html =~ "1–50 of 60"
+      assert html =~ "Page 1 of 2"
+      page1 = symbols.(html)
+      assert length(page1) == 50
+
+      html = view |> element("#pager-top a", "Next →") |> render_click()
+      assert_patch(view, ~p"/runs?page=2")
+      assert html =~ "51–60 of 60"
+      page2 = symbols.(html)
+      assert length(page2) == 10
+      assert has_element?(view, "#pager-top a", "← Prev")
+
+      assert Enum.sort(page1 ++ page2) ==
+               Enum.map(0..59, &("P" <> String.pad_leading(to_string(&1), 3, "0")))
+    end
+
+    test "the status filter pages within its own results", %{conn: conn} do
+      version = version_fixture(strategy_fixture())
+      runs(version, 3)
+
+      {:ok, _view, html} = live(conn, ~p"/runs?status=closed")
+      assert html =~ "No runs to show"
+
+      {:ok, _view, html} = live(conn, ~p"/runs?status=open&page=1")
+      assert html =~ "1–3 of 3"
+    end
+
+    # An older page must not shift under the reader.
+    test "only page 1 refreshes on the timer", %{conn: conn} do
+      version = version_fixture(strategy_fixture())
+      runs(version, 51)
+
+      {:ok, view, _html} = live(conn, ~p"/runs?page=2")
+      assert render(view) =~ "51–51 of 51"
+
+      Sim.open_sim_run(version, %{
+        symbol: "NEWER",
+        expiry: "20271231",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+      send(view.pid, :refresh)
+      assert render(view) =~ "51–51 of 51"
+
+      {:ok, view, _html} = live(conn, ~p"/runs")
+      send(view.pid, :refresh)
+      assert render(view) =~ "of 52"
+    end
+
+    test "a search is applied in the query and returns to page 1", %{conn: conn} do
+      runs(version_fixture(strategy_fixture()), 55)
+      {:ok, other} = Sim.create_strategy(%{name: "Needle Strategy"})
+      [needle] = runs(version_fixture(other), 1)
+
+      {:ok, view, _html} = live(conn, ~p"/runs?page=2")
+      html = view |> form("form[phx-change=search]", %{q: "needle"}) |> render_change()
+      assert_patch(view, ~p"/runs")
+      assert html =~ "1–1 of 1"
+      assert html =~ "Needle Strategy"
+
+      # A UUID fragment matches the run's own id (its random tail).
+      html =
+        view
+        |> form("form[phx-change=search]", %{q: String.slice(needle.id, -12, 12)})
+        |> render_change()
+
+      assert html =~ "1–1 of 1"
+    end
+  end
 end

@@ -11,16 +11,22 @@ defmodule TradingOptionsSimWeb.RunsLive do
   subscribes to, never publishes its own entry/exit events), so a fixed
   poll is the only way to catch a new fill without adding a new
   broadcast this task didn't ask for.
+
+  Paginated, 50 runs per page (`?page=`, alongside `?status=`), with the
+  status filter and the search box applied in the database
+  (`Sim.runs_page/1`). Only page 1 refreshes on the timer, so an older
+  page doesn't shift while it's being read; tag edits reload the current
+  page. Until 2026-09-29 every refresh loaded all runs (14,850, ~170 MB,
+  1.2 s) every 5 seconds per open tab.
   """
 
   use TradingOptionsSimWeb, :live_view
-
-  alias TradingOptionsSimWeb.StrategySearch
 
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.TradeCost
 
   @refresh_ms :timer.seconds(5)
+  @per_page 50
 
   @impl true
   def mount(_params, _session, socket) do
@@ -31,8 +37,9 @@ defmodule TradingOptionsSimWeb.RunsLive do
      |> assign(:page_title, "Runs")
      |> assign(:search, "")
      |> assign(:status_filter, nil)
-     |> assign(:tagging_run_id, nil)
-     |> load_runs()}
+     |> assign(:page, 1)
+     |> assign(:per_page, @per_page)
+     |> assign(:tagging_run_id, nil)}
   end
 
   @impl true
@@ -43,20 +50,31 @@ defmodule TradingOptionsSimWeb.RunsLive do
         _ -> nil
       end
 
-    {:noreply, socket |> assign(:status_filter, status_filter) |> load_runs()}
+    page =
+      case Integer.parse(params["page"] || "1") do
+        {n, ""} when n >= 1 -> n
+        _ -> 1
+      end
+
+    {:noreply,
+     socket |> assign(:status_filter, status_filter) |> assign(:page, page) |> load_runs()}
   end
 
   @impl true
-  def handle_info(:refresh, socket) do
-    {:noreply, load_runs(socket)}
-  end
+  # Page 1 only: newer runs push older pages down, so refreshing a later
+  # page would shift the rows under the reader.
+  def handle_info(:refresh, %{assigns: %{page: 1}} = socket), do: {:noreply, load_runs(socket)}
+  def handle_info(:refresh, socket), do: {:noreply, socket}
 
   @impl true
   # Shared search box (<.search_box>): strategy name or UUID fragment,
-  # see TradingOptionsSimWeb.StrategySearch. Applied inside the load step
-  # so it survives the periodic refresh.
+  # matched in the database (Sim.runs_page/1). A new search starts from
+  # page 1; the search itself isn't in the URL, same as the other pages.
   def handle_event("search", %{"q" => q}, socket) do
-    {:noreply, socket |> assign(:search, q) |> load_runs()}
+    {:noreply,
+     socket
+     |> assign(:search, q)
+     |> push_patch(to: runs_path(socket.assigns.status_filter, 1))}
   end
 
   def handle_event("toggle_tag_control", %{"id" => id}, socket) do
@@ -84,15 +102,57 @@ defmodule TradingOptionsSimWeb.RunsLive do
   end
 
   defp load_runs(socket) do
-    runs =
-      socket.assigns.status_filter
-      |> Sim.list_sim_runs()
-      |> StrategySearch.filter(socket.assigns.search, fn run ->
-        {run.strategy_version.strategy.name,
-         [run.id, run.strategy_version_id, run.strategy_version.strategy_id]}
-      end)
+    {runs, total} =
+      Sim.runs_page(
+        status: socket.assigns.status_filter,
+        search: socket.assigns.search,
+        page: socket.assigns.page,
+        per_page: @per_page
+      )
 
-    assign(socket, :runs, runs)
+    socket
+    |> assign(:runs, runs)
+    |> assign(:total, total)
+    |> assign(:last_page, max(div(total + @per_page - 1, @per_page), 1))
+  end
+
+  defp runs_path(status, page) do
+    query =
+      Enum.reject([status: status, page: page != 1 && page], fn {_k, v} -> v in [nil, false] end)
+
+    if query == [], do: ~p"/runs", else: ~p"/runs?#{query}"
+  end
+
+  defp page_range(page, total) do
+    first = (page - 1) * @per_page + 1
+    "#{min(first, total)}–#{min(page * @per_page, total)} of #{total}"
+  end
+
+  attr :id, :string, required: true
+  attr :page, :integer, required: true
+  attr :last_page, :integer, required: true
+  attr :range, :string, required: true
+  attr :prev, :string, required: true
+  attr :next, :string, required: true
+
+  defp pager(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      class="flex items-center justify-between my-3 font-data text-xs uppercase tracking-wide"
+    >
+      <span class="text-base-content/50">{@range}</span>
+      <div class="flex items-center gap-2">
+        <.link :if={@page > 1} patch={@prev} class={filter_link_class(nil, :pager)}>
+          ← Prev
+        </.link>
+        <span class="text-base-content/50">Page {@page} of {@last_page}</span>
+        <.link :if={@page < @last_page} patch={@next} class={filter_link_class(nil, :pager)}>
+          Next →
+        </.link>
+      </div>
+    </div>
+    """
   end
 
   defp status_badge_class("open"), do: "border-info/40 text-info bg-info/10"
@@ -141,6 +201,16 @@ defmodule TradingOptionsSimWeb.RunsLive do
           </.link>
         </div>
       </div>
+
+      <.pager
+        :if={@total > 0}
+        id="pager-top"
+        page={@page}
+        last_page={@last_page}
+        range={page_range(@page, @total)}
+        prev={runs_path(@status_filter, @page - 1)}
+        next={runs_path(@status_filter, @page + 1)}
+      />
 
       <div :if={@runs == []} class="border border-base-300 p-8 text-center">
         <p class="font-data text-sm uppercase tracking-wide text-base-content/40">
@@ -247,6 +317,16 @@ defmodule TradingOptionsSimWeb.RunsLive do
           </tbody>
         </table>
       </div>
+
+      <.pager
+        :if={@total > @per_page}
+        id="pager-bottom"
+        page={@page}
+        last_page={@last_page}
+        range={page_range(@page, @total)}
+        prev={runs_path(@status_filter, @page - 1)}
+        next={runs_path(@status_filter, @page + 1)}
+      />
     </Layouts.app>
     """
   end
