@@ -152,8 +152,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
                "exit_strategy" => %{"method" => "trailing", "trail_pct" => 5}
              }) == []
 
-      # Valid here, but sized on a premium vol trading_live doesn't compute.
-      assert [vol] =
+      # Exportable since trading_live computes the same premium vol (#275).
+      assert [] =
                PromotionExport.not_promotable_reasons(%{
                  "risk_controls" => %{
                    "method" => "volatility_multiple",
@@ -163,8 +163,6 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
                    "take_profit_percent" => 25
                  }
                })
-
-      assert vol =~ "volatility_multiple is sim-only"
 
       assert [_] =
                PromotionExport.not_promotable_reasons(%{
