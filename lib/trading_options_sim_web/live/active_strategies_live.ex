@@ -46,6 +46,16 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   `stage_counts_strip`, which counts every version. Retired versions
   are never active, so there is no Retired pill.
 
+  An open position's chip also shows the contract held (its OCC symbol)
+  and unrealized P&L at the option's current mark, and the card's strip
+  totals the version's unrealized P&L -- the same numbers
+  `StrategyVersionDetailLive.position_view/3` computes for the version
+  page (quote mid when there's a two-sided book, else the model price;
+  (mark - entry) x 100 x contracts, sign-flipped for a short, before
+  commission). Matches what trading_live's dashboard shows since its PR
+  #272. Positions here are per contract monitor and run, so the chip
+  never has trading_live's underlying-vs-OCC lookup problem.
+
   Each version card also has a Deactivate button
   (`SimActivator.deactivate/1` — same action `StrategyVersionsLive`'s
   own button performs).
@@ -59,6 +69,7 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   alias TradingOptionsSim.ExchangeSessionCache
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.SimActivator
+  alias TradingOptionsSimWeb.StrategyVersionDetailLive
 
   @refresh_ms :timer.seconds(5)
 
@@ -131,7 +142,8 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
         %{
           version: version,
           members: members,
-          today_stats: Sim.today_stats_for_version(version)
+          today_stats: Sim.today_stats_for_version(version),
+          unrealized: total_unrealized(members)
         }
       end)
 
@@ -178,16 +190,27 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
         version |> Sim.list_open_sim_runs() |> Enum.find(&(&1.symbol == member.symbol))
       end
 
+    fill = if(run, do: entry_fill(run))
+
     %{
       member: member,
+      position: run && StrategyVersionDetailLive.position_view(run, snapshot, fill),
       running?: not is_nil(snapshot),
       snapshot: snapshot,
       run: run,
-      entry_fill: if(run, do: entry_fill(run)),
+      entry_fill: fill,
       fallback_direction: version.direction,
       last_closed_run: if(is_nil(run), do: Sim.last_closed_sim_run(version, member.symbol)),
       session_open?: session_open(member.exchange)
     }
+  end
+
+  # nil when no open position has a mark yet.
+  defp total_unrealized(members) do
+    case for(%{position: %{unrealized: u}} <- members, is_number(u), do: u) do
+      [] -> nil
+      values -> Enum.sum(values)
+    end
   end
 
   defp entry_fill(run) do
@@ -247,6 +270,20 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   defp format_price(%Decimal{} = price), do: "$#{Decimal.round(price, 2)}"
 
   defp format_qty(qty), do: to_string(qty)
+
+  defp signed_money(value) when is_number(value) do
+    sign = if value < 0, do: "-", else: "+"
+    "#{sign}$#{:erlang.float_to_binary(abs(value / 1), decimals: 2)}"
+  end
+
+  defp signed_class(value) when is_number(value) and value > 0, do: "text-success"
+  defp signed_class(value) when is_number(value) and value < 0, do: "text-error"
+  defp signed_class(_value), do: "text-base-content/60"
+
+  defp format_pct(nil), do: ""
+
+  defp format_pct(pct),
+    do: " (#{if pct < 0, do: "", else: "+"}#{:erlang.float_to_binary(pct / 1, decimals: 1)}%)"
 
   @impl true
   def render(assigns) do
@@ -353,6 +390,18 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
                 Entry {format_price(chip.run.entry_price)}
                 <span :if={chip.entry_fill}>× {format_qty(chip.entry_fill.quantity)}</span>
               </span>
+              <span
+                :if={chip.position}
+                class="whitespace-pre select-all text-base-content/40 normal-case tracking-normal"
+                title="Contract held (OCC symbol): click to select"
+              >{chip.position.occ}</span>
+              <span
+                :if={chip.position && is_number(chip.position.unrealized)}
+                class={["normal-case tracking-normal", signed_class(chip.position.unrealized)]}
+                title={"Unrealized P&L at the #{chip.position.mark_basis} mark, before commission"}
+              >
+                Unrl {signed_money(chip.position.unrealized)}{format_pct(chip.position.unrealized_pct)}
+              </span>
 
               <span
                 :if={is_nil(chip.run) && chip.last_closed_run}
@@ -380,6 +429,13 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
             >
               Net {format_price(entry.today_stats.realized_pnl_net)}
             </span>
+            <span
+              :if={entry.unrealized}
+              class={signed_class(entry.unrealized)}
+              title="Unrealized P&L of this version's open positions, before commission"
+            >
+              Unrealized {signed_money(entry.unrealized)}
+            </span>
             <span>Fills {entry.today_stats.fill_count}</span>
             <span class="text-success">W {entry.today_stats.n_wins}</span>
             <span class="text-error">L {entry.today_stats.n_losses}</span>
@@ -389,6 +445,9 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
             class="mt-2 font-data text-[11px] uppercase tracking-wide text-base-content/30 border-t border-base-300 pt-2"
           >
             No fills yet today
+            <span :if={entry.unrealized} class={["ml-3", signed_class(entry.unrealized)]}>
+              Unrealized {signed_money(entry.unrealized)}
+            </span>
           </div>
         </div>
       </div>
