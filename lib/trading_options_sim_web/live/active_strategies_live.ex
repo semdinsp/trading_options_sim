@@ -131,12 +131,12 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
         &{&1.strategy.name, [&1.id, &1.strategy_id]}
       )
       |> Enum.map(fn version ->
-        contract_template = SimActivator.resolve_contract_template(version.option_leg_config)
+        monitors = Map.new(ContractMonitor.monitors_for_version(version.id))
 
         members =
           version
           |> target_pool_members()
-          |> Enum.map(&build_chip(version, contract_template, &1))
+          |> Enum.map(&build_chip(version, monitors, &1))
           |> Enum.sort_by(& &1.member.symbol)
 
         %{
@@ -172,17 +172,14 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
   # own separate format_expiry/format_price copies before those were
   # promoted to CoreComponents; a session-wide review already tracked
   # further consolidation as a follow-up, not done piecemeal here).
-  defp build_chip(version, contract_template, member) do
-    pid =
-      case contract_template do
-        {:ok, template} ->
-          contract_key = {member.symbol, template.expiry, template.strike, template.right}
-          ContractMonitor.whereis(version.id, contract_key)
-
-        {:error, :unsupported_leg_config} ->
-          nil
-      end
-
+  # The monitor is found by symbol among the version's running monitors,
+  # not by rebuilding its contract from the leg config: an atm_offset /
+  # dte_target contract is resolved from spot at activation, so a rebuilt
+  # key never matches. Until 2026-09-29 this page did rebuild it, and every
+  # such member showed Flat and not running with its position open (the
+  # version page had the same bug, fixed 2026-09-24).
+  defp build_chip(version, monitors, member) do
+    pid = Map.get(monitors, member.symbol)
     snapshot = pid && fetch_snapshot(pid)
 
     run =

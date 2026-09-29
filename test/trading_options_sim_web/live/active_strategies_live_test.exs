@@ -129,6 +129,40 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     assert html =~ ~r/Unrealized [+-]\$\d+\.\d{2}/
   end
 
+  # Regression, 2026-09-29: the page rebuilt each member's contract from
+  # the leg config to find its monitor. An atm_offset contract is resolved
+  # from spot at activation, so that never matched and every such member
+  # showed Flat / not running while 171 positions were open.
+  test "finds an atm_offset version's monitor and shows its open position", %{conn: conn} do
+    version = activated_version_fixture("ATM Strategy", ["ATMCHIP"])
+
+    {:ok, _} =
+      version
+      |> Ecto.Changeset.change(
+        option_leg_config: %{
+          "expiry_selection" => "dte_target",
+          "dte_target" => 45,
+          "strike_selection" => "atm_offset",
+          "strike_offset" => 0,
+          "right" => "C"
+        }
+      )
+      |> TradingOptionsSim.Repo.update()
+
+    message =
+      %{type: :price, symbol: "ATMCHIP", source: :ibkr, data: %{last: 130.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:ATMCHIP", message)
+    Process.sleep(50)
+
+    {:ok, _view, html} = live(conn, ~p"/active_strategies")
+
+    assert html =~ "Position: Long"
+    refute html =~ "Flat"
+    assert html =~ "border-success/40"
+  end
+
   test "a flat member shows no contract or unrealized P&L", %{conn: conn} do
     activated_version_fixture("Flat OCC Strategy", ["FLATOCC"])
 
