@@ -1372,10 +1372,15 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         ContractMonitor.snapshot(pid).last_snapshot
         |> Map.keys()
         |> Enum.filter(&String.starts_with?(&1, "run_"))
-        |> Kernel.--(groups.derived ++ groups.vol ++ groups.polygon)
+        |> Kernel.--(groups.derived ++ groups.vol ++ groups.regime ++ groups.polygon)
         |> Enum.sort()
 
       assert written == Enum.sort(groups.pricing)
+    end
+
+    test "snapshot_keys/0 matches the regime keys" do
+      assert Enum.sort(ContractMonitor.snapshot_key_groups().regime) ==
+               Enum.sort(TradingOptionsSim.RegimeCache.snapshot_keys())
     end
 
     test "snapshot_keys/0 matches the premium vol keys" do
@@ -2069,6 +2074,47 @@ defmodule TradingOptionsSim.ContractMonitorTest do
                run.take_profit_price,
                ContractMonitor.round_number_take_profit(raw, run.entry_price, "long")
              )
+    end
+  end
+
+  describe "regime ordinals (regime_trend_ordinal / regime_vol_ordinal)" do
+    setup do
+      TradingOptionsSim.RegimeCache.put(nil)
+      on_exit(fn -> TradingOptionsSim.RegimeCache.put(nil) end)
+    end
+
+    @against_down %{"signal" => "regime_trend_ordinal", "op" => "lt", "value" => -0.5}
+
+    test "a rule on the regime enters only when the regime matches" do
+      version = version_fixture(%{"entry" => @against_down})
+
+      TradingOptionsSim.RegimeCache.put(%{trend_state: :up, vol_state: :calm})
+      {pid, _run} = start_monitor(version, contract_key("REGIME1"))
+      broadcast_underlying_price("REGIME1", 150.0)
+      sync(pid)
+
+      snap = ContractMonitor.snapshot(pid)
+      refute snap.position_open?
+      assert snap.last_snapshot["regime_trend_ordinal"] == 1
+      assert snap.last_snapshot["regime_vol_ordinal"] == -1
+
+      TradingOptionsSim.RegimeCache.put(%{trend_state: :down, vol_state: :calm})
+      broadcast_underlying_price("REGIME1", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
+    # Fails closed: no label yet means no regime key, so no entry.
+    test "no cached regime leaves the keys out and the rule never fires" do
+      version = version_fixture(%{"entry" => @against_down})
+      {pid, _run} = start_monitor(version, contract_key("REGIME2"))
+      broadcast_underlying_price("REGIME2", 150.0)
+      sync(pid)
+
+      snap = ContractMonitor.snapshot(pid)
+      refute snap.position_open?
+      refute Map.has_key?(snap.last_snapshot, "regime_trend_ordinal")
     end
   end
 

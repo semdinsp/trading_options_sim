@@ -169,6 +169,9 @@ defmodule TradingOptionsSim.ContractMonitor do
   @derived_keys ~w(run_spread run_spread_pct run_theta_pct run_lambda)
   # App-local, not in TradingCore.Options.Derived: see premium_vol_values/2.
   @vol_keys ~w(run_premium_daily_vol)
+  # Session regime, same names and -1/0/1 mapping as trading_live's rules;
+  # see TradingOptionsSim.RegimeCache.
+  @regime_keys ~w(regime_trend_ordinal regime_vol_ordinal)
   @polygon_keys ~w(run_poly_last run_poly_spread_bps run_poly_imbalance
                    run_poly_imbalance_ema run_poly_ret_1m_bps run_poly_ret_5m_bps
                    run_poly_vwap_dev_bps run_poly_minute_volume run_poly_rel_volume)
@@ -179,7 +182,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   written; see the attribute comment above.
   """
   @spec snapshot_keys() :: [String.t()]
-  def snapshot_keys, do: Enum.sort(@pricing_keys ++ @derived_keys ++ @vol_keys ++ @polygon_keys)
+  def snapshot_keys,
+    do: Enum.sort(@pricing_keys ++ @derived_keys ++ @vol_keys ++ @regime_keys ++ @polygon_keys)
 
   @doc false
   def snapshot_key_groups,
@@ -187,6 +191,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       pricing: @pricing_keys,
       derived: @derived_keys,
       vol: @vol_keys,
+      regime: @regime_keys,
       polygon: @polygon_keys
     }
 
@@ -918,6 +923,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       )
     )
     |> then(&Map.merge(&1, premium_vol_values(tick.implied_vol, &1["run_lambda"])))
+    |> Map.merge(regime_values())
   end
 
   # run_bid/run_ask only when they are a real market. IBKR sends -1.0 for
@@ -973,7 +979,14 @@ defmodule TradingOptionsSim.ContractMonitor do
     # BlackScholes' theta is per YEAR; derived_values/5 wants per day.
     |> Map.merge(derived_values(priced.price, spot, priced.delta, priced.theta / 365, nil))
     |> then(&Map.merge(&1, premium_vol_values(implied_vol, &1["run_lambda"])))
+    |> Map.merge(regime_values())
   end
+
+  # regime_trend_ordinal / regime_vol_ordinal from the cached session
+  # label; absent until trading_signal has sent one, so a rule on them
+  # fails closed rather than reading a guessed 0.
+  defp regime_values,
+    do: TradingOptionsSim.RegimeCache.snapshot_values(TradingOptionsSim.RegimeCache.current())
 
   @doc false
   # run_premium_daily_vol: the option premium's expected one-day move, as
