@@ -167,7 +167,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   @pricing_keys ~w(run_current_price run_underlying_price run_delta run_gamma
                    run_theta run_vega run_implied_vol run_bid run_ask run_quote_delayed)
   @derived_keys ~w(run_spread run_spread_pct run_theta_pct run_lambda)
-  # App-local, not in TradingCore.Options.Derived: see premium_vol_values/2.
+  # From TradingCore.Options.Derived.premium_vol_values/2; see
+  # premium_vol_values/2 below.
   @vol_keys ~w(run_premium_daily_vol)
   # Session regime, same names and -1/0/1 mapping as trading_live's rules;
   # see TradingOptionsSim.RegimeCache.
@@ -990,22 +991,15 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   @doc false
   # run_premium_daily_vol: the option premium's expected one-day move, as
-  # a fraction of the premium -- the underlying's implied daily vol
-  # (annual IV / sqrt(252)) times the option's leverage |run_lambda|
-  # (% premium move per 1% underlying move). E.g. IV 13%, lambda 20:
-  # 0.13 / 15.87 * 20 = 0.16, a 16% daily premium move.
-  #
-  # It is the daily_vol that sizes a "volatility_multiple" stop
-  # (risk_levels/3), and a snapshot key so a rule can filter on it.
-  # Forward-looking (IV), so it needs no bar history. App-local for now:
-  # trading_live has no equivalent, which is why PromotionExport refuses
-  # volatility_multiple versions. Absent when IV or lambda is missing or
-  # not positive, which fails a rule closed.
-  def premium_vol_values(implied_vol, lambda)
-      when is_number(implied_vol) and is_number(lambda) and implied_vol > 0 and lambda != 0,
-      do: %{"run_premium_daily_vol" => implied_vol / :math.sqrt(252) * abs(lambda)}
-
-  def premium_vol_values(_implied_vol, _lambda), do: %{}
+  # a fraction of the premium (annual IV / sqrt(252) x |run_lambda|; e.g.
+  # IV 13%, lambda 20 -> 0.16). It sizes a "volatility_multiple" stop
+  # (risk_levels/3) and is a snapshot key rules can filter on; absent when
+  # IV or lambda is missing, which fails a rule closed. Computed by
+  # TradingCore.Options.Derived (moved there 2026-09-29, trading_core
+  # PR #67) so trading_live computes the same number. PromotionExport
+  # still refuses volatility_multiple versions until trading_live confirms
+  # it supplies the key.
+  defdelegate premium_vol_values(implied_vol, lambda), to: TradingCore.Options.Derived
 
   # Inside the expiry window (dte <= expiry_close_dte, 1 by default) a
   # flat monitor opens nothing new: the position would have to be closed
