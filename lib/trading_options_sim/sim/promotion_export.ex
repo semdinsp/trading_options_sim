@@ -39,9 +39,11 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
       explicit `risk_controls` and promote the fork.
     * a `risk_controls` or `exit_strategy` this app can't run
       (`StrategyVersion.params_errors/1`).
-    * `"volatility_multiple"`: sized on this app's premium vol
-      (`ContractMonitor.premium_vol_values/2`), which trading_live
-      doesn't compute. Sim-only until it does.
+
+  `"volatility_multiple"` versions are exported: both apps size them on
+  `run_premium_daily_vol` from `TradingCore.Options.Derived` at the entry
+  tick (trading_core #67; trading_live #275). The one known difference is
+  the IV input: this app's pricer vs IBKR's market IV.
   """
 
   alias TradingOptionsSim.ContractMonitor
@@ -80,15 +82,7 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
             "but live would apply its default; fork it with an explicit risk_controls"
         ]
 
-    vol =
-      if get_in(params || %{}, ["risk_controls", "method"]) == "volatility_multiple",
-        do: [
-          "risk_controls.method volatility_multiple is sim-only: trading_live doesn't " <>
-            "compute the premium daily vol (IV / sqrt(252) * |lambda|) it is sized on"
-        ],
-        else: []
-
-    missing ++ StrategyVersion.params_errors(params) ++ vol
+    missing ++ StrategyVersion.params_errors(params)
   end
 
   defp to_payload(v) do

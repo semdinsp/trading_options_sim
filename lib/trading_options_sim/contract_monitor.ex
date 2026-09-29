@@ -996,9 +996,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # (risk_levels/3) and is a snapshot key rules can filter on; absent when
   # IV or lambda is missing, which fails a rule closed. Computed by
   # TradingCore.Options.Derived (moved there 2026-09-29, trading_core
-  # PR #67) so trading_live computes the same number. PromotionExport
-  # still refuses volatility_multiple versions until trading_live confirms
-  # it supplies the key.
+  # PR #67) so trading_live computes the same number (its PR #275), which
+  # is what lets PromotionExport export volatility_multiple versions.
   defdelegate premium_vol_values(implied_vol, lambda), to: TradingCore.Options.Derived
 
   # Inside the expiry window (dte <= expiry_close_dte, 1 by default) a
