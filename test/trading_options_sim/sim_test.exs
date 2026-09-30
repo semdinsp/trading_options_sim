@@ -23,6 +23,12 @@ defmodule TradingOptionsSim.SimTest do
     version
   end
 
+  defp backdate_activated_at(version, activated_at) do
+    version
+    |> Ecto.Changeset.change(activated_at: activated_at)
+    |> TradingOptionsSim.Repo.update!()
+  end
+
   describe "create_strategy_version/2" do
     test "defaults lifecycle_stage to discovery" do
       strategy = strategy_fixture()
@@ -639,6 +645,33 @@ defmodule TradingOptionsSim.SimTest do
       {:ok, reactivated} = Sim.mark_activated(version)
 
       refute is_nil(reactivated.activated_at)
+      assert is_nil(reactivated.deactivated_at)
+    end
+
+    test "mark_activated/1 keeps activated_at when the version is already active" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+      original = ~U[2026-09-01 14:00:00Z]
+      backdate_activated_at(version, original)
+
+      {:ok, reactivated} = Sim.mark_activated(version)
+
+      assert reactivated.activated_at == original
+      assert is_nil(reactivated.deactivated_at)
+    end
+
+    test "mark_activated/1 restamps activated_at after a deactivation" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+      original = ~U[2026-09-01 14:00:00Z]
+      backdate_activated_at(version, original)
+      {:ok, version} = Sim.mark_deactivated(version)
+
+      {:ok, reactivated} = Sim.mark_activated(version)
+
+      assert DateTime.compare(reactivated.activated_at, original) == :gt
       assert is_nil(reactivated.deactivated_at)
     end
 
