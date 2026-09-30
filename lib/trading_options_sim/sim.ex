@@ -1807,24 +1807,66 @@ defmodule TradingOptionsSim.Sim do
   `TradingOptionsSim.Sim.Workers.PerformanceSnapshotWorker`, same
   "delegator + counts" shape `trading_system`'s own
   `snapshot_all_active_versions/0` uses.
+
+  `missed` counts the skipped versions that nonetheless closed a
+  (non-excluded) run in the 24 hours before `computed_at` — a version
+  that just traded should always have something to snapshot, so a
+  non-zero `missed` means the window itself is wrong. That is exactly
+  how a restart re-stamping `activated_at` showed up on 2026-09-29: the
+  job completed, `skipped` looked like ordinary untraded versions, and
+  nothing flagged that every version had been skipped. A version
+  deactivated in that same 24 hours (a `manual`/`manual_no_entry` close
+  — what `SimActivator.deactivate/1` leaves behind) is not counted: its
+  earlier runs rightly fall outside the window its re-activation starts.
   """
   @spec snapshot_all_active_versions() :: %{
           snapshotted: non_neg_integer(),
-          skipped: non_neg_integer()
+          skipped: non_neg_integer(),
+          missed: non_neg_integer()
         }
   def snapshot_all_active_versions do
     computed_at = DateTime.utc_now()
 
-    StrategyVersion
-    |> where([v], is_nil(v.deleted_at))
-    |> where([v], v.lifecycle_stage in @snapshot_lifecycle_stages)
-    |> Repo.all()
-    |> Enum.reduce(%{snapshotted: 0, skipped: 0}, fn version, acc ->
-      case snapshot_version(version, computed_at) do
-        {:ok, _snapshot} -> Map.update!(acc, :snapshotted, &(&1 + 1))
-        :ok -> Map.update!(acc, :skipped, &(&1 + 1))
-      end
-    end)
+    counts =
+      StrategyVersion
+      |> where([v], is_nil(v.deleted_at))
+      |> where([v], v.lifecycle_stage in @snapshot_lifecycle_stages)
+      |> Repo.all()
+      |> Enum.reduce(%{snapshotted: 0, skipped: 0, skipped_ids: []}, fn version, acc ->
+        case snapshot_version(version, computed_at) do
+          {:ok, _snapshot} ->
+            Map.update!(acc, :snapshotted, &(&1 + 1))
+
+          :ok ->
+            %{acc | skipped: acc.skipped + 1, skipped_ids: [version.id | acc.skipped_ids]}
+        end
+      end)
+
+    counts
+    |> Map.delete(:skipped_ids)
+    |> Map.put(:missed, count_recently_traded(counts.skipped_ids, computed_at))
+  end
+
+  defp count_recently_traded([], _computed_at), do: 0
+
+  defp count_recently_traded(version_ids, computed_at) do
+    since = DateTime.add(computed_at, -24, :hour)
+
+    recent_closes =
+      SimRun
+      |> where([r], r.strategy_version_id in ^version_ids and r.status == "closed")
+      |> where([r], r.exit_at >= ^since and r.exit_at <= ^computed_at)
+
+    deactivated =
+      recent_closes
+      |> where([r], r.exit_reason in ["manual", "manual_no_entry"])
+      |> select([r], r.strategy_version_id)
+
+    recent_closes
+    |> where([r], is_nil(r.excluded_reason))
+    |> where([r], r.strategy_version_id not in subquery(deactivated))
+    |> select([r], count(r.strategy_version_id, :distinct))
+    |> Repo.one()
   end
 
   @doc """
