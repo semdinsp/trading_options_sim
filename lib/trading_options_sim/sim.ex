@@ -221,12 +221,22 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
-  Marks `version` as durably active — sets `activated_at` to now,
-  clears `deactivated_at`. Called by `SimActivator.activate/1` on every
-  call (even a no-op re-activation against an already-running monitor),
-  so `activated_at` always reflects the most recent activation. See
-  `StrategyVersion.activated_at`'s own doc for why this exists as a
-  persistent field rather than being derived from `SimRun` state.
+  Marks `version` as durably active — clears `deactivated_at`, and sets
+  `activated_at` to now only on an inactive -> active transition (never
+  activated, or deactivated since). Called by `SimActivator.activate/1`
+  on every call, including `SimReactivator`'s pass on every app boot;
+  an already-active version keeps its original `activated_at`.
+
+  That preservation is load-bearing: `snapshot_version/2` windows a
+  version's track record from `activated_at`. Stamping it on every call
+  reset every active version's window to the boot instant on each
+  restart, so the next `PerformanceSnapshotWorker` run found no closed
+  runs and silently skipped them all — confirmed live 2026-09-30: all
+  285 active versions had `activated_at` one second after node boot,
+  and the 2026-09-29 21:00 UTC run wrote zero snapshots despite 1,914
+  runs closing that day. See `StrategyVersion.activated_at`'s own doc
+  for why this exists as a persistent field rather than being derived
+  from `SimRun` state.
 
   Re-fetches `version` by id before building the changeset rather than
   trusting the caller's own (possibly stale) struct — confirmed via a
@@ -242,14 +252,23 @@ defmodule TradingOptionsSim.Sim do
   @spec mark_activated(StrategyVersion.t()) ::
           {:ok, StrategyVersion.t()} | {:error, Ecto.Changeset.t()}
   def mark_activated(%StrategyVersion{id: id}) do
-    id
-    |> get_strategy_version!()
+    current = get_strategy_version!(id)
+
+    activated_at =
+      if active?(current),
+        do: current.activated_at,
+        else: DateTime.utc_now() |> DateTime.truncate(:second)
+
+    current
     |> StrategyVersion.activation_changeset(%{
-      activated_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      activated_at: activated_at,
       deactivated_at: nil
     })
     |> Repo.update()
   end
+
+  defp active?(%StrategyVersion{activated_at: activated_at, deactivated_at: deactivated_at}),
+    do: not is_nil(activated_at) and is_nil(deactivated_at)
 
   @doc """
   Marks `version` as durably deactivated — sets `deactivated_at` to

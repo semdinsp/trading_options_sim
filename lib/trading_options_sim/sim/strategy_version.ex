@@ -101,8 +101,9 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     # Durable activation record — see this field's own migration for why
     # "activated" can't be derived from "has an open SimRun" alone (a
     # flat-but-active version has no open run at all). `activated_at` is
-    # set on every activate/1 call (even a no-op re-activation, so it
-    # always reflects the most recent activation) and cleared to nil on
+    # set when a version goes inactive -> active and kept unchanged by a
+    # re-activation of an already-active version (e.g. SimReactivator on
+    # boot — see Sim.mark_activated/1 for why); `deactivated_at` is set on
     # deactivate/1; `not is_nil(activated_at) and is_nil(deactivated_at)`
     # is "currently active." Mirrors trading_live's own
     # LiveStrategySettings.deactivated_at convention.
