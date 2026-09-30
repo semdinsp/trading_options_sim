@@ -1974,9 +1974,11 @@ defmodule TradingOptionsSim.Sim do
   `realized_pnl_gross`/`realized_pnl_net`/`total_commission`) but for
   "today" specifically rather than a version's whole
   `activated_at`-to-now history, mirroring `trading_live`'s own
-  `performance_strip/1` ("today's fills," not cumulative). `nil` if no
-  runs closed today yet — same "no data" state that component's own
-  empty-state clause handles, rather than an all-zero row.
+  `performance_strip/1` ("today's fills," not cumulative). `fill_count`
+  is every fill the version made today, including the entry fill of a
+  position still open — so a version that only entered today still gets
+  a strip (with zero closed trades) instead of the "No fills yet today"
+  empty state. `nil` only when there were no fills and no closes today.
   """
   @spec today_stats_for_version(StrategyVersion.t()) :: map() | nil
   def today_stats_for_version(%StrategyVersion{} = version) do
@@ -1990,14 +1992,20 @@ defmodule TradingOptionsSim.Sim do
       |> preload(:sim_fills)
       |> Repo.all()
 
-    if closed_runs == [] do
+    fill_count =
+      SimFill
+      |> join(:inner, [f], r in SimRun, on: r.id == f.sim_run_id)
+      |> where([f, r], r.strategy_version_id == ^version.id and f.filled_at >= ^today_start)
+      |> Repo.aggregate(:count)
+
+    if closed_runs == [] and fill_count == 0 do
       nil
     else
       %{
         n_trades: length(closed_runs),
         n_wins: Enum.count(closed_runs, &won?/1),
         n_losses: Enum.count(closed_runs, &(!won?(&1))),
-        fill_count: closed_runs |> Enum.map(&length(&1.sim_fills)) |> Enum.sum(),
+        fill_count: fill_count,
         realized_pnl_gross: sum_decimal(closed_runs, & &1.realized_pnl),
         realized_pnl_net: sum_decimal_if_all_present(closed_runs, & &1.realized_pnl_net),
         total_commission: sum_decimal_if_all_present(closed_runs, &total_run_commission/1)
