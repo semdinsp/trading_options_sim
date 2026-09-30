@@ -83,6 +83,20 @@ defmodule TradingOptionsSim.SimReactivatorTest do
     run
   end
 
+  defp orphaned_open_run_fixture_without_activation(version, symbol) do
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: symbol,
+        expiry: "20271231",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    run
+  end
+
   describe "retrying unanswered contract lookups" do
     # :test has no trading_hub, so an atm_offset member's spot lookup
     # goes unanswered -- exactly the transient failure a busy restart
@@ -288,6 +302,69 @@ defmodule TradingOptionsSim.SimReactivatorTest do
     assert is_pid(ContractMonitor.whereis(version.id, contract_key))
 
     GenServer.stop(reactivator_pid)
+  end
+
+  # A restart must be invisible to a strategy: the boot-time pass
+  # brings the monitor back without touching the version's durable
+  # state. Before 2026-09-30 the pass re-stamped activated_at, silently
+  # emptying every PerformanceSnapshot window after each restart -- the
+  # job still "completed". This checks every field a restart could
+  # plausibly reset, so the next such regression fails here instead.
+  test "a boot-time reactivation leaves the version and its open position untouched" do
+    pool = pool_fixture(["REACTBOOT"])
+
+    version =
+      version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+    {:ok, version} = Sim.mark_activated(version)
+    activated_at = ~U[2026-09-01 14:00:00Z]
+
+    version =
+      version
+      |> Ecto.Changeset.change(activated_at: activated_at)
+      |> TradingOptionsSim.Repo.update!()
+
+    run = orphaned_open_run_fixture_without_activation(version, "REACTBOOT")
+    entered_at = DateTime.add(DateTime.utc_now(), -600, :second) |> DateTime.truncate(:second)
+
+    {:ok, {_fill, run}} =
+      Sim.record_entry_fill(
+        run,
+        %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: entered_at},
+        %{entry_at: entered_at, entry_price: Decimal.new("5.00")}
+      )
+
+    run =
+      run
+      |> Ecto.Changeset.change(
+        stop_loss_price: Decimal.new("4.25"),
+        take_profit_price: Decimal.new("6.25")
+      )
+      |> TradingOptionsSim.Repo.update!()
+
+    contract_key = {run.symbol, run.expiry, run.strike, run.right}
+    assert ContractMonitor.whereis(version.id, contract_key) == nil
+
+    {:ok, pid} = SimReactivator.start_link()
+    Process.sleep(50)
+
+    reloaded = Sim.get_strategy_version!(version.id)
+    assert reloaded.activated_at == activated_at
+    assert is_nil(reloaded.deactivated_at)
+
+    assert [resumed] = Sim.list_open_sim_runs(version)
+    assert resumed.id == run.id
+    assert resumed.entry_at == run.entry_at
+    assert Decimal.equal?(resumed.entry_price, run.entry_price)
+
+    monitor = ContractMonitor.whereis(version.id, contract_key)
+    assert is_pid(monitor)
+    state = :sys.get_state(monitor)
+    assert ContractMonitor.snapshot(monitor).position_open?
+    assert Decimal.equal?(state.stop_loss_price, run.stop_loss_price)
+    assert Decimal.equal?(state.take_profit_price, run.take_profit_price)
+
+    GenServer.stop(pid)
   end
 
   test "does not start a second monitor for an already-running run" do
