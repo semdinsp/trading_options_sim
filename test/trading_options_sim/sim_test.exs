@@ -980,6 +980,29 @@ defmodule TradingOptionsSim.SimTest do
       run
     end
 
+    test "ignores runs closed without an entry" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      closed_run_fixture(version, %{})
+
+      {:ok, flat} =
+        Sim.open_sim_run(version, %{
+          symbol: "SNAP1",
+          expiry: "20271231",
+          strike: Decimal.new("155.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, _} = Sim.close_run_without_entry(flat, "manual_no_entry")
+
+      {:ok, snapshot} = Sim.snapshot_version(version)
+      assert snapshot.n_trades == 1
+      assert snapshot.n_losses == 0
+      assert Sim.today_stats_for_version(version).n_trades == 1
+    end
+
     test "is a no-op when the version has no closed runs" do
       strategy = strategy_fixture()
       version = version_fixture(strategy)

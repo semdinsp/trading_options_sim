@@ -491,6 +491,7 @@ defmodule TradingOptionsSim.Sim do
         |> where([r], r.strategy_version_id in ^version_ids)
         |> where([r], r.status == "closed")
         |> where([r], is_nil(r.excluded_reason))
+        |> entered()
         |> where([r], fragment("?::date", r.exit_at) == ^trading_date)
         |> select([r], r.strategy_version_id)
         |> distinct(true)
@@ -639,6 +640,7 @@ defmodule TradingOptionsSim.Sim do
       |> where([r], r.strategy_version_id == ^version_id)
       |> where([r], r.status == "closed")
       |> where([r], is_nil(r.excluded_reason))
+      |> entered()
       |> select([r], r.realized_pnl)
       |> Repo.all()
 
@@ -665,6 +667,13 @@ defmodule TradingOptionsSim.Sim do
       end
     )
   end
+
+  # A run closed without ever filling an entry (`manual_no_entry`, left
+  # by SimActivator.deactivate/1 on a flat monitor) is not a trade: no
+  # position, no P&L. Every count/score of closed runs goes through this
+  # so a deactivation can't pad a promotion gate's run count, a
+  # quarantine day count, or a snapshot's loss column.
+  defp entered(query), do: where(query, [r], not is_nil(r.entry_at))
 
   # --- Target pools -------------------------------------------------------
 
@@ -1263,6 +1272,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "closed")
     |> where([r], is_nil(r.excluded_reason))
+    |> entered()
     |> Repo.all()
     |> Enum.group_by(&(&1.context["regime_label"] || "uncategorized"))
   end
@@ -1763,6 +1773,7 @@ defmodule TradingOptionsSim.Sim do
     |> where([r], r.strategy_version_id in ^version_ids)
     |> where([r], r.status == "closed")
     |> where([r], not is_nil(r.exit_at))
+    |> entered()
     |> group_by([r], r.strategy_version_id)
     |> select([r], {r.strategy_version_id, max(r.exit_at)})
     |> Repo.all()
@@ -1890,6 +1901,7 @@ defmodule TradingOptionsSim.Sim do
       SimRun
       |> where([r], r.strategy_version_id == ^version.id and r.status == "closed")
       |> where([r], is_nil(r.excluded_reason))
+      |> entered()
       |> where([r], r.exit_at >= ^period_start)
       |> preload(:sim_fills)
       |> Repo.all()
@@ -1974,6 +1986,7 @@ defmodule TradingOptionsSim.Sim do
       SimRun
       |> where([r], r.strategy_version_id == ^version.id and r.status == "closed")
       |> where([r], r.exit_at >= ^today_start)
+      |> entered()
       |> preload(:sim_fills)
       |> Repo.all()
 
