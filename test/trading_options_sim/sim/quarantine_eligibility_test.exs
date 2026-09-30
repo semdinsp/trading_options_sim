@@ -21,6 +21,21 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
     version
   end
 
+  defp no_entry_close_fixture(version) do
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: "TEST",
+        expiry: "20271231",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    {:ok, run} = Sim.close_run_without_entry(run, "manual_no_entry")
+    run
+  end
+
   defp target_pool_fixture do
     {:ok, pool} = Sim.create_target_pool(%{name: "Test Pool"})
     pool
@@ -123,6 +138,22 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
 
       assert promoted.id == version.id
       assert promoted.lifecycle_stage == "quarantine"
+    end
+
+    # Deactivating a flat monitor closes its run with no entry
+    # (manual_no_entry). Those are not trades and must not pad the
+    # closed-run count toward promotion.
+    test "does not count runs closed without an entry toward promotion" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+
+      for _ <- 1..19, do: closed_run_fixture(version, Decimal.new("1.00"))
+      no_entry_close_fixture(version)
+
+      {:ok, []} = Sim.auto_promote_eligible_discovery_versions()
+
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "discovery"
     end
 
     test "does not promote a version with too few closed runs" do
