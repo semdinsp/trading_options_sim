@@ -11,7 +11,11 @@ config :trading_options_sim, TradingOptionsSim.Repo,
   hostname: "localhost",
   database: "trading_options_sim_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
-  pool_size: System.schedulers_online() * 2
+  # Capped at 10: every app in this workspace shares one local Postgres,
+  # and uncapped (schedulers * 2 = 20 on a 10-core Mac) a few overlapping
+  # `mix test` runs plus the dev nodes' pools could exhaust its connection
+  # limit. The suite runs no slower at 10.
+  pool_size: min(System.schedulers_online() * 2, 10)
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
