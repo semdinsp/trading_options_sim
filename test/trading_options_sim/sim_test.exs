@@ -1402,6 +1402,38 @@ defmodule TradingOptionsSim.SimTest do
       assert Sim.today_stats_for_version(version) == nil
     end
 
+    # An entry filled today on a still-open position is a fill today:
+    # the strip must show it rather than "No fills yet today".
+    test "counts today's entry fill on a still-open position" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: "TODAYOPEN1",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      now = DateTime.utc_now()
+
+      {:ok, _} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+          %{entry_at: now, entry_price: Decimal.new("5.00")}
+        )
+
+      stats = Sim.today_stats_for_version(version)
+
+      assert stats.fill_count == 1
+      assert stats.n_trades == 0
+      assert Decimal.equal?(stats.realized_pnl_gross, Decimal.new(0))
+    end
+
     test "aggregates today's closed runs" do
       strategy = strategy_fixture()
       version = version_fixture(strategy)
@@ -1429,6 +1461,12 @@ defmodule TradingOptionsSim.SimTest do
         Sim.get_sim_run!(run.id)
         |> Ecto.Changeset.change(exit_at: yesterday)
         |> Repo.update()
+
+      # Its fills happened yesterday too, or they'd count as today's.
+      Repo.update_all(
+        Ecto.Query.where(TradingOptionsSim.Sim.SimFill, sim_run_id: ^run.id),
+        set: [filled_at: yesterday]
+      )
 
       assert Sim.today_stats_for_version(version) == nil
     end
