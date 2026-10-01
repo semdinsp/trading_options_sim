@@ -77,8 +77,10 @@ so new forks are running at the open. **Run the close routine** after
 
 ## Market-open routine
 
-Run M0–M7 in order. Stop and report if M0 or M1 finds the app
-unhealthy: forking onto a broken app only hides the problem.
+Run M0–M7 in order. **On the first trading day of each week, also run
+M5b** (the weekly risk-control review) before forking in M6. Stop and
+report if M0 or M1 finds the app unhealthy: forking onto a broken app
+only hides the problem.
 
 ### M0 — Is the app up?
 
@@ -194,6 +196,50 @@ option and holding it has no edge, however it ranks.
 For A/B groups (tags like `TP-SL`, `Micro-Filter-AB`, `Vol-AB`),
 compare only runs from the group's start date onward.
 
+### M5b — Weekly risk-control review (first trading day of the week)
+
+Read-only, except for one write: re-tagging. The goal is to keep the
+default stop/target honest. A stop or target that never fires does
+nothing, and one that fires too often turns a good entry into a loss.
+
+**Current default:** `percent_of_entry`, stop 10% / take-profit 20%
+(set 2026-10-02). The earlier 15% / 25% almost never fired on 45-DTE
+options held intraday (VWAP Spread Reversion Put: 0 of 43 exits).
+When this review recommends a new default, change this line in a PR.
+
+1. **How often each setting fires.** Over the last 5 sessions, group
+   closed, entered runs by their version's risk settings (method, SL%,
+   TP%, ratchet/trailing, or none). For each group report:
+   - trades;
+   - share of exits by `stop_loss`, `take_profit`, `rule_exit` and
+     `eod_flatten`;
+   - net P&L per trade.
+
+   ```elixir
+   since = DateTime.add(DateTime.utc_now(), -7 * 86_400, :second)
+   Repo.all(from r in SimRun, join: v in assoc(r, :strategy_version),
+     where: r.status == "closed" and not is_nil(r.entry_at) and is_nil(r.excluded_reason) and r.exit_at >= ^since,
+     group_by: [fragment("?->'risk_controls'", v.params), fragment("?->'exit_strategy'", v.params), r.exit_reason],
+     select: {fragment("?->'risk_controls'", v.params), fragment("?->'exit_strategy'", v.params), r.exit_reason,
+              count(r.id), sum(r.realized_pnl_net)})
+   ```
+
+2. **The A/B groups built to answer this,** each against its parent and
+   only from its compare-from date:
+   - `Exit-Var`: SL10/TP15, SL8/TP25, Ratchet 15/8 and new exit rules;
+   - `RC-Added`: SL10/TP20 vs. the same strategy with none;
+   - `Vol-AB`: volatility_multiple vs. fixed percent;
+   - `TP-SL improved` vs. `TPSL-none`, where both arms are still active.
+3. **Versions still without risk controls.** List active versions whose
+   `params` have neither `risk_controls` nor `exit_strategy`, other than
+   the always-long controls. Tag any new ones `NO Risk Controls`; that's
+   this step's only write. Each gets a risk-controls fork in M6.
+4. **Recommend.** Give the best-practice settings the data supports,
+   per family if they differ (reversion vs. momentum, puts vs. calls),
+   with the evidence (n, fire rates, net per trade). Flag anything
+   decided on fewer than ~30 trades per arm as provisional. Changing
+   the default is the user's call: propose it, don't apply it.
+
 ### M6 — Fork new discovery strategies
 
 **This step writes. Activate each new fork immediately**: this is
@@ -244,6 +290,21 @@ TradingOptionsSim.SimActivator.activate(v)  # expect {:ok, [pids], []}
 **One change per fork.** Change the entry, the exit, the hold, the
 stop/target, the contract (DTE, strike offset) or the risk sizing, but
 only one of them, so the result says which change mattered.
+
+**Every new strategy and fork has risk controls.** `params` must include
+`risk_controls`, plus `exit_strategy` where it suits. Use the current
+default from M5b unless testing a different setting. If the parent had
+none, the fork still gets them: note it, and don't count it as the
+fork's one change. The only exception is always-long controls, which
+are baselines.
+
+**Other entry params available** (per version, all optional):
+- `entry_delay_minutes`: the app default is 5. Set 0 to trade from the
+  open.
+- `entry_confirm_seconds`: the entry rule must hold this long on every
+  tick before entering. Use it for flickery signals.
+- `reentry_cooldown_seconds`: no re-entry on a contract for this long
+  after an exit. Use it against churn.
 
 **Rule tree basics:**
 - A rule is `{"entry": node, "exit": node}`. A leaf is
@@ -318,6 +379,11 @@ Report, briefly:
 - **Forks created:**
   - name, parent and the one change;
   - candidates skipped because of the per-strategy cap.
+- **Weekly risk-control review (M5b, first trading day of the week):**
+  - fire rates and net per trade by setting;
+  - the A/B results;
+  - versions newly tagged `NO Risk Controls`;
+  - the recommended defaults.
 - **Problems:** anything needing the user's decision.
 
 ---
@@ -426,5 +492,7 @@ counts, and promotion/retirement. Don't expect them in tonight's numbers.
   history without the user's OK.
 - Never re-run `PerformanceSnapshotWorker` on a day it already ran.
 - Never use a noise-classified signal in a new strategy.
+- Never create a strategy version without risk controls (`risk_controls`
+  and/or `exit_strategy`), except an always-long control.
 - Never `iex --remsh` into the live node, or start a second instance of
   the app.
