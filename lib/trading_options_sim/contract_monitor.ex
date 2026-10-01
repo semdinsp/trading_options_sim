@@ -243,6 +243,10 @@ defmodule TradingOptionsSim.ContractMonitor do
     # version keeps today's behaviour byte-for-byte. Shared config key
     # with trading_system and trading_live: params["min_hold_seconds"].
     min_hold_seconds: nil,
+    # Minutes after today's open before a new entry is allowed (0 = no
+    # delay). params["entry_delay_minutes"], else the app-wide
+    # :default_entry_delay_minutes. See entry_delay_elapsed?/2.
+    entry_delay_minutes: 0,
     last_snapshot: %{},
     # When last_snapshot was last rebuilt, and (:ibkr_live only) the
     # hub timestamps of the option tick and bid/ask quote it was built
@@ -461,6 +465,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       # stop only ever tightens (see apply_moved_stop/4).
       entry_price: Keyword.get(opts, :entry_price),
       min_hold_seconds: min_hold_seconds(strategy_version),
+      entry_delay_minutes: entry_delay_minutes(strategy_version),
       signal_names: signal_names,
       canonical_names: canonical_names
     }
@@ -583,6 +588,8 @@ defmodule TradingOptionsSim.ContractMonitor do
       position_open?: state.position_open?,
       entered_at: state.entered_at,
       min_hold_seconds: state.min_hold_seconds,
+      entry_delay_minutes: state.entry_delay_minutes,
+      entry_delay_active?: not entry_delay_elapsed?(state, DateTime.utc_now()),
       expiry_close_dte: state.expiry_close_dte,
       ibkr_live_subscribed?: state.ibkr_live_subscribed?,
       last_snapshot: state.last_snapshot,
@@ -1022,7 +1029,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp maybe_transition(%{position_open?: false} = state, snapshot) do
     if RuleEngine.evaluate(state.entry_rule, snapshot) and session_open?(state) and
-         not closing_soon?(state) do
+         not closing_soon?(state) and entry_delay_elapsed?(state, DateTime.utc_now()) do
       submit_entry(state, snapshot)
     else
       state
@@ -1256,10 +1263,68 @@ defmodule TradingOptionsSim.ContractMonitor do
   # EodCloser itself so the two use one definition of the window.
   # overnight_hold versions are exempt: EodCloser doesn't flatten them,
   # so a late entry held overnight is intended. Exits are unaffected.
+  #
+  # Also true once today's session has ended. in_close_window?/2 measures
+  # to the NEXT close, which jumps to tomorrow's the instant today's
+  # passes -- so on its own it reads "not closing soon" right after the
+  # close. On 2026-09-30 five QQQ monitors entered at 20:00:00.038 UTC,
+  # the closing tick, 11 minutes after their EOD flatten, and held
+  # overnight. Checking today's session directly closes that gap.
   defp closing_soon?(%{strategy_version: %{overnight_hold: true}}), do: false
 
-  defp closing_soon?(%{exchange: exchange}),
-    do: TradingOptionsSim.EodCloser.in_close_window?(exchange, DateTime.utc_now())
+  defp closing_soon?(%{exchange: exchange}) do
+    now = DateTime.utc_now()
+
+    TradingOptionsSim.EodCloser.in_close_window?(exchange, now) or
+      closed_for_today?(exchange, now)
+  end
+
+  defp closed_for_today?(nil, _now), do: false
+
+  defp closed_for_today?(exchange, now) do
+    case TradingOptionsSim.ExchangeSessionCache.fetch(exchange) do
+      nil -> false
+      session -> TradingCore.MarketHours.closed_for_today?(session, now)
+    end
+  end
+
+  @doc """
+  `true` once `entry_delay_minutes` have passed since today's open on
+  this monitor's exchange, or when there is no delay. Gates new entries
+  only: exits, stops and forced closes are never delayed, since a
+  position already open is exactly what should not sit exposed through
+  the volatile first minutes. Ported from
+  `TradingLive.StrategyStockMonitor.entry_delay_elapsed?/1`.
+
+  A nil exchange has no session to measure from and is not delayed
+  (same fail-open rule as `session_open?/1`); a mapped-but-missing
+  session blocks (fail closed, as trading_live does).
+
+  Public for unit tests.
+  """
+  @spec entry_delay_elapsed?(map(), DateTime.t()) :: boolean()
+  def entry_delay_elapsed?(%{entry_delay_minutes: minutes}, _now)
+      when not is_integer(minutes) or minutes <= 0,
+      do: true
+
+  def entry_delay_elapsed?(%{exchange: nil}, _now), do: true
+
+  def entry_delay_elapsed?(%{exchange: exchange, entry_delay_minutes: minutes}, now) do
+    with %TradingCore.MarketHours.Session{} = session <-
+           TradingOptionsSim.ExchangeSessionCache.fetch(exchange),
+         %DateTime{} = open <- TradingCore.MarketHours.today_open(session, now) do
+      DateTime.compare(now, DateTime.add(open, minutes * 60, :second)) != :lt
+    else
+      _ -> false
+    end
+  end
+
+  defp entry_delay_minutes(%{params: %{"entry_delay_minutes" => minutes}})
+       when is_integer(minutes) and minutes >= 0,
+       do: minutes
+
+  defp entry_delay_minutes(_version),
+    do: Application.get_env(:trading_options_sim, :default_entry_delay_minutes, 0)
 
   @doc """
   `true` when the rule-based exit is allowed to fire.

@@ -333,14 +333,23 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       `"lock_pct"` from 0 up to `trigger_pct`, or `"trailing"` with a
       `"trail_pct"` between 0 and 100 (exclusive). The shapes
       `TradingCore.ExitStrategy` and trading_live accept.
+    * `"entry_delay_minutes"`: a non-negative integer — no new entry
+      until that many minutes after today's open, so the market can
+      settle. Overrides the app-wide `:default_entry_delay_minutes`.
+      Exits are never delayed. See `ContractMonitor.entry_delay_elapsed?/2`.
   """
   @spec params_errors(map() | nil) :: [String.t()]
   def params_errors(params) when is_map(params) do
     risk_controls_errors(Map.get(params, "risk_controls", :absent)) ++
-      exit_strategy_errors(Map.get(params, "exit_strategy", :absent))
+      exit_strategy_errors(Map.get(params, "exit_strategy", :absent)) ++
+      entry_delay_errors(Map.get(params, "entry_delay_minutes", :absent))
   end
 
   def params_errors(_params), do: []
+
+  defp entry_delay_errors(:absent), do: []
+  defp entry_delay_errors(minutes) when is_integer(minutes) and minutes >= 0, do: []
+  defp entry_delay_errors(_), do: ["entry_delay_minutes must be a non-negative integer"]
 
   defp risk_controls_errors(:absent), do: []
 

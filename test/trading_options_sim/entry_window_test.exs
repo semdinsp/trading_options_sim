@@ -1,0 +1,235 @@
+defmodule TradingOptionsSim.EntryWindowTest do
+  # Covers the two entry-side gates at either end of the session: the
+  # configurable delay after the open (entry_delay_minutes) and the
+  # after-close block. async: false for the same reason
+  # EodCloserTest is: real ContractMonitors under the shared registry.
+  use TradingOptionsSim.DataCase, async: false
+
+  alias TradingOptionsSim.ContractMonitor
+  alias TradingOptionsSim.Sim
+  alias TradingOptionsSim.Sim.{ExchangeSession, ExchangeTradingHours, StrategyVersion}
+
+  @always_enter %{
+    "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0},
+    "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 999_999}
+  }
+
+  defp version_fixture(attrs \\ %{}) do
+    {:ok, strategy} = Sim.create_strategy(%{name: "Entry Window"})
+
+    {:ok, version} =
+      Sim.create_strategy_version(
+        strategy,
+        Map.merge(
+          %{
+            version: 1,
+            position_sizing: %{"method" => "fixed_qty", "qty" => 1},
+            rules: @always_enter
+          },
+          attrs
+        )
+      )
+
+    version
+  end
+
+  # A session that opened `opened_minutes_ago` and closes
+  # `closes_in_minutes` from now (negative = already closed), relative to
+  # the real clock so the tests hold whenever they run. It uses a
+  # fixed-offset zone where it is currently about midday, so the window
+  # never wraps past local midnight, and a non-US market so a US holiday
+  # can't close it.
+  defp seed_session(exchange, opened_minutes_ago, closes_in_minutes) do
+    now = DateTime.utc_now()
+    tz = midday_zone(now)
+    local = fn dt -> dt |> DateTime.shift_zone!(tz) |> DateTime.to_time() end
+
+    {:ok, hours} =
+      %ExchangeTradingHours{}
+      |> ExchangeTradingHours.changeset(%{
+        name: "EW-#{exchange}",
+        timezone: tz,
+        start_time: local.(DateTime.add(now, -opened_minutes_ago * 60, :second)),
+        end_time: local.(DateTime.add(now, closes_in_minutes * 60, :second)),
+        days_of_week: [1, 2, 3, 4, 5, 6, 7],
+        close_before_minutes: 11,
+        market: "TEST"
+      })
+      |> Repo.insert()
+
+    {:ok, _} =
+      %ExchangeSession{}
+      |> ExchangeSession.changeset(%{exchange: exchange, exchange_trading_hours_id: hours.id})
+      |> Repo.insert()
+
+    :ok
+  end
+
+  # "Etc/GMT-K" is UTC+K (the sign is inverted by POSIX convention).
+  defp midday_zone(now) do
+    case 12 - now.hour do
+      0 -> "Etc/UTC"
+      k when k > 0 -> "Etc/GMT-#{k}"
+      k -> "Etc/GMT+#{-k}"
+    end
+  end
+
+  defp start_flat_monitor(version, exchange, symbol) do
+    {:ok, run} =
+      Sim.open_sim_run(version, %{
+        symbol: symbol,
+        expiry: "20271231",
+        strike: Decimal.new("150.00"),
+        right: "C",
+        multiplier: 100,
+        direction: "long"
+      })
+
+    {:ok, pid} =
+      start_supervised(
+        {ContractMonitor,
+         sim_run_id: run.id,
+         contract_key: {symbol, "20271231", Decimal.new("150.00"), "C"},
+         strategy_version: version,
+         direction: "long",
+         quantity: 1,
+         exchange: exchange}
+      )
+
+    pid
+  end
+
+  defp tick(pid, symbol) do
+    message =
+      %{type: :price, symbol: symbol, source: :ibkr, data: %{last: 150.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{symbol}", message)
+    _ = ContractMonitor.snapshot(pid)
+  end
+
+  defp exchange, do: "EW-#{System.unique_integer([:positive])}"
+
+  describe "entry_delay_elapsed?/2" do
+    test "no delay is always elapsed" do
+      assert ContractMonitor.entry_delay_elapsed?(
+               %{entry_delay_minutes: 0, exchange: "ANY"},
+               DateTime.utc_now()
+             )
+    end
+
+    test "a nil exchange is never delayed" do
+      assert ContractMonitor.entry_delay_elapsed?(
+               %{entry_delay_minutes: 5, exchange: nil},
+               DateTime.utc_now()
+             )
+    end
+
+    test "an unmapped exchange blocks while a delay is set" do
+      refute ContractMonitor.entry_delay_elapsed?(
+               %{entry_delay_minutes: 5, exchange: exchange()},
+               DateTime.utc_now()
+             )
+    end
+
+    test "is false inside the delay and true once it has passed" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+
+      refute ContractMonitor.entry_delay_elapsed?(
+               %{entry_delay_minutes: 5, exchange: ex},
+               DateTime.utc_now()
+             )
+
+      assert ContractMonitor.entry_delay_elapsed?(
+               %{entry_delay_minutes: 2, exchange: ex},
+               DateTime.utc_now()
+             )
+    end
+  end
+
+  describe "entry delay on a live monitor" do
+    test "a monitor inside its delay does not enter" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+      version = version_fixture(%{params: %{"entry_delay_minutes" => 5}})
+      pid = start_flat_monitor(version, ex, "DELAY1")
+
+      tick(pid, "DELAY1")
+
+      snap = ContractMonitor.snapshot(pid)
+      refute snap.position_open?
+      assert snap.entry_delay_active?
+    end
+
+    # Must not fire on healthy input: past the delay, entries proceed.
+    test "a monitor past its delay enters" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+      version = version_fixture(%{params: %{"entry_delay_minutes" => 2}})
+      pid = start_flat_monitor(version, ex, "DELAY2")
+
+      tick(pid, "DELAY2")
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
+    test "with no delay configured a monitor enters straight after the open" do
+      ex = exchange()
+      :ok = seed_session(ex, 1, 60)
+      pid = start_flat_monitor(version_fixture(), ex, "DELAY3")
+
+      tick(pid, "DELAY3")
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+  end
+
+  describe "no entries after today's close" do
+    # "unrestricted" skips the session-hours check, so only the close
+    # guard stands between it and an after-close entry -- the gap the
+    # 2026-09-30 20:00:00 UTC QQQ entries went through.
+    test "an unrestricted, non-overnight version does not enter after the close" do
+      ex = exchange()
+      :ok = seed_session(ex, 120, -5)
+      version = version_fixture()
+
+      {:ok, version} =
+        Sim.update_trading_hours_settings(version, %{trading_hours_policy: "unrestricted"})
+
+      pid = start_flat_monitor(version, ex, "AFTERCLOSE1")
+      tick(pid, "AFTERCLOSE1")
+
+      refute ContractMonitor.snapshot(pid).position_open?
+    end
+
+    test "an overnight_hold version is not held to the close guard" do
+      ex = exchange()
+      :ok = seed_session(ex, 120, -5)
+      version = version_fixture()
+
+      {:ok, version} =
+        Sim.update_trading_hours_settings(version, %{
+          trading_hours_policy: "unrestricted",
+          overnight_hold: true
+        })
+
+      pid = start_flat_monitor(version, ex, "AFTERCLOSE2")
+      tick(pid, "AFTERCLOSE2")
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+  end
+
+  describe "params validation" do
+    test "accepts a non-negative integer entry_delay_minutes" do
+      assert StrategyVersion.params_errors(%{"entry_delay_minutes" => 5}) == []
+      assert StrategyVersion.params_errors(%{"entry_delay_minutes" => 0}) == []
+    end
+
+    test "rejects a negative or non-integer entry_delay_minutes" do
+      assert StrategyVersion.params_errors(%{"entry_delay_minutes" => -1}) != []
+      assert StrategyVersion.params_errors(%{"entry_delay_minutes" => "5"}) != []
+    end
+  end
+end
