@@ -83,6 +83,12 @@ config :trading_options_sim, :signal_bus_adapter, TradingOptionsSim.SignalBus.Te
 # config/test.exs uses.
 config :trading_options_sim, Oban, testing: :manual
 
+# No app-wide entry delay in tests: many tests seed a session relative
+# to the clock and expect an immediate entry, and a 5-minute default
+# would make them depend on when they run. Tests that exercise the
+# default set it explicitly.
+config :trading_options_sim, :default_entry_delay_minutes, 0
+
 # Every test seeds its own ExchangeSession/ExchangeTradingHours fixtures
 # inside its own sandboxed transaction and expects ContractMonitor's
 # session-open check to see them immediately — a singleton ETS cache

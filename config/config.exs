@@ -42,10 +42,12 @@ config :trading_options_sim, Oban,
   ]
 
 # Minutes after each exchange's open before any monitor may take a new
-# entry, so the opening volatility can settle. 0 = no delay. A version
-# can override it with params["entry_delay_minutes"]. Exits are never
-# delayed. See ContractMonitor.entry_delay_elapsed?/2.
-config :trading_options_sim, :default_entry_delay_minutes, 0
+# entry, so the opening volatility can settle (set to 5 on 2026-10-01).
+# 0 = no delay. A version can override it with
+# params["entry_delay_minutes"], including 0 to trade from the open.
+# Exits are never delayed. Read when a monitor starts, so a change needs
+# a restart. See ContractMonitor.entry_delay_elapsed?/2.
+config :trading_options_sim, :default_entry_delay_minutes, 5
 
 # app_status shared library — standard /status (JSON) and /status/metrics
 # (Prometheus) endpoints for this app, matching trading_hub/trading_live/
