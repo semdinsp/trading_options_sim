@@ -185,6 +185,40 @@ defmodule TradingOptionsSim.EntryWindowTest do
     end
   end
 
+  describe "app-wide default delay" do
+    setup do
+      previous = Application.get_env(:trading_options_sim, :default_entry_delay_minutes)
+      Application.put_env(:trading_options_sim, :default_entry_delay_minutes, 5)
+
+      on_exit(fn ->
+        Application.put_env(:trading_options_sim, :default_entry_delay_minutes, previous)
+      end)
+    end
+
+    test "a version without its own setting uses the app default" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+      pid = start_flat_monitor(version_fixture(), ex, "DEFAULT1")
+
+      tick(pid, "DEFAULT1")
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.entry_delay_minutes == 5
+      refute snap.position_open?
+    end
+
+    test "params entry_delay_minutes 0 overrides the default" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+      version = version_fixture(%{params: %{"entry_delay_minutes" => 0}})
+      pid = start_flat_monitor(version, ex, "DEFAULT2")
+
+      tick(pid, "DEFAULT2")
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+  end
+
   describe "no entries after today's close" do
     # "unrestricted" skips the session-hours check, so only the close
     # guard stands between it and an after-close entry -- the gap the
