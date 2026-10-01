@@ -24,6 +24,11 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
   `overnight_hold` toggle — ported from `trading_live`'s own identical
   per-strategy settings (see `StrategyVersion.trading_hours_policies/0`
   and `Sim.update_trading_hours_settings/2` for the full mapping).
+
+  A version holding positions shows an "N open positions" badge
+  (`Sim.open_position_counts/0`), linking to its detail page for the
+  contracts and P&L. Positions themselves live on Active Strategies and
+  the detail page, not here.
   """
 
   use TradingOptionsSimWeb, :live_view
@@ -181,6 +186,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
       )
     )
     |> assign(:active_version_ids, Sim.active_strategy_version_ids())
+    |> assign(:open_positions, Sim.open_position_counts())
     |> assign(:stage_counts, Sim.strategy_version_stage_counts())
   end
 
@@ -194,6 +200,9 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
   end
 
   defp list_versions(stage_filter), do: Sim.list_strategy_versions(stage_filter)
+
+  defp open_positions_label(1), do: "1 open position"
+  defp open_positions_label(n), do: "#{n} open positions"
 
   @impl true
   def render(assigns) do
@@ -261,6 +270,15 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLive do
             >
               <span class="signal-dot relative w-1.5 h-1.5 rounded-full bg-success"></span> Active
             </span>
+            <.link
+              :if={Map.get(@open_positions, version.id, 0) > 0}
+              id={"open-positions-#{version.id}"}
+              navigate={~p"/strategy_versions/#{version.id}"}
+              class="px-1.5 py-0.5 border border-info/40 text-info bg-info/10 text-[11px] uppercase tracking-wide font-data hover:bg-info/20"
+              title="Open positions right now. Click for contracts and unrealized P&L."
+            >
+              {open_positions_label(Map.get(@open_positions, version.id))}
+            </.link>
 
             <button
               :if={MapSet.member?(@active_version_ids, version.id)}
