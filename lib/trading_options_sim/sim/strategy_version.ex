@@ -337,15 +337,30 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       until that many minutes after today's open, so the market can
       settle. Overrides the app-wide `:default_entry_delay_minutes`.
       Exits are never delayed. See `ContractMonitor.entry_delay_elapsed?/2`.
+    * `"entry_confirm_seconds"`: a non-negative integer — the entry rule
+      must hold on every tick for that long before entering. See
+      `ContractMonitor.entry_confirmed?/2`.
+    * `"reentry_cooldown_seconds"`: a non-negative integer — no new entry
+      on a contract until that long after its last exit. See
+      `ContractMonitor.cooled_down?/2`.
   """
   @spec params_errors(map() | nil) :: [String.t()]
   def params_errors(params) when is_map(params) do
     risk_controls_errors(Map.get(params, "risk_controls", :absent)) ++
       exit_strategy_errors(Map.get(params, "exit_strategy", :absent)) ++
-      entry_delay_errors(Map.get(params, "entry_delay_minutes", :absent))
+      entry_delay_errors(Map.get(params, "entry_delay_minutes", :absent)) ++
+      seconds_errors("entry_confirm_seconds", Map.get(params, "entry_confirm_seconds", :absent)) ++
+      seconds_errors(
+        "reentry_cooldown_seconds",
+        Map.get(params, "reentry_cooldown_seconds", :absent)
+      )
   end
 
   def params_errors(_params), do: []
+
+  defp seconds_errors(_key, :absent), do: []
+  defp seconds_errors(_key, secs) when is_integer(secs) and secs >= 0, do: []
+  defp seconds_errors(key, _), do: ["#{key} must be a non-negative integer"]
 
   defp entry_delay_errors(:absent), do: []
   defp entry_delay_errors(minutes) when is_integer(minutes) and minutes >= 0, do: []

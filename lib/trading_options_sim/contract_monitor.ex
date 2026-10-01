@@ -247,6 +247,14 @@ defmodule TradingOptionsSim.ContractMonitor do
     # delay). params["entry_delay_minutes"], else the app-wide
     # :default_entry_delay_minutes. See entry_delay_elapsed?/2.
     entry_delay_minutes: 0,
+    # Anti-churn, both opt-in via params and 0/absent = off. See
+    # entry_confirmed?/2 and cooled_down?/2.
+    entry_confirm_seconds: 0,
+    reentry_cooldown_seconds: 0,
+    # When the entry rule last turned true (nil while it's false), and
+    # when this monitor's contract last exited.
+    entry_true_since: nil,
+    last_exit_at: nil,
     last_snapshot: %{},
     # When last_snapshot was last rebuilt, and (:ibkr_live only) the
     # hub timestamps of the option tick and bid/ask quote it was built
@@ -466,6 +474,9 @@ defmodule TradingOptionsSim.ContractMonitor do
       entry_price: Keyword.get(opts, :entry_price),
       min_hold_seconds: min_hold_seconds(strategy_version),
       entry_delay_minutes: entry_delay_minutes(strategy_version),
+      entry_confirm_seconds: param_seconds(strategy_version, "entry_confirm_seconds"),
+      reentry_cooldown_seconds: param_seconds(strategy_version, "reentry_cooldown_seconds"),
+      last_exit_at: seed_last_exit_at(strategy_version, symbol_from_opts(opts)),
       signal_names: signal_names,
       canonical_names: canonical_names
     }
@@ -1027,9 +1038,85 @@ defmodule TradingOptionsSim.ContractMonitor do
   defp maybe_transition_before_expiry(state, snapshot, _dte),
     do: maybe_transition(state, snapshot)
 
+  # Remembers when the entry rule turned true; any false tick resets it,
+  # so entry_confirmed?/2 measures an unbroken run of true evaluations.
+  defp track_entry_rule(state, true, now),
+    do: %{state | entry_true_since: state.entry_true_since || now}
+
+  defp track_entry_rule(state, _false, _now), do: %{state | entry_true_since: nil}
+
+  @doc """
+  `true` once the entry rule has held on every tick for
+  `entry_confirm_seconds` (params), or when no confirmation is set. The
+  churn filter for flickering signals: a rule that is true for one tick
+  and false the next never enters. Entry-side only.
+
+  Public for unit tests.
+  """
+  @spec entry_confirmed?(map(), DateTime.t()) :: boolean()
+  def entry_confirmed?(%{entry_confirm_seconds: secs}, _now)
+      when not is_integer(secs) or secs <= 0,
+      do: true
+
+  def entry_confirmed?(%{entry_true_since: nil}, _now), do: false
+
+  def entry_confirmed?(%{entry_confirm_seconds: secs, entry_true_since: since}, now),
+    do: DateTime.diff(now, since, :second) >= secs
+
+  @doc """
+  `true` once `reentry_cooldown_seconds` (params) have passed since this
+  contract's last exit, or when no cooldown is set. Stops the
+  exit-then-re-enter-within-minutes churn: on 2026-10-01, 36% of closed
+  trades since 09-28 re-entered within 5 minutes of the previous exit.
+  `last_exit_at` is seeded from the last closed run at start, so a
+  restart doesn't reset the cooldown. Entry-side only.
+
+  Public for unit tests.
+  """
+  @spec cooled_down?(map(), DateTime.t()) :: boolean()
+  def cooled_down?(%{reentry_cooldown_seconds: secs}, _now)
+      when not is_integer(secs) or secs <= 0,
+      do: true
+
+  def cooled_down?(%{last_exit_at: nil}, _now), do: true
+
+  def cooled_down?(%{reentry_cooldown_seconds: secs, last_exit_at: at}, now),
+    do: DateTime.diff(now, at, :second) >= secs
+
+  defp param_seconds(%{params: params}, key) when is_map(params) do
+    case Map.get(params, key) do
+      secs when is_integer(secs) and secs > 0 -> secs
+      _ -> 0
+    end
+  end
+
+  defp param_seconds(_version, _key), do: 0
+
+  defp seed_last_exit_at(version, symbol) when is_binary(symbol) do
+    if param_seconds(version, "reentry_cooldown_seconds") > 0 do
+      case Sim.last_closed_sim_run(version, symbol) do
+        %{exit_at: %DateTime{} = at} -> at
+        _ -> nil
+      end
+    end
+  end
+
+  defp seed_last_exit_at(_version, _symbol), do: nil
+
+  defp symbol_from_opts(opts) do
+    case Keyword.get(opts, :contract_key) do
+      {symbol, _expiry, _strike, _right} -> symbol
+      _ -> nil
+    end
+  end
+
   defp maybe_transition(%{position_open?: false} = state, snapshot) do
-    if RuleEngine.evaluate(state.entry_rule, snapshot) and session_open?(state) and
-         not closing_soon?(state) and entry_delay_elapsed?(state, DateTime.utc_now()) do
+    now = DateTime.utc_now()
+    state = track_entry_rule(state, RuleEngine.evaluate(state.entry_rule, snapshot), now)
+
+    if state.entry_true_since != nil and session_open?(state) and
+         not closing_soon?(state) and entry_delay_elapsed?(state, now) and
+         entry_confirmed?(state, now) and cooled_down?(state, now) do
       submit_entry(state, snapshot)
     else
       state
@@ -1636,6 +1723,8 @@ defmodule TradingOptionsSim.ContractMonitor do
           state
           | position_open?: false,
             entered_at: nil,
+            last_exit_at: DateTime.utc_now(),
+            entry_true_since: nil,
             unpriced_warned?: false,
             stop_loss_price: nil,
             take_profit_price: nil,
