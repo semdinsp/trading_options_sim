@@ -20,6 +20,56 @@ defmodule TradingOptionsSimWeb.StrategyVersionsLiveTest do
     version
   end
 
+  describe "open positions badge" do
+    defp open_run(version, symbol, entered?) do
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: symbol,
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      if entered? do
+        now = DateTime.utc_now()
+
+        {:ok, {_fill, run}} =
+          Sim.record_entry_fill(
+            run,
+            %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+            %{entry_at: now, entry_price: Decimal.new("5.00")}
+          )
+
+        run
+      else
+        run
+      end
+    end
+
+    test "shows the count of open positions", %{conn: conn} do
+      version = version_fixture(strategy_fixture())
+      open_run(version, "POSA", true)
+      open_run(version, "POSB", true)
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions")
+
+      assert view |> element("#open-positions-#{version.id}") |> render() =~ "2 open positions"
+    end
+
+    # Must not fire on healthy input: a flat monitor's open run (no entry
+    # yet) is not a position.
+    test "no badge for a version with only flat open runs", %{conn: conn} do
+      version = version_fixture(strategy_fixture())
+      open_run(version, "POSC", false)
+
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions")
+
+      refute has_element?(view, "#open-positions-#{version.id}")
+    end
+  end
+
   test "lists every strategy version regardless of stage", %{conn: conn} do
     strategy = strategy_fixture()
     version_fixture(strategy)

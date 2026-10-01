@@ -1211,6 +1211,23 @@ defmodule TradingOptionsSim.Sim do
     |> MapSet.new()
   end
 
+  @doc """
+  Open positions per version, as `%{strategy_version_id => count}`: open
+  runs with an entry fill. A flat monitor's open run (no `entry_at`
+  yet) is a monitor waiting to enter, not a position, so it isn't
+  counted. Versions with none are absent. One grouped query for the
+  whole Strategy Versions list.
+  """
+  @spec open_position_counts() :: %{String.t() => pos_integer()}
+  def open_position_counts do
+    SimRun
+    |> where([r], r.status == "open" and not is_nil(r.entry_at))
+    |> group_by([r], r.strategy_version_id)
+    |> select([r], {r.strategy_version_id, count(r.id)})
+    |> Repo.all()
+    |> Map.new()
+  end
+
   def list_sim_fills(%SimRun{id: sim_run_id}) do
     SimFill
     |> where([f], f.sim_run_id == ^sim_run_id)
