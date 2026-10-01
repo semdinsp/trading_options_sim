@@ -41,6 +41,12 @@ config :trading_options_sim, Oban,
     {Oban.Plugins.Pruner, max_age: 8 * 24 * 60 * 60}
   ]
 
+# Minutes after each exchange's open before any monitor may take a new
+# entry, so the opening volatility can settle. 0 = no delay. A version
+# can override it with params["entry_delay_minutes"]. Exits are never
+# delayed. See ContractMonitor.entry_delay_elapsed?/2.
+config :trading_options_sim, :default_entry_delay_minutes, 0
+
 # app_status shared library — standard /status (JSON) and /status/metrics
 # (Prometheus) endpoints for this app, matching trading_hub/trading_live/
 # trading_system's own integration. See app_status's README for the full
