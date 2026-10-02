@@ -1759,6 +1759,69 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.list_sim_fills(run) |> length() == 1
     end
 
+    # trading_signal broadcasts {:signal_cleared, canonical} when a value
+    # goes away. Before this clause existed the last value stayed cached
+    # forever, so a rule on a stale or failed feed kept firing.
+    test "a cleared signal is dropped, so a rule on it fails closed" do
+      SignalBusTest.stub_topic("vix_last", "signals:vix_last_cleared_topic")
+
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "vix_last", "op" => "gt", "value" => 20}
+        })
+
+      symbol = "SIGNALCLEARED1"
+      {pid, run} = start_monitor(version, contract_key(symbol))
+
+      Phoenix.PubSub.broadcast(
+        TradingSignal.PubSub,
+        "signals:vix_last_cleared_topic",
+        {:signal, "vix_last_cleared_topic", 25.0}
+      )
+
+      Phoenix.PubSub.broadcast(
+        TradingSignal.PubSub,
+        "signals:vix_last_cleared_topic",
+        {:signal_cleared, "vix_last_cleared_topic"}
+      )
+
+      Process.sleep(30)
+      refute Map.has_key?(:sys.get_state(pid).last_signal_values, "vix_last")
+
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    # Healthy input: a value that arrives again after a clear is used.
+    test "a signal that returns after a clear is used again" do
+      SignalBusTest.stub_topic("vix_last", "signals:vix_last_returns_topic")
+
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "vix_last", "op" => "gt", "value" => 20}
+        })
+
+      symbol = "SIGNALCLEARED2"
+      {pid, _run} = start_monitor(version, contract_key(symbol))
+
+      for msg <- [
+            {:signal, "vix_last_returns_topic", 25.0},
+            {:signal_cleared, "vix_last_returns_topic"},
+            {:signal, "vix_last_returns_topic", 26.0}
+          ],
+          do:
+            Phoenix.PubSub.broadcast(TradingSignal.PubSub, "signals:vix_last_returns_topic", msg)
+
+      Process.sleep(30)
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
     test "a Decimal-valued signal doesn't crash entry — persisted snapshot stores it as a string" do
       # Confirmed live 2026-09-15: a real trading_signal broadcast can
       # carry a Decimal (RuleEngine.evaluate/2's own type spec explicitly
