@@ -231,6 +231,44 @@ defmodule TradingOptionsSim.SimActivatorTest do
     end
   end
 
+  describe "one monitor per version and symbol" do
+    # 2026-10-02: an activation in the gap between a monitor's exit and
+    # its next entry found no open run, re-resolved to a new ATM strike
+    # and started a second monitor. Here the gap is made by closing the
+    # run, and the new strike by changing the leg config.
+    test "re-activation with no open run reuses the running monitor instead of a new strike" do
+      pool = pool_fixture(["ONEMON1"])
+      version = version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      [run] = Sim.list_open_sim_runs(version)
+      {:ok, _} = Sim.close_run_without_entry(run, "manual_no_entry")
+      assert Sim.list_open_sim_runs(version) == []
+
+      moved = %{
+        version
+        | option_leg_config: Map.put(fixed_leg_config(), "fixed_strike", "155.00")
+      }
+
+      {:ok, [again], _} = SimActivator.activate(moved)
+
+      assert again == pid
+      assert [{"ONEMON1", ^pid}] = ContractMonitor.monitors_for_version(version.id)
+
+      # The new run is on the running monitor's own contract (150), not
+      # the freshly resolved 155, and the monitor is pointed at it.
+      assert [new_run] = Sim.list_open_sim_runs(version)
+      assert Decimal.equal?(new_run.strike, Decimal.new("150.00"))
+      assert :sys.get_state(pid).sim_run_id == new_run.id
+
+      refute Enum.any?(
+               Sim.list_open_sim_runs(version),
+               &Decimal.equal?(&1.strike, Decimal.new("155.00"))
+             )
+    end
+  end
+
   describe "activate/1" do
     test "returns {:error, :no_target_pool} when the version has no pool" do
       version = version_fixture(%{})
