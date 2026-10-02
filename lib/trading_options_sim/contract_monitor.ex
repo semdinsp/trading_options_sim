@@ -677,6 +677,17 @@ defmodule TradingOptionsSim.ContractMonitor do
     {:noreply, put_in(state.last_signal_values[name], value)}
   end
 
+  # The value went away upstream: trading_signal clears a signal when it
+  # can't be computed (warming up at the open, outside 09:30-16:00 ET,
+  # non-trading days, a failed source fetch such as the Cboe gamma feed),
+  # and broadcasts this once. Drop it so the key is absent from the next
+  # snapshot and any rule on it fails closed, rather than trading on the
+  # last value forever. Same key mapping as {:signal, ...} above.
+  def handle_info({:signal_cleared, canonical_name}, state) do
+    name = Map.get(state.canonical_names, canonical_name, canonical_name)
+    {:noreply, %{state | last_signal_values: Map.delete(state.last_signal_values, name)}}
+  end
+
   def handle_info(:trading_signal_connected, state) do
     canonical_names = subscribe_to_signals(state.signal_names)
     {:noreply, %{state | canonical_names: Map.merge(state.canonical_names, canonical_names)}}
