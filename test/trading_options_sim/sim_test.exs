@@ -1394,6 +1394,42 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
+  describe "trade_outcome/1" do
+    # Entry 5.00 x 100 x 1 = $500 of premium, so the scratch band is +/-$5.
+    defp outcome_run(pnl) do
+      %TradingOptionsSim.Sim.SimRun{
+        entry_price: Decimal.new("5.00"),
+        multiplier: 100,
+        realized_pnl: pnl && Decimal.new(pnl),
+        sim_fills: [%TradingOptionsSim.Sim.SimFill{kind: "entry", quantity: 1}]
+      }
+    end
+
+    test "break-even and near-zero results are scratches" do
+      for pnl <- ["0", "4.99", "-4.99", "5", "-5"],
+          do: assert(Sim.trade_outcome(outcome_run(pnl)) == :scratch, "pnl #{pnl}")
+    end
+
+    test "beyond the band is a win or a loss" do
+      assert Sim.trade_outcome(outcome_run("5.01")) == :win
+      assert Sim.trade_outcome(outcome_run("20")) == :win
+      assert Sim.trade_outcome(outcome_run("-5.01")) == :loss
+    end
+
+    test "the band scales with quantity" do
+      run = %{
+        outcome_run("8")
+        | sim_fills: [%TradingOptionsSim.Sim.SimFill{kind: "entry", quantity: 2}]
+      }
+
+      assert Sim.trade_outcome(run) == :scratch
+    end
+
+    test "no realized P&L counts as a loss" do
+      assert Sim.trade_outcome(outcome_run(nil)) == :loss
+    end
+  end
+
   describe "today_stats_for_version/1" do
     test "returns nil when nothing has closed today" do
       strategy = strategy_fixture()
@@ -1432,6 +1468,58 @@ defmodule TradingOptionsSim.SimTest do
       assert stats.fill_count == 1
       assert stats.n_trades == 0
       assert Decimal.equal?(stats.realized_pnl_gross, Decimal.new(0))
+    end
+
+    test "counts buys, sells, scratches and open positions" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      now = DateTime.utc_now()
+
+      open_run = fn symbol ->
+        {:ok, run} =
+          Sim.open_sim_run(version, %{
+            symbol: symbol,
+            expiry: "20271231",
+            strike: Decimal.new("150.00"),
+            right: "C",
+            multiplier: 100,
+            direction: "long"
+          })
+
+        {:ok, {_fill, run}} =
+          Sim.record_entry_fill(
+            run,
+            %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: now},
+            %{entry_at: now, entry_price: Decimal.new("5.00")}
+          )
+
+        run
+      end
+
+      close = fn run, price, pnl ->
+        {:ok, _} =
+          Sim.record_exit_fill(
+            run,
+            %{action: "sell", quantity: 1, fill_price: Decimal.new(price), filled_at: now},
+            %{
+              exit_at: now,
+              exit_price: Decimal.new(price),
+              exit_reason: "rule_exit",
+              realized_pnl: Decimal.new(pnl)
+            }
+          )
+      end
+
+      close.(open_run.("STRIP1"), "5.00", "0")
+      close.(open_run.("STRIP2"), "5.20", "20")
+      _still_open = open_run.("STRIP3")
+
+      stats = Sim.today_stats_for_version(version)
+
+      assert stats.n_trades == 2
+      assert {stats.n_wins, stats.n_scratch, stats.n_losses} == {1, 1, 0}
+      assert {stats.buy_fills, stats.sell_fills, stats.fill_count} == {3, 2, 5}
+      assert stats.open_positions == 1
     end
 
     test "aggregates today's closed runs" do

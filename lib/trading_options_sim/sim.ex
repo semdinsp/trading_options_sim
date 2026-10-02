@@ -2009,26 +2009,87 @@ defmodule TradingOptionsSim.Sim do
       |> preload(:sim_fills)
       |> Repo.all()
 
-    fill_count =
+    fills_by_action =
       SimFill
       |> join(:inner, [f], r in SimRun, on: r.id == f.sim_run_id)
       |> where([f, r], r.strategy_version_id == ^version.id and f.filled_at >= ^today_start)
-      |> Repo.aggregate(:count)
+      |> group_by([f], f.action)
+      |> select([f], {f.action, count(f.id)})
+      |> Repo.all()
+      |> Map.new()
+
+    fill_count = fills_by_action |> Map.values() |> Enum.sum()
 
     if closed_runs == [] and fill_count == 0 do
       nil
     else
+      outcomes = Enum.frequencies_by(closed_runs, &trade_outcome/1)
+
+      open_positions =
+        SimRun
+        |> where([r], r.strategy_version_id == ^version.id and r.status == "open")
+        |> entered()
+        |> Repo.aggregate(:count)
+
       %{
         n_trades: length(closed_runs),
-        n_wins: Enum.count(closed_runs, &won?/1),
-        n_losses: Enum.count(closed_runs, &(!won?(&1))),
+        n_wins: Map.get(outcomes, :win, 0),
+        n_scratch: Map.get(outcomes, :scratch, 0),
+        n_losses: Map.get(outcomes, :loss, 0),
+        open_positions: open_positions,
         fill_count: fill_count,
+        buy_fills: Map.get(fills_by_action, "buy", 0),
+        sell_fills: Map.get(fills_by_action, "sell", 0),
         realized_pnl_gross: sum_decimal(closed_runs, & &1.realized_pnl),
         realized_pnl_net: sum_decimal_if_all_present(closed_runs, & &1.realized_pnl_net),
         total_commission: sum_decimal_if_all_present(closed_runs, &total_run_commission/1)
       }
     end
   end
+
+  # A round trip whose gross P&L is within this percent of the premium
+  # paid at entry counts as a scratch (roughly break-even), not a win or a
+  # loss. A $0.00 trade that only lost its commission is a scratch.
+  @scratch_band_pct Decimal.new("1.0")
+
+  @doc """
+  Classifies a closed round trip for the Active Strategies strip:
+  `:scratch` when |gross P&L| <= #{@scratch_band_pct}% of the premium
+  paid at entry (entry price x multiplier x quantity), otherwise `:win`
+  for a positive gross P&L and `:loss` for a negative one. Gross, not
+  net: commission is the cost of trading, not the trade's outcome, so a
+  break-even trade stays a scratch whatever its fees. A run with no
+  realized P&L or entry price counts as `:loss`, matching `won?/1`.
+
+  Display only: `PerformanceSnapshot` keeps its existing win/loss split.
+  """
+  @spec trade_outcome(SimRun.t()) :: :win | :scratch | :loss
+  def trade_outcome(%SimRun{realized_pnl: nil}), do: :loss
+  def trade_outcome(%SimRun{entry_price: nil}), do: :loss
+
+  def trade_outcome(%SimRun{} = run) do
+    premium =
+      run.entry_price
+      |> Decimal.mult(run.multiplier || 100)
+      |> Decimal.mult(entry_quantity(run))
+
+    band = premium |> Decimal.mult(@scratch_band_pct) |> Decimal.div(100)
+
+    cond do
+      Decimal.compare(Decimal.abs(run.realized_pnl), band) != :gt -> :scratch
+      Decimal.compare(run.realized_pnl, 0) == :gt -> :win
+      true -> :loss
+    end
+  end
+
+  defp entry_quantity(%SimRun{sim_fills: fills}) when is_list(fills) do
+    case Enum.find(fills, &(&1.kind == "entry")) do
+      %{quantity: q} when is_integer(q) and q > 0 -> q
+      _ -> 1
+    end
+  end
+
+  defp entry_quantity(_run), do: 1
 
   # --- API tokens -----------------------------------------------------------
   #

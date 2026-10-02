@@ -109,6 +109,29 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
     refute html =~ "Flat"
   end
 
+  test "the today strip shows round trips and open positions, with executions in the tooltip",
+       %{conn: conn} do
+    version = activated_version_fixture("Strip Strategy", ["STRIPX"])
+
+    message =
+      %{type: :price, symbol: "STRIPX", source: :ibkr, data: %{last: 130.0}}
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:STRIPX", message)
+    Process.sleep(50)
+
+    {:ok, view, _html} = live(conn, ~p"/active_strategies")
+    strip = view |> element("#trades-#{version.id}") |> render()
+
+    assert strip =~ "Trades 0"
+    assert strip =~ "W 0"
+    assert strip =~ "S 0"
+    assert strip =~ "L 0"
+    assert strip =~ "1 open"
+    assert strip =~ "1 executions today: 1 buys, 0 sells"
+    refute render(view) =~ "Fills "
+  end
+
   # Same numbers as the version page's position box (position_view/3),
   # and what trading_live's dashboard shows since its PR #272.
   test "an open position shows its OCC contract and unrealized P&L", %{conn: conn} do
