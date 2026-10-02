@@ -307,9 +307,43 @@ defmodule TradingOptionsSim.SimActivator do
     ensure_polygon(member)
 
     case open_run_for_symbol(version, member.symbol) do
-      %SimRun{} = run -> resume_run(version, member, run)
-      nil -> resolve_and_start(version, member)
+      %SimRun{} = run ->
+        resume_run(version, member, run)
+
+      nil ->
+        case running_monitor_contract(version, member.symbol) do
+          %{} = contract -> start_for_member(version, member, contract)
+          nil -> resolve_and_start(version, member)
+        end
     end
+  end
+
+  # A monitor already trading this symbol for this version, whatever its
+  # strike. Without this check, an activation landing in the instant
+  # between a monitor's exit and its next entry (when the symbol has no
+  # open run) re-resolved ATM and, after the underlying had moved a
+  # strike, started a SECOND monitor beside the first. Both entered, and
+  # the extra run was orphaned at the next restart with no monitor, so
+  # EodCloser never flattened it (2026-10-02: Micro: Book Imbalance Put,
+  # SPY 765 + 770 entered at 14:40:43). One monitor per version and
+  # symbol: the new run goes on the running monitor's OWN contract (not a
+  # freshly resolved one), so start_for_member/3 reuses that monitor via
+  # update_sim_run_id instead of starting another.
+  defp running_monitor_contract(version, symbol) do
+    version.id
+    |> ContractMonitor.monitors_for_version()
+    |> Enum.find_value(fn
+      {^symbol, pid} ->
+        snap = ContractMonitor.snapshot(pid)
+        %{expiry: snap.expiry, strike: snap.strike, right: snap.right}
+
+      _ ->
+        nil
+    end)
+  catch
+    # The monitor exited between the registry lookup and the snapshot:
+    # nothing to reuse, so resolve as usual.
+    :exit, _ -> nil
   end
 
   # An open run means this symbol already has a contract (and possibly
