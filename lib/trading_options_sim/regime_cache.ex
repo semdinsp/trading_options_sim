@@ -43,7 +43,12 @@ defmodule TradingOptionsSim.RegimeCache do
     :vix_level,
     :spy_price,
     :spy_sma_20,
-    :spy_slope_20
+    :spy_slope_20,
+    # Freshness (trading_signal #191): when the label was last
+    # confirmed and for which exchange session. MarketContext uses
+    # session_date to drop a previous session's label.
+    :evaluated_at,
+    :session_date
   ]
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -122,6 +127,16 @@ defmodule TradingOptionsSim.RegimeCache do
 
   def handle_info({:regime_label, payload}, state) when is_map(payload) do
     put(payload)
+    {:noreply, state}
+  end
+
+  # An evaluation that left the label unchanged: refresh evaluated_at
+  # and session_date (and the label, should a change have been missed),
+  # keeping the rest of the last full payload. Without this, the cache
+  # only ever saw label CHANGES, so session_date stayed on whatever day
+  # the label last changed and MarketContext dropped today's regime.
+  def handle_info({:regime_heartbeat, beat}, state) when is_map(beat) do
+    put(Map.merge(current() || %{}, Map.take(beat, [:label, :evaluated_at, :session_date])))
     {:noreply, state}
   end
 
