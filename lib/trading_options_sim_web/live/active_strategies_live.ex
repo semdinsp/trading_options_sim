@@ -433,9 +433,17 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
             >
               Unrealized {signed_money(entry.unrealized)}
             </span>
-            <span>Fills {entry.today_stats.fill_count}</span>
-            <span class="text-success">W {entry.today_stats.n_wins}</span>
-            <span class="text-error">L {entry.today_stats.n_losses}</span>
+            <span
+              id={"trades-#{entry.version.id}"}
+              title={"#{entry.today_stats.fill_count} executions today: #{entry.today_stats.buy_fills} buys, #{entry.today_stats.sell_fills} sells. A trade is one completed round trip; scratch = gross P&L within ±1% of the premium paid."}
+            >
+              Trades {entry.today_stats.n_trades} (<span class="text-success">W {entry.today_stats.n_wins}</span>
+              · <span class="text-base-content/60">S {entry.today_stats.n_scratch}</span>
+              · <span class="text-error">L {entry.today_stats.n_losses}</span>)
+              <span :if={entry.today_stats.open_positions > 0}>
+                · {entry.today_stats.open_positions} open
+              </span>
+            </span>
           </div>
           <div
             :if={is_nil(entry.today_stats)}
