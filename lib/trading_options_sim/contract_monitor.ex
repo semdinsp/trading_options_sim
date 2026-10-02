@@ -1623,7 +1623,22 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
+  # The shared market_context stamp (TradingCore.MarketContext v1),
+  # built once per fill from local caches only (no remote call) and
+  # written into the fill's pricing_snapshot and the run's entry/exit
+  # snapshot. Recording only: nothing reads it to decide a trade.
+  defp market_context do
+    TradingCore.MarketContext.build(
+      TradingOptionsSim.RegimeCache.current(),
+      TradingOptionsSim.MarketContextSignals.values(),
+      DateTime.utc_now()
+    )
+  end
+
+  defp stamp(snapshot, context), do: Map.put(snapshot, "market_context", context)
+
   defp record_entry(state, snapshot, action, price, fill_basis) do
+    context = market_context()
     now = DateTime.utc_now()
     {stop_loss_price, take_profit_price, risk_context} = risk_levels(state, price, snapshot)
 
@@ -1637,7 +1652,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              fill_price: price,
              filled_at: now,
              commission: estimate_commission(state, price, action),
-             pricing_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis))
+             pricing_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context)
            },
            %{
              entry_at: now,
@@ -1645,7 +1660,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              stop_loss_price: stop_loss_price,
              take_profit_price: take_profit_price,
              risk_at_entry: Sim.compute_risk_at_entry(price, state.multiplier, state.quantity),
-             entry_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis)),
+             entry_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context),
              context: Map.merge(entry_context(state), risk_context)
            }
          ) do
@@ -1686,6 +1701,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp record_exit(state, snapshot, action, exit_reason, price, fill_basis) do
+    context = market_context()
     now = DateTime.utc_now()
 
     run = Sim.get_sim_run!(state.sim_run_id)
@@ -1714,7 +1730,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              fill_price: price,
              filled_at: now,
              commission: exit_commission,
-             pricing_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis))
+             pricing_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context)
            },
            %{
              exit_at: now,
@@ -1722,7 +1738,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              exit_reason: exit_reason,
              realized_pnl: realized_pnl,
              realized_pnl_net: realized_pnl_net,
-             exit_snapshot: jsonify_snapshot(Map.merge(snapshot, fill_basis))
+             exit_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context)
            }
          ) do
       {:ok, {_fill, _run}} ->
