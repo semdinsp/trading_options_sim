@@ -7,7 +7,9 @@ defmodule TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker do
   of eligible `discovery`-stage versions, then the automatic
   `quarantine -> retired` gate for versions failing on tenure + loss
   ratio. Ported from `TradingSystem.Trading.Workers.QuarantineEligibilityWorker`,
-  scoped down to this app's much simpler v1 gates — see
+  scoped down to this app's much simpler v1 gates — then
+  `TradingOptionsSim.LifecycleReview.run/1` (deactivate losers, fork
+  regime-profitable ones with a regime gate). See
   `Sim.run_quarantine_eligibility_check/1`'s own moduledoc for why job
   1-then-3's ordering is load-bearing.
   """
@@ -18,6 +20,10 @@ defmodule TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker do
 
   @impl Oban.Worker
   def perform(%Oban.Job{}) do
-    Sim.run_quarantine_eligibility_check()
+    :ok = Sim.run_quarantine_eligibility_check()
+    # After job 3, so a quarantine loser with no profitable regime has
+    # already been retired and only regime rescues remain for it.
+    _ = TradingOptionsSim.LifecycleReview.run()
+    :ok
   end
 end

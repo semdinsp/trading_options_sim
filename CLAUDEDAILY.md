@@ -166,8 +166,23 @@ set in the last 24 h, and list them in the summary.
 - Gate values: discovery → quarantine needs ≥ 20 closed runs (with an
   entry) and realized P&L ≥ 0. Quarantine → retired needs ≥ 20
   quarantine trading days and a loss/win ratio > 2.0.
-- Flag any version that's linked to `trading_live` and was retired:
-  nothing protects those yet.
+- **LifecycleReview** runs right after the 07:00 job
+  (`TradingOptionsSim.LifecycleReview`). It looks at active discovery
+  versions with at least 30 trades over at least 3 sessions and negative
+  net P&L, and at failing quarantine versions.
+  - If one trend x vol regime cell was profitable (at least 15 trades
+    over at least 2 sessions, net > 0), it forks the version with an
+    entry gate on that regime (tag `Regime-Gated-Fork`) and deactivates
+    the parent. Otherwise it just deactivates the parent.
+  - It never touches live-linked or `test_portfolio` versions, controls,
+    `Noise-Baseline` or `od:slope-hold`.
+  - Mode is `config :trading_options_sim, :lifecycle_review_mode`.
+    `:dry_run` (the default) only logs a line like
+    `LifecycleReview (dry_run): N regime forks, M deactivations`.
+    Report the planned actions; switching to `:apply` is the user's call.
+- Live-linked versions are now excluded from automatic retirement
+  (2026-10-03). Quarantine failure is judged on NET P&L, and losses with
+  zero wins count as failing.
 
 ### M5 — Rank the discovery leaderboard
 

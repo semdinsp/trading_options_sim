@@ -49,6 +49,11 @@ config :trading_options_sim, Oban,
 # a restart. See ContractMonitor.entry_delay_elapsed?/2.
 config :trading_options_sim, :default_entry_delay_minutes, 5
 
+# TradingOptionsSim.LifecycleReview (runs after the 07:00 UTC quarantine
+# job): :dry_run only logs what it would deactivate or regime-fork;
+# :apply acts. Starts as :dry_run so the first results can be reviewed.
+config :trading_options_sim, :lifecycle_review_mode, :dry_run
+
 # app_status shared library — standard /status (JSON) and /status/metrics
 # (Prometheus) endpoints for this app, matching trading_hub/trading_live/
 # trading_system's own integration. See app_status's README for the full
