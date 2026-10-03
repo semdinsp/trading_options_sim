@@ -583,18 +583,17 @@ defmodule TradingOptionsSim.Sim do
       StrategyVersion
       |> where([v], v.lifecycle_stage == "quarantine")
       |> where([v], v.quarantine_trading_days >= @quarantine_max_trading_days)
+      # Never retire a version promoted to trading_live automatically.
+      |> where([v], is_nil(v.live_strategy_id))
       |> select([v], v.id)
       |> Repo.all()
 
+    # A failing version that is profitable in one regime is NOT retired
+    # here: TradingOptionsSim.LifecycleReview forks it with that regime
+    # gate and deactivates it instead.
     failing_ids =
       Enum.filter(quarantine_version_ids, fn version_id ->
-        stats = closed_run_stats(version_id)
-
-        Decimal.compare(stats.total_win, Decimal.new(0)) == :gt and
-          Decimal.compare(
-            Decimal.div(stats.total_loss, stats.total_win),
-            @quarantine_max_loss_ratio
-          ) == :gt
+        quarantine_failing?(version_id) and is_nil(best_regime_cell(version_id))
       end)
 
     retired =
@@ -641,7 +640,7 @@ defmodule TradingOptionsSim.Sim do
       |> where([r], r.status == "closed")
       |> where([r], is_nil(r.excluded_reason))
       |> entered()
-      |> select([r], r.realized_pnl)
+      |> select([r], {r.realized_pnl, r.realized_pnl_net})
       |> Repo.all()
 
     Enum.reduce(
@@ -650,22 +649,94 @@ defmodule TradingOptionsSim.Sim do
         closed_count: 0,
         total_realized_pnl: Decimal.new(0),
         total_win: Decimal.new(0),
-        total_loss: Decimal.new(0)
+        total_loss: Decimal.new(0),
+        total_win_net: Decimal.new(0),
+        total_loss_net: Decimal.new(0)
       },
-      fn pnl, acc ->
-        pnl = pnl || Decimal.new(0)
+      fn {gross, net}, acc ->
+        pnl = gross || Decimal.new(0)
+        # Net of commissions where known; the gross figure otherwise.
+        net = net || pnl
 
         acc
         |> Map.update!(:closed_count, &(&1 + 1))
         |> Map.update!(:total_realized_pnl, &Decimal.add(&1, pnl))
-        |> then(fn acc ->
-          case Decimal.compare(pnl, Decimal.new(0)) do
-            :lt -> Map.update!(acc, :total_loss, &Decimal.add(&1, Decimal.abs(pnl)))
-            _ -> Map.update!(acc, :total_win, &Decimal.add(&1, pnl))
-          end
-        end)
+        |> add_win_loss(pnl, :total_win, :total_loss)
+        |> add_win_loss(net, :total_win_net, :total_loss_net)
       end
     )
+  end
+
+  defp add_win_loss(acc, pnl, win_key, loss_key) do
+    case Decimal.compare(pnl, Decimal.new(0)) do
+      :lt -> Map.update!(acc, loss_key, &Decimal.add(&1, Decimal.abs(pnl)))
+      _ -> Map.update!(acc, win_key, &Decimal.add(&1, pnl))
+    end
+  end
+
+  @doc """
+  The quarantine failure test (job 3), on NET P&L after commissions:
+  losses more than `#{@quarantine_max_loss_ratio}`x wins, or losses with
+  no wins at all. Before 2026-10-03 this used gross P&L, so a version
+  losing only to commissions never failed, and a version with losses
+  but zero wins was skipped as a division by zero.
+  """
+  @spec quarantine_failing?(String.t()) :: boolean()
+  def quarantine_failing?(version_id) do
+    %{total_win_net: win, total_loss_net: loss} = closed_run_stats(version_id)
+
+    cond do
+      Decimal.compare(win, 0) == :gt ->
+        Decimal.compare(Decimal.div(loss, win), @quarantine_max_loss_ratio) == :gt
+
+      true ->
+        Decimal.compare(loss, 0) == :gt
+    end
+  end
+
+  # A regime cell needs this much evidence before it saves a losing
+  # version (user's choice, 2026-10-03): >= 15 trades over >= 2 sessions
+  # with positive NET P&L.
+  @regime_cell_min_trades 15
+  @regime_cell_min_sessions 2
+
+  @doc """
+  The trend x vol regime cell where `version_id` has been profitable,
+  or `nil`. Closed, entered, non-excluded runs are grouped by the regime
+  recorded at entry (`entry_snapshot` regime_trend_ordinal /
+  regime_vol_ordinal, -1/0/1). A cell qualifies with at least
+  #{@regime_cell_min_trades} trades, at least #{@regime_cell_min_sessions}
+  distinct exit dates and positive net P&L (commissions in; gross where
+  net is unknown). The best by net P&L per trade is returned as
+  `%{trend: t, vol: v, n: n, sessions: s, net: net, per_trade: x}`.
+  Trades with no recorded regime are ignored.
+  """
+  @spec best_regime_cell(String.t()) :: map() | nil
+  def best_regime_cell(version_id) do
+    SimRun
+    |> where([r], r.strategy_version_id == ^version_id and r.status == "closed")
+    |> where([r], is_nil(r.excluded_reason))
+    |> entered()
+    |> where([r], fragment("jsonb_exists(?, 'regime_trend_ordinal')", r.entry_snapshot))
+    |> where([r], fragment("jsonb_exists(?, 'regime_vol_ordinal')", r.entry_snapshot))
+    |> group_by([r], [
+      fragment("(?->>'regime_trend_ordinal')::int", r.entry_snapshot),
+      fragment("(?->>'regime_vol_ordinal')::int", r.entry_snapshot)
+    ])
+    |> select([r], %{
+      trend: fragment("(?->>'regime_trend_ordinal')::int", r.entry_snapshot),
+      vol: fragment("(?->>'regime_vol_ordinal')::int", r.entry_snapshot),
+      n: count(r.id),
+      sessions: count(fragment("DISTINCT (?)::date", r.exit_at)),
+      net: sum(coalesce(r.realized_pnl_net, r.realized_pnl))
+    })
+    |> Repo.all()
+    |> Enum.filter(fn cell ->
+      cell.n >= @regime_cell_min_trades and cell.sessions >= @regime_cell_min_sessions and
+        cell.net != nil and Decimal.compare(cell.net, 0) == :gt
+    end)
+    |> Enum.map(&Map.put(&1, :per_trade, Decimal.div(&1.net, &1.n)))
+    |> Enum.max_by(&Decimal.to_float(&1.per_trade), fn -> nil end)
   end
 
   # A run closed without ever filling an entry (`manual_no_entry`, left

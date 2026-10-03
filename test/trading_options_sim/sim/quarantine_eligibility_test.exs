@@ -247,7 +247,9 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
     end
 
-    test "does not retire a version past the floor with zero wins (undefined ratio)" do
+    # Changed 2026-10-03: losses with no wins at all is the clearest
+    # failure, not an undefined ratio to skip.
+    test "retires a version past the floor with losses and zero wins" do
       strategy = strategy_fixture()
       pool = target_pool_fixture()
       version = version_fixture(strategy, %{target_pool_id: pool.id})
@@ -260,8 +262,44 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
 
       closed_run_fixture(version, Decimal.new("-10.00"))
 
-      {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
+      {:ok, [retired]} = Sim.auto_retire_failing_quarantine_versions()
 
+      assert retired.id == version.id
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "retired"
+    end
+
+    # Healthy input: no trades at all is nothing to judge yet.
+    test "does not retire a version past the floor with no closed trades" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+
+      {:ok, _} =
+        version
+        |> Ecto.Changeset.change(quarantine_trading_days: 20)
+        |> TradingOptionsSim.Repo.update()
+
+      {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
+    end
+
+    test "never retires a version linked to trading_live" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+
+      {:ok, version} =
+        version
+        |> Ecto.Changeset.change(
+          quarantine_trading_days: 20,
+          live_strategy_id: Ecto.UUID.generate()
+        )
+        |> TradingOptionsSim.Repo.update()
+
+      closed_run_fixture(version, Decimal.new("-10.00"))
+
+      {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
     end
   end
