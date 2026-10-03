@@ -164,6 +164,27 @@ defmodule TradingOptionsSim.MarketContextStampTest do
       assert length(fills) == 2
     end
 
+    # A broken stamp must never cost the trade: the fill is written,
+    # just without market_context.
+    test "a failure building the stamp still records the fill, without the stamp" do
+      RegimeCache.put(regime(et_today()))
+      # A 3-element row makes MarketContextSignals.values/0 raise in Map.new/1.
+      :ets.insert(MarketContextSignals, {"corrupt_row", :a, :b})
+      on_exit(fn -> :ets.delete(MarketContextSignals, "corrupt_row") end)
+
+      {pid, version} = start_round_trip("STAMP3")
+
+      log = ExUnit.CaptureLog.capture_log(fn -> tick(pid, "STAMP3", 150.0) end)
+
+      assert Process.alive?(pid)
+      assert ContractMonitor.snapshot(pid).position_open?
+      [run] = Sim.list_open_sim_runs(version)
+      [fill] = Sim.list_sim_fills(run)
+      refute Map.has_key?(run.entry_snapshot, "market_context")
+      refute Map.has_key?(fill.pricing_snapshot, "market_context")
+      assert log =~ "market_context not stamped"
+    end
+
     # A label from a previous session must not be stamped as today's.
     test "a previous session's regime is omitted, signals still stamped" do
       RegimeCache.put(regime(Date.add(et_today(), -1)))

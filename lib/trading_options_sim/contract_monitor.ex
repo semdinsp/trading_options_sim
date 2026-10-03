@@ -1627,14 +1627,30 @@ defmodule TradingOptionsSim.ContractMonitor do
   # built once per fill from local caches only (no remote call) and
   # written into the fill's pricing_snapshot and the run's entry/exit
   # snapshot. Recording only: nothing reads it to decide a trade.
+  #
+  # It must never cost a fill. It is built before the fill is written,
+  # so a raise here (a corrupted cache row, a payload shape nobody
+  # anticipated) would crash the monitor at the moment of entry or exit
+  # and lose the trade. Any failure is logged and the fill is written
+  # without a stamp (nil), the same "omit rather than guess" rule the
+  # stamp applies to its own values.
   defp market_context do
     TradingCore.MarketContext.build(
       TradingOptionsSim.RegimeCache.current(),
       TradingOptionsSim.MarketContextSignals.values(),
       DateTime.utc_now()
     )
+  rescue
+    error ->
+      Logger.warning("ContractMonitor: market_context not stamped: #{Exception.message(error)}")
+      nil
+  catch
+    kind, reason ->
+      Logger.warning("ContractMonitor: market_context not stamped: #{inspect({kind, reason})}")
+      nil
   end
 
+  defp stamp(snapshot, nil), do: snapshot
   defp stamp(snapshot, context), do: Map.put(snapshot, "market_context", context)
 
   defp record_entry(state, snapshot, action, price, fill_basis) do
