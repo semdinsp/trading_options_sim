@@ -48,8 +48,6 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
 
   # Ratio columns that are not ranked on below the sample floor.
   @floored_ratio_keys [:final_score, :pnl_bps_h]
-  # Same divisor guard as Sim's final_score (dollar-hours).
-  @min_capital_hours 0.01
   @refresh_ms :timer.seconds(30)
 
   @default_sort_dir %{"gates_failed" => :asc}
@@ -146,7 +144,6 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
           candidate?: CandidateGates.candidate?(gates),
           blocked_only_by_tenure?: CandidateGates.blocked_only_by_tenure?(gates),
           gates_failed: CandidateGates.gates_failed(gates),
-          pnl_bps_h: pnl_bps_per_hour(row.realized_pnl, row.capital_hours),
           ratio_trusted?: row.n_closes >= @sample_floor
         })
       end)
@@ -168,22 +165,6 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
     |> assign(:rows, filtered)
     |> assign(:total_unfiltered, total_unfiltered)
   end
-
-  @doc false
-  # Net realized P&L per dollar of premium at risk per hour held, in
-  # basis points: realized_pnl / capital_hours * 10_000. Same run
-  # population and capital_hours as final_score (Sim computes both in
-  # one query), so the two columns differ only in R vs dollars.
-  def pnl_bps_per_hour(nil, _capital_hours), do: nil
-  def pnl_bps_per_hour(_realized_pnl, nil), do: nil
-
-  def pnl_bps_per_hour(realized_pnl, capital_hours) do
-    hours = to_float(capital_hours)
-    if hours < @min_capital_hours, do: nil, else: to_float(realized_pnl) / hours * 10_000
-  end
-
-  defp to_float(%Decimal{} = d), do: Decimal.to_float(d)
-  defp to_float(n) when is_number(n), do: n / 1
 
   defp maybe_filter_sample_floor(rows, true), do: rows
 
@@ -358,6 +339,14 @@ defmodule TradingOptionsSimWeb.CandidatesLive do
         below show which, if any, still fail. Default filter: discovery + quarantine,
         n_closes ≥ {@sample_floor} — use "Show all" to see near-misses too, or "Near-miss" to jump
         straight to versions failing exactly 1-2 gates.
+      </p>
+
+      <p id="r-definition" class="text-xs text-base-content/50 mb-4 max-w-4xl">
+        R here is net P&amp;L divided by the premium paid, so 0.10 R is a 10% net return on premium.
+        A stop doesn't change that denominator, so a wider stop can't make a version look better
+        on R. The equities apps divide by stop distance instead, so don't compare R across apps.
+        <span class="font-data">pnl_bps_h</span>
+        is the dollar view: net P&amp;L per dollar of premium per hour held, in basis points.
       </p>
 
       <div :if={@rows == []} class="border border-base-300 p-8 text-center">

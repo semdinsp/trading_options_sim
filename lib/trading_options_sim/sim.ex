@@ -1517,6 +1517,12 @@ defmodule TradingOptionsSim.Sim do
         # Money
         realized_pnl: stats.realized_pnl,
         realized_pnl_gross: stats.realized_pnl_gross,
+        # This app's additions: return on premium in plain units, not R,
+        # so a reader doesn't have to know R's denominator here. Named
+        # for their basis so neither can be mistaken for an equities
+        # field (0_SPEC.md rule 3).
+        return_on_premium_pct: return_on_premium_pct(stats.expectancy_r),
+        pnl_bps_h: pnl_bps_per_hour(stats.realized_pnl, stats.capital_hours),
 
         # Cost. "measured" rather than "estimated": unlike
         # trading_system's notional-slippage fallback, required_r here
@@ -1790,6 +1796,32 @@ defmodule TradingOptionsSim.Sim do
   # looks like a signal. nil renders as "—", not a number to rank on.
   # Matches trading_system's own guard on the same divisor.
   @min_capital_hours Decimal.new("0.01")
+
+  @doc """
+  Average net return per trade as a percent of the premium paid:
+  `expectancy_r * 100`. R here is `realized_pnl_net / premium at
+  risk`, so this is the same number in plainer units. A stop doesn't
+  change the denominator, so a wider stop can't make it look better.
+  """
+  def return_on_premium_pct(nil), do: nil
+  def return_on_premium_pct(expectancy_r), do: to_float(expectancy_r) * 100
+
+  @doc """
+  Net realized P&L per dollar of premium at risk per hour held, in basis
+  points: `realized_pnl / capital_hours * 10_000`. Same run population
+  and capital_hours as `final_score`, so the two differ only in R versus
+  dollars. nil below the same capital-hours floor as `final_score`.
+  """
+  def pnl_bps_per_hour(nil, _capital_hours), do: nil
+  def pnl_bps_per_hour(_realized_pnl, nil), do: nil
+
+  def pnl_bps_per_hour(realized_pnl, capital_hours) do
+    hours = to_float(capital_hours)
+
+    if hours < Decimal.to_float(@min_capital_hours),
+      do: nil,
+      else: to_float(realized_pnl) / hours * 10_000
+  end
 
   defp final_score(_scored_total_r, nil), do: nil
 

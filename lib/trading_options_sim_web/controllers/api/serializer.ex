@@ -159,7 +159,12 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
   `cost_basis` is `"measured"` because this app derives its cost floor
   from real per-fill commissions rather than a slippage estimate.
   `avg_hold_seconds` has no `trading_system` counterpart — this app's
-  own addition.
+  own addition. So are `return_on_premium_pct` (`expectancy_r * 100`:
+  the average net return per trade as a percent of premium paid) and
+  `pnl_bps_h` (net dollars per dollar of premium per hour held, in
+  basis points). They restate the R figures in plain return units, so
+  a reader doesn't need to know R's denominator here. Both are named
+  for their basis so neither can be read as an equities field.
 
   This row's Decimal fields are converted to native JSON numbers via
   `decimal_or_float/1`, not the module's usual `str/1` — matching
@@ -205,6 +210,8 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       # Money
       "realized_pnl" => decimal_or_float(row.realized_pnl),
       "realized_pnl_gross" => decimal_or_float(row.realized_pnl_gross),
+      "return_on_premium_pct" => row.return_on_premium_pct,
+      "pnl_bps_h" => row.pnl_bps_h,
 
       # Cost
       "avg_commission" => str(row.avg_commission),
