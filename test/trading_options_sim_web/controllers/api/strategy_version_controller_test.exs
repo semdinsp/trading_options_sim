@@ -452,6 +452,10 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert is_number(row["scored_total_r"])
       assert is_float(row["expectancy_r"])
       assert is_float(row["realized_pnl"])
+
+      # $100 net on $500 of premium: 0.2 R, a 20% return on premium.
+      assert_in_delta row["return_on_premium_pct"], 20.0, 1.0e-9
+      assert Map.has_key?(row, "pnl_bps_h")
     end
 
     test "403s without strategies:read scope", %{conn: conn} do

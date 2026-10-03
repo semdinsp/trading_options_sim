@@ -233,8 +233,6 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
   end
 
   describe "final_score and pnl_bps_h below the sample floor" do
-    alias TradingOptionsSimWeb.CandidatesLive
-
     # Every run is held one hour on $500 of premium: 500 capital-hours.
     defp closed_runs(version, count, pnl) do
       hour_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
@@ -248,12 +246,26 @@ defmodule TradingOptionsSimWeb.CandidatesLiveTest do
       end
     end
 
+    test "return_on_premium_pct is expectancy_r as a percent of premium" do
+      assert TradingOptionsSim.Sim.return_on_premium_pct(Decimal.new("0.125")) == 12.5
+      assert TradingOptionsSim.Sim.return_on_premium_pct(nil) == nil
+    end
+
+    test "the page says R is net return on premium", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/candidates")
+      assert view |> element("#r-definition") |> render() =~ "net return on premium"
+    end
+
     test "pnl_bps_per_hour is net P&L per $ of premium per hour, in bps" do
-      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("300"), Decimal.new("15000")) == 200.0
-      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("-9.46"), Decimal.new("27984")) < 0
-      assert CandidatesLive.pnl_bps_per_hour(nil, Decimal.new("1")) == nil
-      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("1"), nil) == nil
-      assert CandidatesLive.pnl_bps_per_hour(Decimal.new("1"), Decimal.new("0.001")) == nil
+      assert TradingOptionsSim.Sim.pnl_bps_per_hour(Decimal.new("300"), Decimal.new("15000")) ==
+               200.0
+
+      assert TradingOptionsSim.Sim.pnl_bps_per_hour(Decimal.new("-9.46"), Decimal.new("27984")) <
+               0
+
+      assert TradingOptionsSim.Sim.pnl_bps_per_hour(nil, Decimal.new("1")) == nil
+      assert TradingOptionsSim.Sim.pnl_bps_per_hour(Decimal.new("1"), nil) == nil
+      assert TradingOptionsSim.Sim.pnl_bps_per_hour(Decimal.new("1"), Decimal.new("0.001")) == nil
     end
 
     test "a thin version's higher ratio sorts after a sampled one, and is greyed", %{conn: conn} do
