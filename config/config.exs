@@ -51,8 +51,9 @@ config :trading_options_sim, :default_entry_delay_minutes, 5
 
 # TradingOptionsSim.LifecycleReview (runs after the 07:00 UTC quarantine
 # job): :dry_run only logs what it would deactivate or regime-fork;
-# :apply acts. Starts as :dry_run so the first results can be reviewed.
-config :trading_options_sim, :lifecycle_review_mode, :dry_run
+# :apply acts. Switched to :apply by the operator on 2026-10-03 after
+# reviewing the preview (24 deactivations, 5 regime forks).
+config :trading_options_sim, :lifecycle_review_mode, :apply
 
 # app_status shared library — standard /status (JSON) and /status/metrics
 # (Prometheus) endpoints for this app, matching trading_hub/trading_live/
