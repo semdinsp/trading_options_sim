@@ -677,10 +677,12 @@ defmodule TradingOptionsSimWeb.CoreComponents do
   end
 
   @doc """
-  A small button that copies `id` to the clipboard on click, with a
-  brief "Copied!" confirmation — for the UUID strings shown throughout
-  this app's detail pages (`StrategyVersionDetailLive`, and any future
-  one that shows an entity's own id). A core component rather than a
+  A small button that copies `value` to the clipboard on click, then
+  shows "Copied" (check icon, green) or "Copy failed" (red) beside the
+  icon for 1.5s. The result is shown only after the write settles; a
+  rejected Clipboard API write falls back to `execCommand("copy")`.
+  Used for the UUIDs shown on `StrategyVersionDetailLive`,
+  `CandidatesLive` and `ActiveStrategiesLive`. A core component rather than a
   one-off, since IDs get copied constantly when cross-referencing a
   record against `mix run`/RPC output, logs, or another app's own UI.
 
@@ -712,28 +714,79 @@ defmodule TradingOptionsSimWeb.CoreComponents do
       title={@title}
       aria-label={@title}
       class={[
-        "p-1 border border-base-content/15 text-base-content/50 hover:border-primary/40 hover:text-primary transition-colors",
+        "inline-flex items-center gap-1 p-1 border border-base-content/15 text-base-content/50 hover:border-primary/40 hover:text-primary transition-colors",
         @class
       ]}
     >
-      <.icon name="hero-clipboard-document" class="h-3.5 w-3.5" />
+      <span class="hero-clipboard-document h-3.5 w-3.5" data-copy-icon="idle" />
+      <span class="hero-check h-3.5 w-3.5 hidden" data-copy-icon="ok" />
+      <span class="hero-exclamation-triangle h-3.5 w-3.5 hidden" data-copy-icon="error" />
+      <span data-copy-status class="hidden text-xs font-data" aria-live="polite"></span>
     </button>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyUuidButton">
+      // navigator.clipboard is missing on non-secure origins and can
+      // reject (permissions, unfocused document), so fall back to the
+      // older execCommand path before reporting failure.
+      function fallbackCopy(value) {
+        const ta = document.createElement("textarea");
+        ta.value = value;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand("copy"); } catch (_e) { ok = false; }
+        document.body.removeChild(ta);
+        return ok;
+      }
+
+      async function copy(value) {
+        if (navigator.clipboard && window.isSecureContext) {
+          try {
+            await navigator.clipboard.writeText(value);
+            return true;
+          } catch (_e) {}
+        }
+        return fallbackCopy(value);
+      }
+
       export default {
         mounted() {
           this.originalTitle = this.el.getAttribute("title");
-          this.el.addEventListener("click", () => {
-            const value = this.el.dataset.copyValue;
-            navigator.clipboard.writeText(value).catch(() => {});
-
-            this.el.classList.add("border-success/40", "text-success");
-            this.el.setAttribute("title", "Copied!");
-            clearTimeout(this._resetTimer);
-            this._resetTimer = setTimeout(() => {
-              this.el.classList.remove("border-success/40", "text-success");
-              this.el.setAttribute("title", this.originalTitle);
-            }, 1200);
+          this.el.addEventListener("click", async () => {
+            const ok = await copy(this.el.dataset.copyValue);
+            this.show(ok ? "ok" : "error");
           });
+        },
+
+        show(state) {
+          const status = this.el.querySelector("[data-copy-status]");
+          const colors = { ok: ["border-success/40", "text-success"], error: ["border-error/40", "text-error"] };
+          const reset = () => {
+            this.el.classList.remove(...colors.ok, ...colors.error);
+            this.el.querySelectorAll("[data-copy-icon]").forEach((icon) =>
+              icon.classList.toggle("hidden", icon.dataset.copyIcon !== state)
+            );
+          };
+
+          clearTimeout(this._resetTimer);
+          reset();
+          if (state === "idle") {
+            status.classList.add("hidden");
+            status.textContent = "";
+            this.el.setAttribute("title", this.originalTitle);
+            return;
+          }
+
+          this.el.classList.add(...colors[state]);
+          status.textContent = state === "ok" ? "Copied" : "Copy failed";
+          status.classList.remove("hidden");
+          this.el.setAttribute(
+            "title",
+            state === "ok" ? "Copied!" : "Copy failed: select the ID and copy it by hand"
+          );
+          this._resetTimer = setTimeout(() => this.show("idle"), 1500);
         }
       }
     </script>
