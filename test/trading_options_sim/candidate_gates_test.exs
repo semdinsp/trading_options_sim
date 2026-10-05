@@ -94,16 +94,43 @@ defmodule TradingOptionsSim.CandidateGatesTest do
   end
 
   describe "exit_logic (X)" do
-    test "passes when no single exit bucket reaches 70%" do
-      histogram = %{"rule_exit" => 50, "expiry" => 50}
-      gates = CandidateGates.evaluate(base_row(%{exit_reason_histogram: histogram}), @now)
-      assert gates.exit_logic == :pass
+    defp exit_gate(histogram),
+      do: CandidateGates.evaluate(base_row(%{exit_reason_histogram: histogram}), @now).exit_logic
+
+    test "passes when forced exits are under 70%" do
+      assert exit_gate(%{"rule_exit" => 50, "expiry" => 50}) == :pass
     end
 
-    test "fails when one exit bucket dominates at or above 70%" do
-      histogram = %{"expiry" => 70, "rule_exit" => 30}
-      gates = CandidateGates.evaluate(base_row(%{exit_reason_histogram: histogram}), @now)
-      assert gates.exit_logic == :fail
+    # The healthy case: the exit rule closes nearly every trade.
+    test "passes when rule exits dominate, however large" do
+      assert exit_gate(%{"rule_exit" => 84, "eod_flatten" => 4}) == :pass
+      assert exit_gate(%{"rule_exit" => 100}) == :pass
+    end
+
+    test "fails when one forced exit reaches 70%" do
+      assert exit_gate(%{"expiry" => 70, "rule_exit" => 30}) == :fail
+      assert exit_gate(%{"eod_flatten" => 9, "rule_exit" => 1}) == :fail
+    end
+
+    test "fails when forced exits together reach 70%, though none does alone" do
+      assert exit_gate(%{
+               "eod_flatten" => 40,
+               "stop_loss" => 20,
+               "take_profit" => 10,
+               "rule_exit" => 30
+             }) ==
+               :fail
+    end
+
+    test "leaves non-trades out of the count" do
+      # 6 eod of 10 real exits is 60%: passes despite 50 no-entry closes.
+      assert exit_gate(%{"eod_flatten" => 6, "rule_exit" => 4, "manual_no_entry" => 50}) == :pass
+      # Without the no-entries, 8 of 10 forced: fails.
+      assert exit_gate(%{"eod_flatten" => 8, "rule_exit" => 2, "orphaned" => 90}) == :fail
+    end
+
+    test "fails when the only closes are non-trades" do
+      assert exit_gate(%{"manual_no_entry" => 5}) == :fail
     end
 
     test "fails when the histogram is empty" do

@@ -47,6 +47,10 @@ defmodule TradingOptionsSim.CandidateGates do
 
   @sample_floor 30
   @exit_bucket_dominance_threshold Decimal.new("0.70")
+  # Gate X: exits that close a trade without the exit rule firing
+  # (trailing and ratchet stops record as "stop_loss").
+  @forced_exit_reasons ~w(eod_flatten expiry stop_loss take_profit)
+  @non_trade_exit_reasons ~w(manual_no_entry orphaned)
   @churn_exclusion_ratio_threshold Decimal.new("0.20")
   @recency_day_limit 3
   @regime_concentration_sample_floor 30
@@ -135,18 +139,23 @@ defmodule TradingOptionsSim.CandidateGates do
 
   defp dollars_agree(_row), do: :fail
 
-  # Gate X — no single exit-reason bucket dominates (>=70% of exits).
-  # e.g. if "eod" (forced expiry-window close, not a rule-triggered
-  # exit) is 90% of exits, the exit RULE itself is barely doing
-  # anything — the strategy is really "hold until forced out."
+  # Gate X — forced exits are under 70% of real exits. If the end-of-day
+  # flatten, expiry, the stop or the target closes most trades, the exit
+  # RULE is barely doing anything: the result measures "hold until
+  # forced out", not the signal. A rule_exit majority is the healthy
+  # case and passes, however large. (Until 2026-10-05 this failed on
+  # ANY bucket >= 70%, rule_exit included, so it failed nearly every
+  # version.) Non-trades (manual_no_entry, orphaned) are left out of
+  # the denominator.
   defp exit_logic(%{exit_reason_histogram: histogram}) when map_size(histogram) > 0 do
-    total = histogram |> Map.values() |> Enum.sum()
+    exits = Map.drop(histogram, @non_trade_exit_reasons)
+    total = exits |> Map.values() |> Enum.sum()
 
     if total == 0 do
       :fail
     else
-      max_bucket = histogram |> Map.values() |> Enum.max()
-      ratio = Decimal.div(Decimal.new(max_bucket), Decimal.new(total))
+      forced = exits |> Map.take(@forced_exit_reasons) |> Map.values() |> Enum.sum()
+      ratio = Decimal.div(Decimal.new(forced), Decimal.new(total))
       if Decimal.compare(ratio, @exit_bucket_dominance_threshold) == :lt, do: :pass, else: :fail
     end
   end
