@@ -199,7 +199,7 @@ from runs. The fields to rank on:
 | `lcb95` | Lower 95% bound of expectancy in R. The main ranking key: positive means the edge probably survives the sample size. |
 | `scored_expectancy_r`, `final_score` | Mean R per trade, and R per capital-hour (scaled by 10^6). Use them to break ties, not to rank on alone. |
 | `cost_margin` | Expectancy minus round-trip commission. Below 0 means the edge doesn't cover costs. |
-| `exit_reason_histogram` | If one exit reason is over 70% (gate `X`), the "edge" may just be the stop or the flatten. |
+| `exit_reason_histogram` | Gate `X` fails when forced exits (`eod_flatten`, `expiry`, `stop_loss`, `take_profit`) are 70% or more of real exits: the "edge" may just be the stop or the flatten. Mostly `rule_exit` is healthy and passes. |
 
 The `/candidates` page shows the same rows with the nine gate letters
 (N S E D X C R G T). The gates are advisory and never block anything.
