@@ -3,6 +3,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersionRulesTest do
 
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.StrategyVersion
+  alias TradingCore.RuleEngine
 
   defp create(rules) do
     {:ok, strategy} = Sim.create_strategy(%{name: "Rules #{System.unique_integer([:positive])}"})
@@ -56,25 +57,30 @@ defmodule TradingOptionsSim.Sim.StrategyVersionRulesTest do
     end
   end
 
-  # trading_system's CG-03 used "ne" in its exit; the RuleEngine evaluates
-  # unknown ops to :unknown, so that exit silently never fired.
-  test "rejects ne with a hint to use not/eq" do
-    assert {:error, changeset} = create(%{"exit" => leaf("ne", -1)})
-    assert [{msg, _}] = Keyword.get_values(changeset.errors, :rules)
-    assert msg =~ "exit: unsupported op \"ne\""
-    assert msg =~ "{\"not\""
+  # trading_system's CG-03 used "ne" in its exit, which trading_core before
+  # v0.4.5 didn't know, so that exit silently never fired. v0.4.5 supports
+  # it; near-misses like "neq"/"!=" are still unknown and rejected.
+  test "accepts ne (supported since trading_core v0.4.5) but rejects near-misses" do
+    assert {:ok, _} = create(%{"exit" => %{"not" => leaf("eq", -1)}, "entry" => leaf("ne", -1)})
+
+    for op <- ["neq", "!=", "NE"] do
+      assert {:error, changeset} = create(%{"exit" => leaf(op, -1)})
+      assert [{msg, _}] = Keyword.get_values(changeset.errors, :rules)
+      assert msg =~ "exit.op: unknown op", op
+    end
   end
 
   test "rejects unknown ops nested inside combinators, naming the path" do
     rules = %{"entry" => %{"all" => [leaf("gt", 1), %{"not" => leaf("gt ", 2)}]}}
     assert [msg] = StrategyVersion.rules_errors(rules)
-    assert msg =~ "entry.all[1].not: unsupported op \"gt \""
+    assert msg =~ "entry.all[1].not.op: unknown op"
   end
 
-  test "rejects transition ops, which never fire here" do
-    for op <- ~w(crosses_above crosses_below sign_flip changed) do
-      assert [msg] = StrategyVersion.rules_errors(%{"entry" => leaf(op)})
-      assert msg =~ "never fires in this app", op
+  # ContractMonitor never supplies prev_ values, on either side.
+  test "rejects transition ops in entry and exit, which never fire here" do
+    for op <- RuleEngine.transition_ops(), side <- ["entry", "exit"] do
+      assert [msg] = StrategyVersion.rules_errors(%{side => leaf(op)})
+      assert msg =~ "#{side}.op:", "#{side} #{op}"
     end
   end
 
@@ -93,7 +99,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersionRulesTest do
   test "rejects leaves without a numeric value or value_signal, and malformed nodes" do
     # Decimal.new("abc") would raise inside the monitor at evaluation time
     assert [msg] = StrategyVersion.rules_errors(%{"entry" => leaf("gt", "abc")})
-    assert msg =~ "needs a numeric \"value\""
+    assert msg =~ "entry.value:"
     assert [_] = StrategyVersion.rules_errors(%{"entry" => leaf("gt", nil)})
 
     assert [_] = StrategyVersion.rules_errors(%{"entry" => %{"op" => "gt", "value" => 1}})
@@ -105,7 +111,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersionRulesTest do
   end
 
   test "reports every bad leaf on both sides" do
-    rules = %{"entry" => %{"any" => [leaf("ne"), leaf("neq")]}, "exit" => leaf("between")}
+    rules = %{"entry" => %{"any" => [leaf("neq"), leaf("!=")]}, "exit" => leaf("between")}
     assert length(StrategyVersion.rules_errors(rules)) == 3
   end
 end

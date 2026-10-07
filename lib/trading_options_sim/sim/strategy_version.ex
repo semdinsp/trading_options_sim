@@ -34,6 +34,8 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias TradingCore.RuleEngine
+
   @primary_key {:id, UUIDv7, autogenerate: true}
   @foreign_key_type :binary_id
 
@@ -429,31 +431,23 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
 
   defp positive?(n), do: is_number(n) and n > 0
 
-  # The comparison operators TradingCore.RuleEngine evaluates. Anything
-  # else (e.g. "ne") evaluates to :unknown there and fails closed, so an
-  # entry never fires and an exit never triggers -- silently. trading_system
-  # hit exactly that with a `ne` regime exit (2026-10-07).
-  @comparison_ops ~w(gt gte lt lte eq)
-
-  # Supported by the RuleEngine, but they compare against the previous
-  # evaluation's value, which ContractMonitor never supplies (no `prev_`
-  # keys in its snapshot), so here they can never fire. Rejected with
-  # their own message so the fix is obvious.
-  @transition_ops ~w(crosses_above crosses_below sign_flip changed)
+  # ContractMonitor never supplies `prev_` values, so a transition op
+  # (crosses_above/crosses_below/sign_flip/changed) evaluates as unknown on
+  # every tick and never fires, on either side. Rejected everywhere.
+  @rule_validation_opts [
+    entry: [allow_transition_ops: false],
+    exit: [allow_transition_ops: false]
+  ]
 
   @doc """
   Errors for a `rules` map (`%{"entry" => node, "exit" => node}`), `[]`
-  when valid. Each node is a leaf `%{"signal" => name, "op" => op,
-  "value" => n}` (or `"value_signal"` in place of `"value"`), or one of
-  `%{"all" => [node, ...]}`, `%{"any" => [node, ...]}`,
-  `%{"not" => node}`. Mirrors what the RuleEngine accepts, no stricter:
-  a `nil` or empty node is allowed at any depth (the engine treats it as
-  always true -- LifecycleReview nests a parent's possibly-empty entry
-  inside `"all"`), so is `"all": []` (vacuously true), and `"value"` may
-  be a number or a numeric string (the engine parses it as a Decimal).
-  Rejected: unsupported or transition ops, a non-numeric `"value"` (it
-  would raise in the engine), `"any": []` (it can never pass), and any
-  other shape.
+  when valid, as messages like `"exit.all[1].op: unknown op (supported:
+  ...)"`. Delegates to `TradingCore.RuleEngine.validate_rules/2`, which
+  accepts exactly what the engine evaluates and nothing it would silently
+  treat as unknown (unknown ops, non-numeric values, `"any": []`,
+  malformed nodes). Before trading_core v0.4.5 an unknown op such as
+  trading_system's `ne` exit was stored without complaint and never fired.
+  This app also rejects transition ops (see `@rule_validation_opts`).
 
   Public so callers that build rules outside a changeset can check them
   first.
@@ -462,58 +456,9 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   def rules_errors(nil), do: []
 
   def rules_errors(rules) when is_map(rules),
-    do: Enum.flat_map(["entry", "exit"], &node_errors(Map.get(rules, &1), &1))
+    do: rules |> RuleEngine.validate_rules(@rule_validation_opts) |> RuleEngine.format_errors()
 
   def rules_errors(other), do: ["rules must be a map, got #{inspect(other)}"]
-
-  defp node_errors(nil, _path), do: []
-  defp node_errors(node, _path) when node == %{}, do: []
-
-  defp node_errors(%{"all" => nodes}, path) when is_list(nodes),
-    do:
-      nodes
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {n, i} -> node_errors(n, "#{path}.all[#{i}]") end)
-
-  defp node_errors(%{"any" => nodes}, path) when is_list(nodes) and nodes != [],
-    do:
-      nodes
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {n, i} -> node_errors(n, "#{path}.any[#{i}]") end)
-
-  defp node_errors(%{"not" => node}, path), do: node_errors(node, "#{path}.not")
-
-  defp node_errors(%{"signal" => signal, "op" => op} = leaf, path) when is_binary(signal) do
-    cond do
-      op in @transition_ops ->
-        [
-          "#{path}: op #{inspect(op)} never fires in this app (no previous value is supplied); " <>
-            "use one of #{Enum.join(@comparison_ops, ", ")}"
-        ]
-
-      op not in @comparison_ops ->
-        [
-          "#{path}: unsupported op #{inspect(op)}; use one of #{Enum.join(@comparison_ops, ", ")}" <>
-            if(op in ["ne", "neq", "!="],
-              do: " (for not-equal, wrap an eq leaf in {\"not\": ...})",
-              else: ""
-            )
-        ]
-
-      not (numeric?(Map.get(leaf, "value")) or is_binary(Map.get(leaf, "value_signal"))) ->
-        ["#{path}: op #{inspect(op)} needs a numeric \"value\" or a \"value_signal\""]
-
-      true ->
-        []
-    end
-  end
-
-  defp node_errors(node, path),
-    do: ["#{path}: not a valid rule node: #{inspect(node)}"]
-
-  defp numeric?(value) when is_number(value), do: true
-  defp numeric?(value) when is_binary(value), do: match?({_, ""}, Decimal.parse(value))
-  defp numeric?(_value), do: false
 
   defp validate_rules(changeset) do
     changeset
