@@ -34,6 +34,8 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias TradingCore.RuleEngine
+
   @primary_key {:id, UUIDv7, autogenerate: true}
   @foreign_key_type :binary_id
 
@@ -201,6 +203,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     |> validate_number(:generation, greater_than_or_equal_to: 0)
     |> validate_option_leg_config()
     |> validate_params()
+    |> validate_rules()
     |> unique_constraint([:strategy_id, :version])
     |> foreign_key_constraint(:parent_version_id)
     |> foreign_key_constraint(:target_pool_id)
@@ -427,6 +430,42 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     do: ["exit_strategy.method must be \"ratchet\" or \"trailing\""]
 
   defp positive?(n), do: is_number(n) and n > 0
+
+  # ContractMonitor never supplies `prev_` values, so a transition op
+  # (crosses_above/crosses_below/sign_flip/changed) evaluates as unknown on
+  # every tick and never fires, on either side. Rejected everywhere.
+  @rule_validation_opts [
+    entry: [allow_transition_ops: false],
+    exit: [allow_transition_ops: false]
+  ]
+
+  @doc """
+  Errors for a `rules` map (`%{"entry" => node, "exit" => node}`), `[]`
+  when valid, as messages like `"exit.all[1].op: unknown op (supported:
+  ...)"`. Delegates to `TradingCore.RuleEngine.validate_rules/2`, which
+  accepts exactly what the engine evaluates and nothing it would silently
+  treat as unknown (unknown ops, non-numeric values, `"any": []`,
+  malformed nodes). Before trading_core v0.4.5 an unknown op such as
+  trading_system's `ne` exit was stored without complaint and never fired.
+  This app also rejects transition ops (see `@rule_validation_opts`).
+
+  Public so callers that build rules outside a changeset can check them
+  first.
+  """
+  @spec rules_errors(map() | nil) :: [String.t()]
+  def rules_errors(nil), do: []
+
+  def rules_errors(rules) when is_map(rules),
+    do: rules |> RuleEngine.validate_rules(@rule_validation_opts) |> RuleEngine.format_errors()
+
+  def rules_errors(other), do: ["rules must be a map, got #{inspect(other)}"]
+
+  defp validate_rules(changeset) do
+    changeset
+    |> get_field(:rules)
+    |> rules_errors()
+    |> Enum.reduce(changeset, &add_error(&2, :rules, &1))
+  end
 
   defp validate_params(changeset) do
     changeset
