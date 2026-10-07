@@ -201,6 +201,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     |> validate_number(:generation, greater_than_or_equal_to: 0)
     |> validate_option_leg_config()
     |> validate_params()
+    |> validate_rules()
     |> unique_constraint([:strategy_id, :version])
     |> foreign_key_constraint(:parent_version_id)
     |> foreign_key_constraint(:target_pool_id)
@@ -427,6 +428,93 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     do: ["exit_strategy.method must be \"ratchet\" or \"trailing\""]
 
   defp positive?(n), do: is_number(n) and n > 0
+
+  # The comparison operators TradingCore.RuleEngine evaluates. Anything
+  # else (e.g. "ne") evaluates to :unknown there and fails closed, so an
+  # entry never fires and an exit never triggers -- silently. trading_system
+  # hit exactly that with a `ne` regime exit (2026-10-07).
+  @comparison_ops ~w(gt gte lt lte eq)
+
+  # Supported by the RuleEngine, but they compare against the previous
+  # evaluation's value, which ContractMonitor never supplies (no `prev_`
+  # keys in its snapshot), so here they can never fire. Rejected with
+  # their own message so the fix is obvious.
+  @transition_ops ~w(crosses_above crosses_below sign_flip changed)
+
+  @doc """
+  Errors for a `rules` map (`%{"entry" => node, "exit" => node}`), `[]`
+  when valid. Each node is a leaf `%{"signal" => name, "op" => op,
+  "value" => n}` (or `"value_signal"` in place of `"value"`), or one of
+  `%{"all" => [node, ...]}`, `%{"any" => [node, ...]}`,
+  `%{"not" => node}`. A missing or empty `entry`/`exit` is allowed -- the
+  RuleEngine treats it as always true, as it always has.
+
+  Public so callers that build rules outside a changeset can check them
+  first.
+  """
+  @spec rules_errors(map() | nil) :: [String.t()]
+  def rules_errors(nil), do: []
+
+  def rules_errors(rules) when is_map(rules) do
+    Enum.flat_map(["entry", "exit"], fn side ->
+      case Map.get(rules, side) do
+        nil -> []
+        node when node == %{} -> []
+        node -> node_errors(node, side)
+      end
+    end)
+  end
+
+  def rules_errors(other), do: ["rules must be a map, got #{inspect(other)}"]
+
+  defp node_errors(%{"all" => nodes}, path) when is_list(nodes) and nodes != [],
+    do:
+      nodes
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {n, i} -> node_errors(n, "#{path}.all[#{i}]") end)
+
+  defp node_errors(%{"any" => nodes}, path) when is_list(nodes) and nodes != [],
+    do:
+      nodes
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {n, i} -> node_errors(n, "#{path}.any[#{i}]") end)
+
+  defp node_errors(%{"not" => node}, path), do: node_errors(node, "#{path}.not")
+
+  defp node_errors(%{"signal" => signal, "op" => op} = leaf, path) when is_binary(signal) do
+    cond do
+      op in @transition_ops ->
+        [
+          "#{path}: op #{inspect(op)} never fires in this app (no previous value is supplied); " <>
+            "use one of #{Enum.join(@comparison_ops, ", ")}"
+        ]
+
+      op not in @comparison_ops ->
+        [
+          "#{path}: unsupported op #{inspect(op)}; use one of #{Enum.join(@comparison_ops, ", ")}" <>
+            if(op in ["ne", "neq", "!="],
+              do: " (for not-equal, wrap an eq leaf in {\"not\": ...})",
+              else: ""
+            )
+        ]
+
+      not (is_number(Map.get(leaf, "value")) or is_binary(Map.get(leaf, "value_signal"))) ->
+        ["#{path}: op #{inspect(op)} needs a numeric \"value\" or a \"value_signal\""]
+
+      true ->
+        []
+    end
+  end
+
+  defp node_errors(node, path),
+    do: ["#{path}: not a valid rule node: #{inspect(node)}"]
+
+  defp validate_rules(changeset) do
+    changeset
+    |> get_field(:rules)
+    |> rules_errors()
+    |> Enum.reduce(changeset, &add_error(&2, :rules, &1))
+  end
 
   defp validate_params(changeset) do
     changeset
