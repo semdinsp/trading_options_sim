@@ -78,13 +78,29 @@ defmodule TradingOptionsSim.Sim.StrategyVersionRulesTest do
     end
   end
 
+  # Never stricter than the RuleEngine: it treats nil/empty nodes as true
+  # at any depth, "all": [] as vacuously true, and parses numeric strings.
+  test "accepts what the RuleEngine accepts: nested empty nodes, all: [], numeric strings" do
+    # LifecycleReview's regime fork when the parent's entry is empty
+    gate = %{"signal" => "regime_trend_ordinal", "op" => "eq", "value" => 0}
+    assert {:ok, _} = create(%{"entry" => %{"all" => [%{}, gate]}})
+    assert StrategyVersion.rules_errors(%{"entry" => %{"all" => [nil, gate]}}) == []
+    assert StrategyVersion.rules_errors(%{"entry" => %{"all" => []}}) == []
+    assert StrategyVersion.rules_errors(%{"entry" => leaf("gt", "5")}) == []
+    assert StrategyVersion.rules_errors(%{"entry" => leaf("lt", "-0.5")}) == []
+  end
+
   test "rejects leaves without a numeric value or value_signal, and malformed nodes" do
-    assert [msg] = StrategyVersion.rules_errors(%{"entry" => leaf("gt", "5")})
+    # Decimal.new("abc") would raise inside the monitor at evaluation time
+    assert [msg] = StrategyVersion.rules_errors(%{"entry" => leaf("gt", "abc")})
     assert msg =~ "needs a numeric \"value\""
+    assert [_] = StrategyVersion.rules_errors(%{"entry" => leaf("gt", nil)})
 
     assert [_] = StrategyVersion.rules_errors(%{"entry" => %{"op" => "gt", "value" => 1}})
-    assert [_] = StrategyVersion.rules_errors(%{"entry" => %{"all" => []}})
+    # can never pass
+    assert [_] = StrategyVersion.rules_errors(%{"entry" => %{"any" => []}})
     assert [_] = StrategyVersion.rules_errors(%{"entry" => %{"any" => leaf("gt")}})
+    assert [_] = StrategyVersion.rules_errors(%{"entry" => %{"not" => [leaf("gt")]}})
     assert [_] = StrategyVersion.rules_errors("not a map")
   end
 

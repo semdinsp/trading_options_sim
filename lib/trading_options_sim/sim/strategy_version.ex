@@ -446,8 +446,14 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   when valid. Each node is a leaf `%{"signal" => name, "op" => op,
   "value" => n}` (or `"value_signal"` in place of `"value"`), or one of
   `%{"all" => [node, ...]}`, `%{"any" => [node, ...]}`,
-  `%{"not" => node}`. A missing or empty `entry`/`exit` is allowed -- the
-  RuleEngine treats it as always true, as it always has.
+  `%{"not" => node}`. Mirrors what the RuleEngine accepts, no stricter:
+  a `nil` or empty node is allowed at any depth (the engine treats it as
+  always true -- LifecycleReview nests a parent's possibly-empty entry
+  inside `"all"`), so is `"all": []` (vacuously true), and `"value"` may
+  be a number or a numeric string (the engine parses it as a Decimal).
+  Rejected: unsupported or transition ops, a non-numeric `"value"` (it
+  would raise in the engine), `"any": []` (it can never pass), and any
+  other shape.
 
   Public so callers that build rules outside a changeset can check them
   first.
@@ -455,19 +461,15 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   @spec rules_errors(map() | nil) :: [String.t()]
   def rules_errors(nil), do: []
 
-  def rules_errors(rules) when is_map(rules) do
-    Enum.flat_map(["entry", "exit"], fn side ->
-      case Map.get(rules, side) do
-        nil -> []
-        node when node == %{} -> []
-        node -> node_errors(node, side)
-      end
-    end)
-  end
+  def rules_errors(rules) when is_map(rules),
+    do: Enum.flat_map(["entry", "exit"], &node_errors(Map.get(rules, &1), &1))
 
   def rules_errors(other), do: ["rules must be a map, got #{inspect(other)}"]
 
-  defp node_errors(%{"all" => nodes}, path) when is_list(nodes) and nodes != [],
+  defp node_errors(nil, _path), do: []
+  defp node_errors(node, _path) when node == %{}, do: []
+
+  defp node_errors(%{"all" => nodes}, path) when is_list(nodes),
     do:
       nodes
       |> Enum.with_index()
@@ -498,7 +500,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
             )
         ]
 
-      not (is_number(Map.get(leaf, "value")) or is_binary(Map.get(leaf, "value_signal"))) ->
+      not (numeric?(Map.get(leaf, "value")) or is_binary(Map.get(leaf, "value_signal"))) ->
         ["#{path}: op #{inspect(op)} needs a numeric \"value\" or a \"value_signal\""]
 
       true ->
@@ -508,6 +510,10 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
 
   defp node_errors(node, path),
     do: ["#{path}: not a valid rule node: #{inspect(node)}"]
+
+  defp numeric?(value) when is_number(value), do: true
+  defp numeric?(value) when is_binary(value), do: match?({_, ""}, Decimal.parse(value))
+  defp numeric?(_value), do: false
 
   defp validate_rules(changeset) do
     changeset
