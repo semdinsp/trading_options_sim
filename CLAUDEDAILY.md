@@ -336,6 +336,11 @@ are baselines.
 - **Never use the transition operators** (`crosses_above`,
   `crosses_below`, `sign_flip`, `changed`). This app never supplies the
   previous value they need, so they never fire.
+- Only `gt`, `gte`, `lt`, `lte` and `eq` are evaluated. There is no
+  `ne`: write not-equal as `{"not": {"signal": …, "op": "eq", …}}`.
+  `StrategyVersion` rejects any other op, transition ops, and leaves
+  without a numeric `value` or a `value_signal`. Check a rule before
+  creating it with `StrategyVersion.rules_errors/1`.
 - "Always true" is `run_underlying_price gt 0`. "Hold to the
   end-of-day flatten" is `run_underlying_price lt 0`.
 
