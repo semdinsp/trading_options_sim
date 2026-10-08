@@ -326,7 +326,13 @@ are baselines.
 
 **Other entry params available** (per version, all optional):
 - `entry_delay_minutes`: the app default is 5. Set 0 to trade from the
-  open.
+  open. The operator can also override it on a running strategy (the
+  "min delay" box on the version page and the Active Strategies row,
+  stored in `StrategyVersion.entry_delay_minutes`). Precedence:
+  override, then this param, then the app default
+  (`TradingOptionsSim.EntryDelay.effective/1`). A change reaches running
+  monitors at once. The app default lives only in config (no runtime
+  settings store), so changing it needs a restart.
 - `entry_confirm_seconds`: the entry rule must hold this long on every
   tick before entering. Use it for flickery signals.
 - `reentry_cooldown_seconds`: no re-entry on a contract for this long

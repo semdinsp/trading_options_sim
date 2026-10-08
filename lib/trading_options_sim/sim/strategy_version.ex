@@ -135,6 +135,11 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     field :trading_hours_policy, :string, default: "regular_hours_only"
     field :overnight_hold, :boolean, default: false
 
+    # Operator override for the entry delay in minutes, changeable on a
+    # running strategy (the version's params are frozen). nil = no
+    # override. Precedence and live update: TradingOptionsSim.EntryDelay.
+    field :entry_delay_minutes, :integer
+
     belongs_to :strategy, TradingOptionsSim.Sim.Strategy
     belongs_to :parent_version, __MODULE__, foreign_key: :parent_version_id
     belongs_to :target_pool, TradingOptionsSim.Sim.TargetPool
@@ -251,8 +256,10 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   """
   def operational_changeset(strategy_version, attrs) do
     strategy_version
-    |> cast(attrs, [:trading_hours_policy, :overnight_hold])
+    |> cast(attrs, [:trading_hours_policy, :overnight_hold, :entry_delay_minutes])
     |> validate_inclusion(:trading_hours_policy, @trading_hours_policies)
+    |> validate_number(:entry_delay_minutes, greater_than_or_equal_to: 0)
+    |> check_constraint(:entry_delay_minutes, name: :entry_delay_minutes_non_negative)
   end
 
   @doc """

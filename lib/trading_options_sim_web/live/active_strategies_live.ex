@@ -120,6 +120,29 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
      |> load_active_versions()}
   end
 
+  # Operator "min delay" per strategy row; same path as the detail page
+  # (Sim.set_entry_delay_override/2 saves and broadcasts to running
+  # monitors). Blank clears the override.
+  def handle_event(
+        "set_entry_delay_minutes",
+        %{"version_id" => id, "entry_delay_minutes" => raw},
+        socket
+      ) do
+    case Sim.set_entry_delay_override(Sim.get_strategy_version!(id), raw) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           StrategyVersionDetailLive.entry_delay_flash(updated.entry_delay_minutes)
+         )
+         |> load_active_versions()}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, StrategyVersionDetailLive.entry_delay_error())}
+    end
+  end
+
   defp load_active_versions(socket) do
     all_active = Sim.list_active_strategy_versions()
 
@@ -139,9 +162,15 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
           |> Enum.map(&build_chip(version, monitors, &1))
           |> Enum.sort_by(& &1.member.symbol)
 
+        {delay, delay_source} = TradingOptionsSim.EntryDelay.effective(version)
+
         %{
           version: version,
           members: members,
+          entry_delay: delay,
+          entry_delay_source: delay_source,
+          entry_delay_active?:
+            Enum.any?(members, &match?(%{snapshot: %{entry_delay_active?: true}}, &1)),
           today_stats: Sim.today_stats_for_version(version),
           unrealized: total_unrealized(members)
         }
@@ -341,6 +370,36 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
             <span class="font-data text-xs text-base-content/40">
               {length(entry.members)} members
             </span>
+            <form
+              id={"entry-delay-form-#{entry.version.id}"}
+              phx-submit="set_entry_delay_minutes"
+              class="inline-flex items-center gap-1 font-data text-[11px]"
+              title="Skip new entries for the first N minutes after the exchange opens. Exits are never delayed."
+            >
+              <input type="hidden" name="version_id" value={entry.version.id} />
+              <input
+                type="number"
+                name="entry_delay_minutes"
+                min="0"
+                step="1"
+                value={entry.version.entry_delay_minutes}
+                placeholder={entry.entry_delay}
+                aria-label="Min delay override (minutes)"
+                class="input input-xs w-14 font-data text-[11px]"
+              />
+              <span class="text-base-content/40 uppercase">min delay</span>
+              <span class="text-base-content/40">
+                = {entry.entry_delay} ({StrategyVersionDetailLive.entry_delay_source_label(
+                  entry.entry_delay_source
+                )})
+              </span>
+              <span
+                :if={entry.entry_delay_active?}
+                class="px-1 border border-warning/40 text-warning bg-warning/10 uppercase"
+              >
+                delay active
+              </span>
+            </form>
             <button
               type="button"
               phx-click="deactivate"

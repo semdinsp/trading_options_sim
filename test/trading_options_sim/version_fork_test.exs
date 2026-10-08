@@ -55,7 +55,8 @@ defmodule TradingOptionsSim.VersionForkTest do
     {:ok, source} =
       Sim.update_trading_hours_settings(source, %{
         overnight_hold: true,
-        trading_hours_policy: "unrestricted"
+        trading_hours_policy: "unrestricted",
+        entry_delay_minutes: 12
       })
 
     %{source: Repo.reload!(source), pool: pool}
@@ -86,7 +87,8 @@ defmodule TradingOptionsSim.VersionForkTest do
           :direction,
           :target_pool_id,
           :overnight_hold,
-          :trading_hours_policy
+          :trading_hours_policy,
+          :entry_delay_minutes
         ] do
       assert Map.fetch!(fork, field) == Map.fetch!(source, field), "#{field} not copied"
     end

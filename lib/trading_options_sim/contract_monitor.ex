@@ -244,8 +244,10 @@ defmodule TradingOptionsSim.ContractMonitor do
     # with trading_system and trading_live: params["min_hold_seconds"].
     min_hold_seconds: nil,
     # Minutes after today's open before a new entry is allowed (0 = no
-    # delay). params["entry_delay_minutes"], else the app-wide
-    # :default_entry_delay_minutes. See entry_delay_elapsed?/2.
+    # delay): the operator override, else params["entry_delay_minutes"],
+    # else the app-wide :default_entry_delay_minutes (EntryDelay.minutes/1).
+    # Updated live by {:entry_delay_minutes_updated, n}. See
+    # entry_delay_elapsed?/2.
     entry_delay_minutes: 0,
     # Anti-churn, both opt-in via params and 0/absent = off. See
     # entry_confirmed?/2 and cooled_down?/2.
@@ -423,6 +425,13 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{symbol}")
 
+    # Operator changes to the entry delay arrive here live; see
+    # TradingOptionsSim.EntryDelay.
+    Phoenix.PubSub.subscribe(
+      TradingOptionsSim.PubSub,
+      TradingOptionsSim.EntryDelay.topic(strategy_version.id)
+    )
+
     rules = strategy_version.rules || %{}
     entry_rule = Map.get(rules, "entry")
     exit_rule = Map.get(rules, "exit")
@@ -473,7 +482,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       # stop only ever tightens (see apply_moved_stop/4).
       entry_price: Keyword.get(opts, :entry_price),
       min_hold_seconds: min_hold_seconds(strategy_version),
-      entry_delay_minutes: entry_delay_minutes(strategy_version),
+      entry_delay_minutes: TradingOptionsSim.EntryDelay.minutes(strategy_version),
       entry_confirm_seconds: param_seconds(strategy_version, "entry_confirm_seconds"),
       reentry_cooldown_seconds: param_seconds(strategy_version, "reentry_cooldown_seconds"),
       last_exit_at: seed_last_exit_at(strategy_version, symbol_from_opts(opts)),
@@ -704,6 +713,14 @@ defmodule TradingOptionsSim.ContractMonitor do
   # priced yet) is a no-op; `reason` is always `:eod_flatten`.
   def handle_info({:force_close_eod, reason}, state) do
     {:noreply, do_force_close(state, reason)}
+  end
+
+  # An operator changed this version's entry delay (TradingOptionsSim.EntryDelay
+  # broadcasts the effective value). Gates the next entry check only;
+  # exits and forced closes never read it.
+  def handle_info({:entry_delay_minutes_updated, minutes}, state)
+      when is_integer(minutes) and minutes >= 0 do
+    {:noreply, %{state | entry_delay_minutes: minutes}}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -1416,13 +1433,6 @@ defmodule TradingOptionsSim.ContractMonitor do
       _ -> false
     end
   end
-
-  defp entry_delay_minutes(%{params: %{"entry_delay_minutes" => minutes}})
-       when is_integer(minutes) and minutes >= 0,
-       do: minutes
-
-  defp entry_delay_minutes(_version),
-    do: Application.get_env(:trading_options_sim, :default_entry_delay_minutes, 0)
 
   @doc """
   `true` when the rule-based exit is allowed to fire.

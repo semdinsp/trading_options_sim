@@ -371,4 +371,18 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLiveTest do
       assert html =~ "No active strategy versions match this filter"
     end
   end
+
+  test "each row has a min delay input that sets the operator override", %{conn: conn} do
+    version = activated_version_fixture("Delay Row Strategy", ["DELAYROW1"])
+    {:ok, view, html} = live(conn, ~p"/active_strategies")
+
+    assert html =~ "min delay"
+
+    view
+    |> form("#entry-delay-form-#{version.id}", %{entry_delay_minutes: "8"})
+    |> render_submit()
+
+    assert Sim.get_strategy_version!(version.id).entry_delay_minutes == 8
+    assert render(view) =~ "operator override"
+  end
 end

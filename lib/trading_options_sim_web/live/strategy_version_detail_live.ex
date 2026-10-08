@@ -138,6 +138,25 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     {:noreply, load_version(socket, socket.assigns.version.id)}
   end
 
+  # Operator "min delay": Sim.set_entry_delay_override/2 saves it and
+  # broadcasts the effective delay to this version's running monitors.
+  # Blank clears the override (falls back to the version param, then the
+  # app default).
+  def handle_event("set_entry_delay_minutes", %{"entry_delay_minutes" => raw}, socket) do
+    version = socket.assigns.version
+
+    case Sim.set_entry_delay_override(version, raw) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> load_version(version.id)
+         |> put_flash(:info, entry_delay_flash(updated.entry_delay_minutes))}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, entry_delay_error())}
+    end
+  end
+
   def handle_event("edit_notes", _params, socket) do
     {:noreply, assign(socket, :editing_notes?, true)}
   end
@@ -209,6 +228,32 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(value), do: value
 
+  defp assign_entry_delay(socket, version, members) do
+    {minutes, source} = TradingOptionsSim.EntryDelay.effective(version)
+
+    socket
+    |> assign(:entry_delay_minutes, minutes)
+    |> assign(:entry_delay_source, source)
+    |> assign(:entry_delay_active?, entry_delay_active?(members))
+  end
+
+  @doc false
+  def entry_delay_flash(nil), do: "Min delay override cleared"
+  def entry_delay_flash(n), do: "Min delay set to #{n} min"
+
+  @doc false
+  def entry_delay_error, do: "Min delay must be a whole number of minutes, 0 or more"
+
+  @doc false
+  def entry_delay_source_label(:override), do: "operator override"
+  def entry_delay_source_label(:version), do: "version params"
+  def entry_delay_source_label(:default), do: "app default"
+
+  # Any running monitor still inside the window. All of a version's
+  # monitors share one delay, but members can sit on different exchanges.
+  defp entry_delay_active?(members),
+    do: Enum.any?(members, &match?(%{snapshot: %{entry_delay_active?: true}}, &1))
+
   defp load_version(socket, id) do
     version = Sim.get_strategy_version_detail!(id)
 
@@ -226,6 +271,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     socket
     |> assign(:version, version)
     |> assign(:members, members)
+    |> assign_entry_delay(version, members)
     |> assign(:capital_in_use, capital_in_use(members))
     |> assign(:is_active?, is_active?)
     |> assign(:recent_fills, Sim.list_recent_fills_for_version(version))
@@ -592,6 +638,61 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             Raw Config
           </div>
           <pre class="font-data text-[11px] bg-base-200 border border-base-300 p-2 overflow-x-auto whitespace-pre-wrap">{format_position_sizing(@version.position_sizing)}</pre>
+        </div>
+
+        <div
+          id="entry-delay-panel"
+          class="border border-warning/40 bg-base-100 p-3"
+          title="Skip new entries for the first N minutes after the exchange opens. Exits are never delayed."
+        >
+          <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50 mb-2">
+            <.icon name="hero-clock" class="h-4 w-4 mr-1 inline text-primary" /> Entry Delay
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3 font-data text-[11px]">
+            <form
+              id="entry-delay-form"
+              phx-submit="set_entry_delay_minutes"
+              class="inline-flex items-center gap-1"
+            >
+              <label for="entry-delay-input" class="sr-only">Min delay override (minutes)</label>
+              <input
+                type="number"
+                id="entry-delay-input"
+                name="entry_delay_minutes"
+                min="0"
+                step="1"
+                value={@version.entry_delay_minutes}
+                placeholder="—"
+                class="input input-xs w-16 font-data text-[11px]"
+              />
+              <span class="text-base-content/40 uppercase">min delay</span>
+              <button
+                type="submit"
+                class="px-1.5 py-0.5 border border-base-content/15 text-base-content/50 hover:border-primary/40 hover:text-primary uppercase"
+              >
+                Set
+              </button>
+            </form>
+
+            <span id="entry-delay-effective">
+              <span class="text-base-content/50 uppercase tracking-wide">Effective</span>
+              <span class="ml-1 tabular-nums">{@entry_delay_minutes} min</span>
+              <span class="ml-1 text-base-content/40">({entry_delay_source_label(@entry_delay_source)})</span>
+            </span>
+
+            <span
+              :if={@entry_delay_active?}
+              id="entry-delay-active"
+              class="px-1.5 py-0.5 border border-warning/40 text-warning bg-warning/10 uppercase tracking-wide"
+            >
+              Delay active — no new entries yet
+            </span>
+          </div>
+
+          <p class="mt-1 text-[11px] text-base-content/40">
+            Blank clears the override. Changes reach running monitors immediately.
+          </p>
         </div>
 
         <div class="border border-warning/40 bg-base-100 p-3">
