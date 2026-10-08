@@ -16,6 +16,7 @@ defmodule TradingOptionsSim.SignalBus do
   """
 
   @callback request(String.t()) :: {:ok, String.t()} | {:error, term()}
+  @callback resolve(String.t()) :: :ok | {:error, :unknown_signal} | {:error, term()}
 
   @doc """
   Resolves `name` (a `StrategyVersion.rules` tree's `"signal"`/
@@ -27,6 +28,16 @@ defmodule TradingOptionsSim.SignalBus do
   adapter's implementation) for why both steps matter.
   """
   def request(name), do: impl().request(name)
+
+  @doc """
+  Checks that `name` names a real `trading_signal` signal WITHOUT
+  requesting it: no counted subscriber is registered and nothing starts.
+  `:ok` if it resolves; `{:error, :unknown_signal}` if trading_signal
+  says it doesn't exist; any other `{:error, reason}` means it couldn't
+  be checked (e.g. `:not_connected`). Used to validate a rule tree before
+  saving it (`Sim.unknown_signal_names/1`).
+  """
+  def resolve(name), do: impl().resolve(name)
 
   defp impl,
     do:
