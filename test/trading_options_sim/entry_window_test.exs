@@ -5,6 +5,8 @@ defmodule TradingOptionsSim.EntryWindowTest do
   # EodCloserTest is: real ContractMonitors under the shared registry.
   use TradingOptionsSim.DataCase, async: false
 
+  import Ecto.Query
+
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.Sim.{ExchangeSession, ExchangeTradingHours, StrategyVersion}
@@ -254,6 +256,166 @@ defmodule TradingOptionsSim.EntryWindowTest do
       assert ContractMonitor.snapshot(pid).position_open?
     end
   end
+
+  describe "operator override precedence (EntryDelay.effective/1)" do
+    alias TradingOptionsSim.EntryDelay
+
+    setup do
+      previous = Application.get_env(:trading_options_sim, :default_entry_delay_minutes)
+      Application.put_env(:trading_options_sim, :default_entry_delay_minutes, 5)
+
+      on_exit(fn ->
+        Application.put_env(:trading_options_sim, :default_entry_delay_minutes, previous)
+      end)
+    end
+
+    test "the override wins over the version param and the default" do
+      v = %{entry_delay_minutes: 7, params: %{"entry_delay_minutes" => 3}}
+      assert EntryDelay.effective(v) == {7, :override}
+    end
+
+    test "an override of 0 means no delay, not 'no override'" do
+      v = %{entry_delay_minutes: 0, params: %{"entry_delay_minutes" => 3}}
+      assert EntryDelay.effective(v) == {0, :override}
+    end
+
+    test "a nil override falls through to the version param" do
+      v = %{entry_delay_minutes: nil, params: %{"entry_delay_minutes" => 3}}
+      assert EntryDelay.effective(v) == {3, :version}
+    end
+
+    test "with neither, the app default applies" do
+      assert EntryDelay.effective(%{entry_delay_minutes: nil, params: %{}}) == {5, :default}
+      assert EntryDelay.effective(%{entry_delay_minutes: nil, params: nil}) == {5, :default}
+    end
+
+    test "the promotion export ships the effective value and its source" do
+      version =
+        version_fixture(%{params: %{"entry_delay_minutes" => 3, "risk_controls" => risk()}})
+
+      {:ok, version} = Sim.set_entry_delay_override(version, 9)
+
+      {:ok, export} = TradingOptionsSim.Sim.PromotionExport.build(version.id)
+      assert export["entry_delay_minutes"] == 9
+      assert export["entry_delay_source"] == "override"
+      assert export["schema_version"] == 1
+    end
+  end
+
+  describe "operator override reaches a running monitor without a restart" do
+    test "lifting the delay lets a monitor that was waiting enter" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+      version = version_fixture(%{params: %{"entry_delay_minutes" => 5}})
+      pid = start_flat_monitor(version, ex, "LIVE1")
+
+      tick(pid, "LIVE1")
+      assert ContractMonitor.snapshot(pid).entry_delay_active?
+      refute ContractMonitor.snapshot(pid).position_open?
+
+      {:ok, _} = Sim.set_entry_delay_override(version, 0)
+      tick(pid, "LIVE1")
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.entry_delay_minutes == 0
+      refute snap.entry_delay_active?
+      assert snap.position_open?
+    end
+
+    test "setting a delay blocks entries, and clearing it falls back to the version param" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+      version = version_fixture(%{params: %{"entry_delay_minutes" => 2}})
+      pid = start_flat_monitor(version, ex, "LIVE2")
+
+      {:ok, version} = Sim.set_entry_delay_override(version, 30)
+      tick(pid, "LIVE2")
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.entry_delay_minutes == 30
+      assert snap.entry_delay_active?
+      refute snap.position_open?
+
+      {:ok, _} = Sim.set_entry_delay_override(version, nil)
+      tick(pid, "LIVE2")
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.entry_delay_minutes == 2
+      assert snap.position_open?
+    end
+
+    # Exits, stops and forced closes never read the delay.
+    test "an exit still fires while the delay is active" do
+      ex = exchange()
+      :ok = seed_session(ex, 3, 60)
+
+      version =
+        version_fixture(%{
+          params: %{"entry_delay_minutes" => 0},
+          rules: %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 0}
+          }
+        })
+
+      pid = start_flat_monitor(version, ex, "LIVE3")
+      tick(pid, "LIVE3")
+      assert ContractMonitor.snapshot(pid).position_open?
+
+      {:ok, _} = Sim.set_entry_delay_override(version, 30)
+      tick(pid, "LIVE3")
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.entry_delay_active?
+      refute snap.position_open?
+
+      [run] =
+        Repo.all(
+          from r in TradingOptionsSim.Sim.SimRun,
+            where: r.strategy_version_id == ^version.id and r.status == "closed"
+        )
+
+      assert run.exit_reason == "rule_exit"
+    end
+  end
+
+  describe "operator override validation" do
+    test "rejects a negative or non-integer override and broadcasts nothing" do
+      version = version_fixture()
+
+      Phoenix.PubSub.subscribe(
+        TradingOptionsSim.PubSub,
+        TradingOptionsSim.EntryDelay.topic(version.id)
+      )
+
+      assert {:error, changeset} = Sim.set_entry_delay_override(version, -1)
+      assert changeset.errors[:entry_delay_minutes]
+      assert {:error, _} = Sim.set_entry_delay_override(version, "abc")
+      assert {:error, _} = Sim.set_entry_delay_override(version, "-3")
+      refute_received {:entry_delay_minutes_updated, _}
+      assert Repo.reload!(version).entry_delay_minutes == nil
+    end
+
+    test "accepts form strings, trims them, and blank clears the override" do
+      version = version_fixture()
+      assert {:ok, %{entry_delay_minutes: 7}} = Sim.set_entry_delay_override(version, " 7 ")
+      assert {:ok, %{entry_delay_minutes: nil}} = Sim.set_entry_delay_override(version, "")
+    end
+
+    test "the database rejects a negative value written around the changeset" do
+      version = version_fixture()
+
+      assert_raise Postgrex.Error, ~r/entry_delay_minutes_non_negative/, fn ->
+        Repo.update_all(
+          from(v in StrategyVersion, where: v.id == ^version.id),
+          set: [entry_delay_minutes: -1]
+        )
+      end
+    end
+  end
+
+  defp risk,
+    do: %{"method" => "percent_of_entry", "stop_loss_percent" => 10, "take_profit_percent" => 20}
 
   describe "params validation" do
     test "accepts a non-negative integer entry_delay_minutes" do

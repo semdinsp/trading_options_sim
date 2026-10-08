@@ -221,6 +221,29 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
+  Sets (or with `nil`/`""`, clears) the operator's entry delay override
+  for `version`, then broadcasts the resulting EFFECTIVE delay to its
+  running monitors (`TradingOptionsSim.EntryDelay.broadcast/1`), so the
+  change applies without a restart. A negative or non-integer value is
+  rejected by `StrategyVersion.operational_changeset/2` and nothing is
+  broadcast.
+  """
+  @spec set_entry_delay_override(StrategyVersion.t(), integer() | String.t() | nil) ::
+          {:ok, StrategyVersion.t()} | {:error, Ecto.Changeset.t()}
+  def set_entry_delay_override(%StrategyVersion{} = version, minutes) do
+    # A form posts a string: trim it, blank clears, and the changeset
+    # casts "5" to 5 and rejects anything else.
+    minutes = if is_binary(minutes), do: String.trim(minutes), else: minutes
+    minutes = if minutes == "", do: nil, else: minutes
+
+    with {:ok, version} <-
+           update_trading_hours_settings(version, %{entry_delay_minutes: minutes}) do
+      TradingOptionsSim.EntryDelay.broadcast(version)
+      {:ok, version}
+    end
+  end
+
+  @doc """
   Marks `version` as durably active — clears `deactivated_at`, and sets
   `activated_at` to now only on an inactive -> active transition (never
   activated, or deactivated since). Called by `SimActivator.activate/1`

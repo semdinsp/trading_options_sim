@@ -9,6 +9,15 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
 
   * `rules`, `params`, `option_leg_config`, `position_sizing` -- copied
     byte-for-byte into the live strategy.
+  * `entry_delay_minutes` / `entry_delay_source` -- the EFFECTIVE entry
+    delay after precedence (operator override, else
+    `params["entry_delay_minutes"]`, else the app default) and which of
+    `"override"`, `"version"`, `"default"` supplied it
+    (`TradingOptionsSim.EntryDelay.effective/1`), for trading_live's
+    `LiveStrategySettings.entry_delay_minutes`. Added 2026-10-08 as an
+    ADDITIVE field without bumping `schema_version`: trading_live accepts
+    only `schema_version: 1` and ignores keys it doesn't read, so a bump
+    would have refused every promotion until it shipped its side.
   * `target_pool.members[].ib_conid` -- the UNDERLYING's conid when
     known, never an option's; the option contract is resolved daily.
   * `execution` -- `ContractMonitor.execution_defaults/0`, so live limit
@@ -100,6 +109,9 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
       "option_leg_config" => v.option_leg_config,
       "trading_hours_policy" => v.trading_hours_policy,
       "overnight_hold" => v.overnight_hold,
+      "entry_delay_minutes" => elem(TradingOptionsSim.EntryDelay.effective(v), 0),
+      "entry_delay_source" =>
+        v |> TradingOptionsSim.EntryDelay.effective() |> elem(1) |> to_string(),
       "lineage" => %{
         "parent_version_id" => v.parent_version_id,
         "generation" => v.generation,

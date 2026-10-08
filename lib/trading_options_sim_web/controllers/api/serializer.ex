@@ -69,6 +69,10 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "deactivated_at" => str(version.deactivated_at),
       "trading_hours_policy" => version.trading_hours_policy,
       "overnight_hold" => version.overnight_hold,
+      "entry_delay_minutes" => version.entry_delay_minutes,
+      "effective_entry_delay_minutes" => elem(TradingOptionsSim.EntryDelay.effective(version), 0),
+      "entry_delay_source" =>
+        version |> TradingOptionsSim.EntryDelay.effective() |> elem(1) |> to_string(),
       "live_strategy_app" => version.live_strategy_app,
       "live_strategy_id" => version.live_strategy_id,
       "live_strategy_active" => version.live_strategy_active,
