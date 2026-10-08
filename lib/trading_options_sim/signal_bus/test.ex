@@ -24,12 +24,18 @@ defmodule TradingOptionsSim.SignalBus.Test do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
   end
 
-  defp initial_state, do: %{topics: %{}, requested_names: []}
+  defp initial_state, do: %{topics: %{}, requested_names: [], unknown: MapSet.new()}
 
   @doc "Stubs the topic returned for `name` by `request/1`."
   def stub_topic(name, topic) do
     ensure_started()
     Agent.update(__MODULE__, &put_in(&1, [:topics, name], topic))
+  end
+
+  @doc "Makes `resolve/1` report `name` as `{:error, :unknown_signal}`."
+  def stub_unknown(name) do
+    ensure_started()
+    Agent.update(__MODULE__, &Map.update!(&1, :unknown, fn set -> MapSet.put(set, name) end))
   end
 
   @doc "Resets all stubs to their defaults."
@@ -54,6 +60,16 @@ defmodule TradingOptionsSim.SignalBus.Test do
     Agent.update(__MODULE__, &Map.update!(&1, :requested_names, fn names -> [name | names] end))
     topic = Agent.get(__MODULE__, &get_in(&1, [:topics, name])) || "signals:" <> name
     {:ok, topic}
+  end
+
+  @doc "`:ok` unless `name` was passed to `stub_unknown/1`. Never records a request."
+  @impl true
+  def resolve(name) do
+    ensure_started()
+
+    if Agent.get(__MODULE__, &MapSet.member?(&1.unknown, name)),
+      do: {:error, :unknown_signal},
+      else: :ok
   end
 
   # Same reasoning as TradingLive.SignalBus.Test.ensure_started/0:

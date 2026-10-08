@@ -294,7 +294,18 @@ for t <- tags, do: Sim.add_tag_to_strategy_version_by_name(v, t)
 TradingOptionsSim.SimActivator.activate(v)  # expect {:ok, [pids], []}
 ```
 
-- REST equivalents (Bearer token from `/settings`):
+- **Simpler: `fork_version`** (MCP, scope `mcp:write`) or
+  `POST /api/v1/versions/:id/fork` (REST, `strategies:write`), both via
+  `TradingOptionsSim.VersionFork.fork/2`. Give it `name` plus `entry_gate`
+  (AND-ed onto the source entry; exit untouched) **or** `rules` (full
+  replacement), and optional `notes`, `tags` and `activate: true`. It
+  copies everything else exactly (params including `risk_controls`,
+  leg config, pool, sizing, `overnight_hold`, `trading_hours_policy`),
+  sets the lineage, appends "Forked from …" to the notes, validates the
+  rules and rejects signal names that aren't a monitor key or a known
+  trading_signal signal. Changing params, the hold or the contract still
+  needs the script above.
+- REST equivalents of the script (Bearer token from `/settings`):
   `POST /api/v1/strategies`, then `POST /api/v1/strategies/:id/versions`
   with the same body, then `POST /api/v1/versions/:id/activate`.
 - The MCP `create_strategy_version` tool **drops `params`**, so it can't

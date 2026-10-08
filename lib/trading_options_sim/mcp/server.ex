@@ -26,7 +26,7 @@ defmodule TradingOptionsSim.MCP.Server do
   `expectancy_by_regime`.
 
   Write tools, each requiring `"mcp:write"`: `create_strategy`,
-  `create_strategy_version`, `promote_version`, `downgrade_version`,
+  `create_strategy_version`, `fork_version`, `promote_version`, `downgrade_version`,
   `activate_version`, `deactivate_version`, `add_strategy_version_tag`,
   `update_strategy_version_notes`.
 
@@ -64,6 +64,7 @@ defmodule TradingOptionsSim.MCP.Server do
   component(TradingOptionsSim.MCP.Tools.ListTags)
   component(TradingOptionsSim.MCP.Tools.CreateStrategy)
   component(TradingOptionsSim.MCP.Tools.CreateStrategyVersion)
+  component(TradingOptionsSim.MCP.Tools.ForkVersion)
   component(TradingOptionsSim.MCP.Tools.PromoteVersion)
   component(TradingOptionsSim.MCP.Tools.DowngradeVersion)
   component(TradingOptionsSim.MCP.Tools.ActivateVersion)

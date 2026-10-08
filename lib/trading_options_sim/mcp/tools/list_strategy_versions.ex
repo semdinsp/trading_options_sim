@@ -67,6 +67,8 @@ defmodule TradingOptionsSim.MCP.Tools.ListStrategyVersions do
       lifecycle_stage: version.lifecycle_stage,
       direction: version.direction,
       rules: version.rules,
+      params: version.params,
+      usage_conditions: version.usage_conditions,
       position_sizing: version.position_sizing,
       option_leg_config: version.option_leg_config,
       target_pool_id: version.target_pool_id,

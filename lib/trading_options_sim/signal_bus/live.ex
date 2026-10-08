@@ -12,4 +12,7 @@ defmodule TradingOptionsSim.SignalBus.Live do
 
   @impl true
   def request(name), do: SignalConnection.request_signal(name)
+
+  @impl true
+  def resolve(name), do: SignalConnection.resolve_signal(name)
 end
