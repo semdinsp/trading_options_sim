@@ -46,8 +46,10 @@ defmodule TradingOptionsSimWeb.Router do
 
     get "/versions", StrategyVersionController, :index
     get "/versions/metrics", StrategyVersionController, :metrics
+    get "/versions/expectancy_by_regime", StrategyVersionController, :expectancy_by_regime
     get "/versions/:id", StrategyVersionController, :show
     get "/versions/:id/promotion_export", StrategyVersionController, :promotion_export
+    get "/versions/:id/expectancy_by_regime", StrategyVersionController, :expectancy_by_regime
     post "/versions/:id/promote", StrategyVersionController, :promote
     post "/versions/:id/downgrade", StrategyVersionController, :downgrade
     post "/versions/:id/activate", StrategyVersionController, :activate

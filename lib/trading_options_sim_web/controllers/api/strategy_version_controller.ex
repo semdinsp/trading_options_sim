@@ -8,7 +8,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
   action_fallback TradingOptionsSimWeb.Api.FallbackController
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
-       [scope: "strategies:read"] when action in [:index, :show, :metrics, :promotion_export]
+       [scope: "strategies:read"]
+       when action in [:index, :show, :metrics, :promotion_export, :expectancy_by_regime]
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "strategies:write"]
@@ -92,6 +93,33 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
   def metrics(conn, _params) do
     rows = Sim.full_universe_version_metrics() |> Enum.map(&Serializer.candidate_metrics/1)
     json(conn, %{"candidate_metrics" => rows})
+  end
+
+  @doc """
+  GET /api/v1/versions/:id/expectancy_by_regime
+  GET /api/v1/versions/expectancy_by_regime?stage=quarantine
+
+  `Sim.expectancy_by_regime/1`: expectancy in R per regime at entry,
+  for one version or every version with a closed run (optionally one
+  `stage`). Mirrors the `expectancy_by_regime` MCP tool; both use
+  `Serializer.expectancy_by_regime/1`. 404 for an unknown id, 422 for
+  an unknown stage.
+  """
+  def expectancy_by_regime(conn, params) do
+    opts = [version_id: params["id"], stage: params["stage"]]
+
+    case Sim.expectancy_by_regime(opts) do
+      {:ok, rows} ->
+        json(conn, %{
+          "expectancy_by_regime" => Enum.map(rows, &Serializer.expectancy_by_regime/1)
+        })
+
+      {:error, :not_found} ->
+        conn |> put_status(:not_found) |> json(%{"error" => "not_found"})
+
+      {:error, :invalid_stage} ->
+        conn |> put_status(:unprocessable_entity) |> json(%{"error" => "invalid_stage"})
+    end
   end
 
   @doc "POST /api/v1/versions/:id/promote {\"to\": \"quarantine\" | \"test_portfolio\" | \"discovery\"}"

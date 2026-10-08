@@ -247,6 +247,49 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
     }
   end
 
+  @doc """
+  One row of `Sim.expectancy_by_regime/1`, shared by
+  `GET /api/v1/versions[/:id]/expectancy_by_regime` and the
+  `expectancy_by_regime` MCP tool so their field names never drift.
+  Decimals become JSON numbers, as in `candidate_metrics/1`. The
+  `basis`/`churn`/`r_denominator` labels match that payload's, and
+  `lcb_level` says the bound is one-sided 90%, not the metrics' lcb95.
+  """
+  def expectancy_by_regime(row) do
+    %{
+      "strategy_version_id" => row.strategy_version_id,
+      "strategy_name" => row.strategy_name,
+      "lifecycle_stage" => row.lifecycle_stage,
+      "target_pool_name" => row.target_pool_name,
+      "basis" => "net",
+      "churn" => "excluded",
+      "r_denominator" => "premium_at_risk",
+      "lcb_level" => "one_sided_90",
+      "buckets" =>
+        Enum.map(row.buckets, &Map.put(regime_stats(&1), "regime_label", &1.regime_label)),
+      "total" => regime_stats(row.total)
+    }
+  end
+
+  defp regime_stats(stats) do
+    stats
+    |> regime_stat_fields()
+    |> Map.put("all_trades", regime_stat_fields(stats.all_trades))
+  end
+
+  defp regime_stat_fields(stats) do
+    %{
+      "n" => stats.n,
+      "n_sessions" => stats.n_sessions,
+      "total_r" => decimal_or_float(stats.total_r),
+      "expectancy_r" => decimal_or_float(stats.expectancy_r),
+      "sd_r" => decimal_or_float(stats.sd_r),
+      "lcb90" => decimal_or_float(stats.lcb90),
+      "realized_pnl_net" => decimal_or_float(stats.realized_pnl_net),
+      "win_rate" => stats.win_rate
+    }
+  end
+
   defp str_datetime(nil), do: nil
   defp str_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 

@@ -1107,13 +1107,19 @@ defmodule TradingOptionsSim.Sim do
   Returns `{runs, total_count}` — `total_count` is the count of every
   matching row (ignoring `limit`/`offset`), so a caller can compute
   whether more pages remain without a second round trip.
+
+  `strategy_version_id:` (optional) limits the page to one version's
+  runs; a value that isn't a UUID matches nothing.
   """
   @spec list_sim_runs_page(String.t() | nil, keyword()) :: {[SimRun.t()], non_neg_integer()}
   def list_sim_runs_page(status \\ nil, opts \\ []) do
     limit = opts |> Keyword.get(:limit, 20) |> clamp_page_size()
     offset = max(Keyword.get(opts, :offset, 0), 0)
 
-    base_query = SimRun |> maybe_filter_status(status)
+    base_query =
+      SimRun
+      |> maybe_filter_status(status)
+      |> maybe_filter_version(Keyword.get(opts, :strategy_version_id))
 
     total_count = base_query |> select([r], count(r.id)) |> Repo.one()
 
@@ -1221,6 +1227,15 @@ defmodule TradingOptionsSim.Sim do
 
   defp maybe_filter_status(query, nil), do: query
   defp maybe_filter_status(query, status), do: where(query, [r], r.status == ^status)
+
+  defp maybe_filter_version(query, nil), do: query
+
+  defp maybe_filter_version(query, version_id) do
+    case Ecto.UUID.cast(version_id) do
+      {:ok, uuid} -> where(query, [r], r.strategy_version_id == ^uuid)
+      :error -> where(query, false)
+    end
+  end
 
   @max_page_size 100
 
@@ -1414,6 +1429,33 @@ defmodule TradingOptionsSim.Sim do
 
   @candidate_lifecycle_stages ~w(discovery quarantine)
 
+  # The ONE definition of a run's R in this app: realized_pnl_net over
+  # premium at risk (compute_risk_at_entry/3). Every R aggregate --
+  # expectancy_r, scored_total_r, daily R, the regime buckets -- reads it
+  # from here, so they cannot drift onto different formulas.
+  defmacrop r_multiple(r) do
+    quote do
+      fragment("? / ?", unquote(r).realized_pnl_net, unquote(r).risk_at_entry)
+    end
+  end
+
+  # Closed runs that HAVE an R: a net P&L, a non-zero risk_at_entry (a
+  # run closed via close_run_without_entry/2 has neither) and both ends
+  # of the trade. Churn and exclusion are NOT filtered here --
+  # expectancy_by_regime/1's all_trades view needs them.
+  defp with_r(query) do
+    query
+    |> where([r], r.status == "closed")
+    |> where([r], not is_nil(r.realized_pnl_net))
+    |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
+    |> where([r], not is_nil(r.entry_at) and not is_nil(r.exit_at))
+  end
+
+  # The scored population: with_r/1 minus churn and excluded runs. This
+  # is what n_closes / scored_runs / scored_total_r / expectancy_r count.
+  defp scored(query),
+    do: query |> with_r() |> where([r], not r.is_churn and is_nil(r.excluded_reason))
+
   @doc """
   One metrics row per non-deleted `discovery`/`quarantine`-stage
   `StrategyVersion` — everything `CandidateGates.evaluate/2` and
@@ -1573,6 +1615,201 @@ defmodule TradingOptionsSim.Sim do
     end)
   end
 
+  @regime_stages ~w(discovery quarantine test_portfolio retired)
+
+  @doc """
+  Per-version expectancy in R, bucketed by the regime label stamped at
+  entry (`context["regime_label"]`, e.g. `"calm|up"`). Mirrors
+  trading_system's `Trading.expectancy_by_regime/1` so both apps report
+  regime buckets the same way.
+
+  Options: `version_id:` (one version) or `stage:` (one of
+  #{Enum.join(@regime_stages, ", ")}, used only without `version_id`).
+  With neither, every non-deleted version with at least one closed run.
+  Returns `{:ok, rows}`, `{:error, :not_found}` or
+  `{:error, :invalid_stage}`.
+
+  Each row has `buckets` (sorted by `n`, largest first) and a `total`.
+  A run with no label goes in `"uncategorized"`, never dropped. Each
+  bucket's top-level stats use the SAME scored population and R as
+  `full_universe_version_metrics/0` (`scored/1`, `r_multiple/1`: net of
+  measured costs, premium-at-risk denominator, churn and excluded runs
+  out), so a version's buckets sum to its `scored_runs` and
+  `scored_total_r`, and `total` equals them. `all_trades` nests the same
+  stats over every closed run with an R, churn and excluded included.
+
+  Stats: `n` (never nil), `n_sessions` (distinct UTC exit dates, the
+  metrics' session grain), `total_r`, `expectancy_r`, `sd_r`, `lcb90`,
+  `realized_pnl_net`, `win_rate` (net P&L > 0). `expectancy_r`, `sd_r`
+  and `lcb90` are nil below n = 2. `lcb90` is a ONE-SIDED 90% bound
+  (`TradingCore.Stats.lower_bound/4` at `:p90`, z = 1.2816), so it is
+  not comparable with the metrics' `lcb95`.
+
+  Grouped in SQL. No index: the all-versions query is one sequential
+  scan of sim_runs (~157 ms over 26k runs on 2026-10-07), and the
+  one-version query uses the existing strategy_version_id index.
+  """
+  @spec expectancy_by_regime(keyword()) ::
+          {:ok, [map()]} | {:error, :not_found | :invalid_stage}
+  def expectancy_by_regime(opts \\ []) do
+    with {:ok, versions} <- regime_versions(opts) do
+      ids = Enum.map(versions, & &1.id)
+
+      scored_buckets = regime_stats(ids, :scored, :regime)
+      all_buckets = regime_stats(ids, :all, :regime)
+      scored_totals = regime_stats(ids, :scored, :total)
+      all_totals = regime_stats(ids, :all, :total)
+
+      rows =
+        Enum.map(versions, fn v ->
+          labels =
+            Map.get(all_buckets, v.id, %{})
+            |> Map.keys()
+            |> Enum.concat(Map.get(scored_buckets, v.id, %{}) |> Map.keys())
+            |> Enum.uniq()
+
+          buckets =
+            labels
+            |> Enum.map(fn label ->
+              regime_bucket(
+                get_in(scored_buckets, [v.id, label]),
+                get_in(all_buckets, [v.id, label])
+              )
+              |> Map.put(:regime_label, label)
+            end)
+            |> Enum.sort_by(&{-&1.n, &1.regime_label})
+
+          %{
+            strategy_version_id: v.id,
+            strategy_name: v.strategy.name,
+            lifecycle_stage: v.lifecycle_stage,
+            target_pool_name: v.target_pool && v.target_pool.name,
+            buckets: buckets,
+            total:
+              regime_bucket(
+                get_in(scored_totals, [v.id, :total]),
+                get_in(all_totals, [v.id, :total])
+              )
+          }
+        end)
+
+      {:ok, rows}
+    end
+  end
+
+  defp regime_versions(opts) do
+    base =
+      StrategyVersion |> where([v], is_nil(v.deleted_at)) |> preload([:strategy, :target_pool])
+
+    case {Keyword.get(opts, :version_id), Keyword.get(opts, :stage)} do
+      {id, _stage} when is_binary(id) ->
+        with {:ok, uuid} <- Ecto.UUID.cast(id),
+             %StrategyVersion{} = v <- base |> where([v], v.id == ^uuid) |> Repo.one() do
+          {:ok, [v]}
+        else
+          _ -> {:error, :not_found}
+        end
+
+      {nil, stage} when is_nil(stage) or stage in @regime_stages ->
+        closed = from(r in SimRun, where: r.status == "closed", select: r.strategy_version_id)
+
+        base
+        |> where([v], v.id in subquery(closed))
+        |> then(fn q -> if stage, do: where(q, [v], v.lifecycle_stage == ^stage), else: q end)
+        |> order_by([v], asc: v.inserted_at)
+        |> Repo.all()
+        |> then(&{:ok, &1})
+
+      _ ->
+        {:error, :invalid_stage}
+    end
+  end
+
+  # %{version_id => %{regime_label | :total => stats}} for one population
+  # (:scored | :all) and grain (:regime | :total), in one grouped query.
+  defp regime_stats([], _population, _grain), do: %{}
+
+  defp regime_stats(version_ids, population, grain) do
+    query =
+      SimRun
+      |> where([r], r.strategy_version_id in ^version_ids)
+      |> then(if population == :scored, do: &scored/1, else: &with_r/1)
+
+    query =
+      case grain do
+        :regime ->
+          query
+          |> group_by([r], [
+            r.strategy_version_id,
+            fragment("COALESCE(?->>'regime_label', 'uncategorized')", r.context)
+          ])
+          |> select([r], %{
+            strategy_version_id: r.strategy_version_id,
+            key: fragment("COALESCE(?->>'regime_label', 'uncategorized')", r.context)
+          })
+
+        :total ->
+          query
+          |> group_by([r], r.strategy_version_id)
+          |> select([r], %{strategy_version_id: r.strategy_version_id, key: "total"})
+      end
+
+    query
+    |> select_merge([r], %{
+      n: count(r.id),
+      n_sessions: fragment("COUNT(DISTINCT (? AT TIME ZONE 'UTC')::date)", r.exit_at),
+      total_r: sum(r_multiple(r)),
+      mean: avg(r_multiple(r)),
+      stddev: fragment("stddev_samp(?)", r_multiple(r)),
+      realized_pnl_net: sum(r.realized_pnl_net),
+      wins: filter(count(r.id), r.realized_pnl_net > 0)
+    })
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn row, acc ->
+      key = if grain == :total, do: :total, else: row.key
+      put_in(acc, [Access.key(row.strategy_version_id, %{}), key], regime_bucket_stats(row))
+    end)
+  end
+
+  defp regime_bucket_stats(row) do
+    {mean, sd, lcb} =
+      if row.n >= 2 do
+        sd = row.stddev || Decimal.new(0)
+        lcb = TradingCore.Stats.lower_bound(row.mean, sd, row.n, :p90)
+        {row.mean, row.stddev, lcb}
+      else
+        {nil, nil, nil}
+      end
+
+    %{
+      n: row.n,
+      n_sessions: row.n_sessions,
+      total_r: row.total_r,
+      expectancy_r: mean,
+      sd_r: sd,
+      lcb90: lcb,
+      realized_pnl_net: row.realized_pnl_net,
+      win_rate: row.wins / row.n
+    }
+  end
+
+  @empty_regime_stats %{
+    n: 0,
+    n_sessions: 0,
+    total_r: nil,
+    expectancy_r: nil,
+    sd_r: nil,
+    lcb90: nil,
+    realized_pnl_net: nil,
+    win_rate: nil
+  }
+
+  # A label can hold only churned/excluded runs, so the scored side may
+  # be empty while all_trades isn't.
+  defp regime_bucket(scored, all) do
+    Map.put(scored || @empty_regime_stats, :all_trades, all || @empty_regime_stats)
+  end
+
   # n/expectancy_r/lcb95/ucb95/realized_pnl/capital_hours/total_net_r/
   # final_score/avg_hold_seconds, grouped by strategy_version_id —
   # excludes is_churn runs and any run missing risk_at_entry (a run
@@ -1612,19 +1849,15 @@ defmodule TradingOptionsSim.Sim do
   defp expectancy_r_stats_by_version(version_ids) do
     SimRun
     |> where([r], r.strategy_version_id in ^version_ids)
-    |> where([r], r.status == "closed")
-    |> where([r], not r.is_churn and is_nil(r.excluded_reason))
-    |> where([r], not is_nil(r.realized_pnl_net))
-    |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
-    |> where([r], not is_nil(r.entry_at) and not is_nil(r.exit_at))
+    |> scored()
     |> group_by([r], r.strategy_version_id)
     |> select([r], %{
       strategy_version_id: r.strategy_version_id,
       n: count(r.id),
-      mean: avg(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
-      stddev: fragment("stddev_samp(? / ?)", r.realized_pnl_net, r.risk_at_entry),
+      mean: avg(r_multiple(r)),
+      stddev: fragment("stddev_samp(?)", r_multiple(r)),
       realized_pnl: sum(r.realized_pnl_net),
-      scored_total_r: sum(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry)),
+      scored_total_r: sum(r_multiple(r)),
       capital_hours:
         sum(
           fragment(
@@ -1699,11 +1932,7 @@ defmodule TradingOptionsSim.Sim do
     daily =
       SimRun
       |> where([r], r.strategy_version_id in ^version_ids)
-      |> where([r], r.status == "closed")
-      |> where([r], not r.is_churn and is_nil(r.excluded_reason))
-      |> where([r], not is_nil(r.realized_pnl_net))
-      |> where([r], not is_nil(r.risk_at_entry) and r.risk_at_entry != 0)
-      |> where([r], not is_nil(r.entry_at) and not is_nil(r.exit_at))
+      |> scored()
       |> group_by([r], [
         r.strategy_version_id,
         fragment("(? AT TIME ZONE 'UTC')::date", r.exit_at)
@@ -1711,7 +1940,7 @@ defmodule TradingOptionsSim.Sim do
       |> select([r], %{
         strategy_version_id: r.strategy_version_id,
         d: fragment("(? AT TIME ZONE 'UTC')::date", r.exit_at),
-        daily_r: sum(fragment("? / ?", r.realized_pnl_net, r.risk_at_entry))
+        daily_r: sum(r_multiple(r))
       })
 
     from(x in subquery(daily),
