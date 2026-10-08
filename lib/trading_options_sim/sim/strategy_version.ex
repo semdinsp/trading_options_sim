@@ -41,7 +41,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
 
   @directions ~w(long short)
   @lifecycle_stages ~w(discovery quarantine test_portfolio retired)
-  @retired_reasons ~w(manual failed_quarantine abandoned)
+  @retired_reasons ~w(manual failed_quarantine abandoned lifecycle_review)
   @sources ~w(native promoted_from_trading_system)
 
   # Ported from trading_live's own LiveStrategySettings.after_hours_policy

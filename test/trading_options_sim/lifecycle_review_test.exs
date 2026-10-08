@@ -83,18 +83,24 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
   defp action_for(actions, version), do: Enum.find(actions, &(&1.version_id == version.id))
   defp active?(version), do: is_nil(Sim.get_strategy_version!(version.id).deactivated_at)
 
-  test "a loser with no profitable regime is deactivated, not forked" do
+  defp retired_by_review?(version) do
+    v = Sim.get_strategy_version!(version.id)
+    v.lifecycle_stage == "retired" and v.retired_reason == "lifecycle_review"
+  end
+
+  test "a loser with no profitable regime is retired (monitors stopped), not forked" do
     v = version_fixture("LCR Loser")
     add_trades(v, 30, "-5", {-1, -1}, 3)
 
     actions = LifecycleReview.run(mode: :apply)
 
-    assert action_for(actions, v).action == :deactivate
+    assert action_for(actions, v).action == :retire
     refute active?(v)
+    assert retired_by_review?(v)
     refute Repo.exists?(from s in Sim.Strategy, where: like(s.name, "LCR Loser [Regime:%"))
   end
 
-  test "a loser profitable in one regime is forked with that regime gate; the parent is deactivated" do
+  test "a loser profitable in one regime is forked with that regime gate; the parent is retired" do
     v = version_fixture("LCR Rescue")
     add_trades(v, 15, "10", {-1, -1}, 2)
     add_trades(v, 30, "-10", {1, 0}, 3)
@@ -102,9 +108,10 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
     actions = LifecycleReview.run(mode: :apply)
     a = action_for(actions, v)
 
-    assert a.action == :fork_and_deactivate
+    assert a.action == :fork_and_retire
     assert {a.cell.trend, a.cell.vol, a.cell.n} == {-1, -1, 15}
     refute active?(v)
+    assert retired_by_review?(v)
 
     [fork] =
       Repo.all(
@@ -130,8 +137,9 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
 
     actions = LifecycleReview.run(mode: :dry_run)
 
-    assert %{action: :fork_and_deactivate, applied: false} = action_for(actions, v)
+    assert %{action: :fork_and_retire, applied: false} = action_for(actions, v)
     assert active?(v)
+    assert Sim.get_strategy_version!(v.id).lifecycle_stage == "discovery"
     refute Repo.exists?(from s in Sim.Strategy, where: like(s.name, "LCR Dry [Regime:%"))
   end
 
@@ -140,7 +148,7 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
     add_trades(v, 15, "10", {-1, -1}, 1)
     add_trades(v, 30, "-10", {1, 0}, 3, 2)
 
-    assert action_for(LifecycleReview.run(mode: :dry_run), v).action == :deactivate
+    assert action_for(LifecycleReview.run(mode: :dry_run), v).action == :retire
   end
 
   # Healthy input must not fire.
@@ -169,10 +177,11 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
     for v <- [winner, young, control, linked, baseline] do
       assert action_for(actions, v) == nil
       assert active?(v)
+      refute Sim.get_strategy_version!(v.id).lifecycle_stage == "retired"
     end
   end
 
-  test "a failing quarantine version with a profitable regime is forked instead of retired" do
+  test "a failing quarantine version with a profitable regime is forked, then retired by the review" do
     v = version_fixture("LCR Quarantine")
     {:ok, v} = Sim.promote_strategy_version(v, "quarantine")
     {:ok, v} = v |> Ecto.Changeset.change(quarantine_trading_days: 20) |> Repo.update()
@@ -182,8 +191,14 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
     {:ok, retired} = Sim.auto_retire_failing_quarantine_versions()
     refute Enum.any?(retired, &(&1.id == v.id))
 
-    assert action_for(LifecycleReview.run(mode: :apply), v).action == :fork_and_deactivate
-    assert Sim.get_strategy_version!(v.id).lifecycle_stage == "quarantine"
+    assert action_for(LifecycleReview.run(mode: :apply), v).action == :fork_and_retire
+    # Retired by the review (its regime edge lives on in the fork), not by
+    # the quarantine job's failed_quarantine path, which skips it.
+    assert retired_by_review?(v)
     refute active?(v)
+
+    assert Repo.exists?(
+             from s in Sim.Strategy, where: s.name == "LCR Quarantine [Regime: down/calm]"
+           )
   end
 end

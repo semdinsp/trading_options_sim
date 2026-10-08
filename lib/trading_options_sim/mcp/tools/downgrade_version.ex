@@ -20,7 +20,8 @@ defmodule TradingOptionsSim.MCP.Tools.DowngradeVersion do
 
     field :reason, :string,
       required: false,
-      description: "Retired reason (manual | failed_quarantine | abandoned), default manual"
+      description:
+        "Retired reason (manual | failed_quarantine | abandoned | lifecycle_review), default manual"
   end
 
   @impl true

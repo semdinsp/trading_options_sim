@@ -12,16 +12,21 @@ defmodule TradingOptionsSim.LifecycleReview do
   Before switching a loser off, its trades are split by the trend x vol
   regime recorded at entry (`Sim.best_regime_cell/1`). If one regime
   cell has been profitable (>= 15 trades, >= 2 sessions, positive net
-  P&L), the version is NOT simply retired: it is FORKED with an entry
-  gate on that regime (`regime_trend_ordinal == t AND regime_vol_ordinal
-  == v`), the fork is activated in discovery, and the losing parent is
-  deactivated. Otherwise the parent is just deactivated (a quarantine
-  loser with no profitable regime is retired by `Sim`'s job 3 instead).
+  P&L), its edge is kept: it is FORKED with an entry gate on that regime
+  (`regime_trend_ordinal == t AND regime_vol_ordinal == v`) and the fork
+  is activated in discovery. The losing parent is then RETIRED (monitors
+  stopped, `lifecycle_stage: "retired"`, `retired_reason:
+  "lifecycle_review"`), with or without a fork. A quarantine loser with no
+  profitable regime is retired by `Sim`'s job 3 instead.
+
+  Retired rather than deactivated since 2026-10-08 (user decision): a
+  deactivated loser stayed on /candidates and in the leaderboards though
+  nobody would revisit it. Retirement keeps every run and is reversible
+  (unretire, then activate).
 
   Never touched: versions linked to trading_live or in `test_portfolio`,
   always-long controls (the baselines), and the `Noise-Baseline` and
-  `od:slope-hold` sets the user asked to keep. Deactivation is
-  reversible with Activate; nothing is deleted.
+  `od:slope-hold` sets the user asked to keep. Nothing is deleted.
 
   Mode: `:dry_run` (report only) or `:apply`, from
   `config :trading_options_sim, :lifecycle_review_mode`. Defaults to
@@ -48,7 +53,7 @@ defmodule TradingOptionsSim.LifecycleReview do
   @doc """
   Reviews every loser and returns the planned (or taken) actions:
   `[%{version_id, name, stage, action, cell, stats}]`, where `action` is
-  `:fork_and_deactivate`, `:deactivate`, or (dry run) the same atom
+  `:fork_and_retire`, `:retire`, or (dry run) the same atom
   marked as not applied. `opts[:mode]` overrides the configured mode.
   """
   @spec run(keyword()) :: [map()]
@@ -65,8 +70,8 @@ defmodule TradingOptionsSim.LifecycleReview do
     if mode == :apply, do: Enum.each(actions, &apply_action/1)
 
     Logger.info(
-      "LifecycleReview (#{mode}): #{Enum.count(actions, &(&1.action == :fork_and_deactivate))} regime forks, " <>
-        "#{Enum.count(actions, &(&1.action == :deactivate))} deactivations"
+      "LifecycleReview (#{mode}): #{Enum.count(actions, &(&1.action == :fork_and_retire))} regime forks, " <>
+        "#{length(actions)} retirements"
     )
 
     Enum.map(actions, &Map.put(&1, :applied, mode == :apply))
@@ -123,7 +128,7 @@ defmodule TradingOptionsSim.LifecycleReview do
     cell = Sim.best_regime_cell(version.id)
 
     action =
-      if cell != nil and not regime_gated?(version), do: :fork_and_deactivate, else: :deactivate
+      if cell != nil and not regime_gated?(version), do: :fork_and_retire, else: :retire
 
     %{
       version_id: version.id,
@@ -136,20 +141,32 @@ defmodule TradingOptionsSim.LifecycleReview do
     }
   end
 
-  defp apply_action(%{action: :fork_and_deactivate} = a) do
+  defp apply_action(%{action: :fork_and_retire} = a) do
     fork_with_gate(a.version, a.name, a.cell, a.stats)
-    deactivate(a.version)
+    retire(a.version)
   end
 
-  defp apply_action(%{action: :deactivate} = a), do: deactivate(a.version)
+  defp apply_action(%{action: :retire} = a), do: retire(a.version)
 
-  defp deactivate(version) do
-    SimActivator.deactivate(Sim.get_strategy_version!(version.id))
+  # Stop the monitors first (flattening any open position), then retire:
+  # downgrade_strategy_version/3 only changes the stage.
+  defp retire(version) do
+    {:ok, _count} = SimActivator.deactivate(Sim.get_strategy_version!(version.id))
+
+    case Sim.downgrade_strategy_version(
+           Sim.get_strategy_version!(version.id),
+           "retired",
+           "lifecycle_review"
+         ) do
+      {:ok, _} ->
+        :ok
+
+      error ->
+        Logger.error("LifecycleReview: retire #{version.id} failed: #{inspect(error)}")
+    end
   rescue
     error ->
-      Logger.error(
-        "LifecycleReview: deactivate #{version.id} failed: #{Exception.message(error)}"
-      )
+      Logger.error("LifecycleReview: retire #{version.id} failed: #{Exception.message(error)}")
   end
 
   defp fork_with_gate(parent, parent_name, cell, stats) do
@@ -173,7 +190,7 @@ defmodule TradingOptionsSim.LifecycleReview do
           "The parent was losing overall (#{describe(stats)}) but profitable in #{label} " <>
           "(#{cell.n} trades over #{cell.sessions} sessions, net $#{Decimal.round(cell.net, 2)}, " <>
           "$#{Decimal.round(cell.per_trade, 2)}/trade), so this fork trades only when regime_trend_ordinal == #{cell.trend} " <>
-          "and regime_vol_ordinal == #{cell.vol}. The parent was deactivated. In-sample selection on a regime split: " <>
+          "and regime_vol_ordinal == #{cell.vol}. The parent was retired. In-sample selection on a regime split: " <>
           "treat as a hypothesis until it holds up out of sample."
 
       with {:ok, s} <- Sim.create_strategy(%{name: name, notes: notes}),
