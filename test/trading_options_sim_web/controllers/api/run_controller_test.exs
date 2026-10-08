@@ -67,6 +67,22 @@ defmodule TradingOptionsSimWeb.Api.RunControllerTest do
       assert body["total_count"] == 0
     end
 
+    test "filters by strategy_version_id", %{conn: conn} do
+      version = version_fixture()
+      other = version_fixture()
+      for _ <- 1..2, do: run_fixture(version)
+      run_fixture(other)
+
+      body =
+        conn
+        |> token_conn(["runs:read"])
+        |> get(~p"/api/v1/runs?strategy_version_id=#{version.id}")
+        |> json_response(200)
+
+      assert body["total_count"] == 2
+      assert Enum.all?(body["sim_runs"], &(&1["strategy_version_id"] == version.id))
+    end
+
     test "includes tags in each serialized run", %{conn: conn} do
       version = version_fixture()
       run = run_fixture(version)

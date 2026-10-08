@@ -22,7 +22,8 @@ defmodule TradingOptionsSim.MCP.Server do
   `GET /api/v1/runs` endpoint's own scope): `list_sim_runs`.
 
   Read-only, requiring `"strategies:read"` (matching the REST
-  `GET /api/v1/versions/metrics` endpoint's own scope): `list_candidate_metrics`.
+  `GET /api/v1/versions/metrics` endpoint's own scope): `list_candidate_metrics`,
+  `expectancy_by_regime`.
 
   Write tools, each requiring `"mcp:write"`: `create_strategy`,
   `create_strategy_version`, `promote_version`, `downgrade_version`,
@@ -57,6 +58,7 @@ defmodule TradingOptionsSim.MCP.Server do
   component(TradingOptionsSim.MCP.Tools.ListStrategyVersions)
   component(TradingOptionsSim.MCP.Tools.ListSimRuns)
   component(TradingOptionsSim.MCP.Tools.ListCandidateMetrics)
+  component(TradingOptionsSim.MCP.Tools.ExpectancyByRegime)
   component(TradingOptionsSim.MCP.Tools.ListTargetPools)
   component(TradingOptionsSim.MCP.Tools.GetTargetPool)
   component(TradingOptionsSim.MCP.Tools.ListTags)

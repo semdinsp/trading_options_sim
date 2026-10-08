@@ -1,7 +1,7 @@
 defmodule TradingOptionsSim.MCP.Tools.ListSimRuns do
   @moduledoc """
   Lists `SimRun`s across every strategy version, optionally filtered to
-  one `status` and paginated — backed by
+  one `status` and/or one `strategy_version_id`, and paginated — backed by
   `TradingOptionsSim.Sim.list_sim_runs_page/2`. Read-only, requires
   `"runs:read"` scope (matching the REST `GET /api/v1/runs` endpoint's
   own scope requirement).
@@ -20,6 +20,10 @@ defmodule TradingOptionsSim.MCP.Tools.ListSimRuns do
       required: false,
       description: "Filter to \"open\" or \"closed\" (omit for every run)"
 
+    field :strategy_version_id, :string,
+      required: false,
+      description: "Only this StrategyVersion's runs (UUID; omit for every version)"
+
     field :limit, :integer,
       required: false,
       description: "Max runs to return (default #{@default_limit}, clamped to 100)"
@@ -34,8 +38,9 @@ defmodule TradingOptionsSim.MCP.Tools.ListSimRuns do
     status = Map.get(params, :status)
     limit = Map.get(params, :limit, @default_limit)
     offset = Map.get(params, :offset, 0)
+    version_id = Map.get(params, :strategy_version_id)
 
-    case CallGuard.run(fn -> list(status, limit, offset) end) do
+    case CallGuard.run(fn -> list(status, version_id, limit, offset) end) do
       {:error, :timeout} ->
         {:error, Anubis.MCP.Error.execution("timed out listing sim runs"), frame}
 
@@ -44,8 +49,13 @@ defmodule TradingOptionsSim.MCP.Tools.ListSimRuns do
     end
   end
 
-  defp list(status, limit, offset) do
-    {runs, total_count} = Sim.list_sim_runs_page(status, limit: limit, offset: offset)
+  defp list(status, version_id, limit, offset) do
+    {runs, total_count} =
+      Sim.list_sim_runs_page(status,
+        limit: limit,
+        offset: offset,
+        strategy_version_id: version_id
+      )
 
     %{
       runs: Enum.map(runs, &summarize/1),

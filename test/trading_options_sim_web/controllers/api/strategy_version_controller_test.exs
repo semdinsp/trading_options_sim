@@ -741,4 +741,118 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert String.length(body["strategy_version"]["notes"]) == 4_000
     end
   end
+
+  describe "GET /api/v1/versions[/:id]/expectancy_by_regime" do
+    defp regime_run(version, pnl, regime) do
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: "RGM",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      exit_at = DateTime.utc_now()
+      entry_at = DateTime.add(exit_at, -600, :second)
+      price = Decimal.new("5.00")
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: price, filled_at: entry_at},
+          %{
+            entry_at: entry_at,
+            entry_price: price,
+            risk_at_entry: Sim.compute_risk_at_entry(price, 100, 1)
+          }
+        )
+
+      {:ok, {_fill, run}} =
+        Sim.record_exit_fill(
+          run,
+          %{action: "sell", quantity: 1, fill_price: price, filled_at: exit_at},
+          %{
+            exit_at: exit_at,
+            exit_price: price,
+            exit_reason: "rule_exit",
+            realized_pnl: Decimal.new(pnl),
+            realized_pnl_net: Decimal.new(pnl)
+          }
+        )
+
+      run |> Ecto.Changeset.change(context: %{"regime_label" => regime}) |> Repo.update!()
+    end
+
+    test "returns one version's buckets, total and all_trades as JSON numbers", %{conn: conn} do
+      version = version_fixture()
+      regime_run(version, "100", "calm|up")
+      regime_run(version, "-50", "calm|up")
+
+      conn =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/#{version.id}/expectancy_by_regime")
+
+      assert %{"expectancy_by_regime" => [row]} = json_response(conn, 200)
+      assert row["strategy_version_id"] == version.id
+      assert row["lcb_level"] == "one_sided_90"
+      assert row["r_denominator"] == "premium_at_risk"
+
+      assert [b] = row["buckets"]
+      assert b["regime_label"] == "calm|up"
+      assert b["n"] == 2
+      assert b["n_sessions"] == 1
+      assert_in_delta b["total_r"], 0.1, 1.0e-9
+      assert_in_delta b["expectancy_r"], 0.05, 1.0e-9
+      assert is_float(b["lcb90"]) and is_float(b["sd_r"])
+      assert b["win_rate"] == 0.5
+      assert b["all_trades"]["n"] == 2
+      assert row["total"]["n"] == 2
+    end
+
+    test "the no-id variant filters by stage", %{conn: conn} do
+      version = version_fixture()
+      regime_run(version, "10", "calm|up")
+
+      body =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/expectancy_by_regime?stage=discovery")
+        |> json_response(200)
+
+      assert Enum.any?(body["expectancy_by_regime"], &(&1["strategy_version_id"] == version.id))
+
+      body =
+        build_conn()
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/expectancy_by_regime?stage=quarantine")
+        |> json_response(200)
+
+      refute Enum.any?(body["expectancy_by_regime"], &(&1["strategy_version_id"] == version.id))
+    end
+
+    test "404s for an unknown id and 422s for an unknown stage", %{conn: conn} do
+      authed = token_conn(conn, ["strategies:read"])
+
+      assert authed
+             |> get(~p"/api/v1/versions/#{Ecto.UUID.generate()}/expectancy_by_regime")
+             |> json_response(404)
+
+      assert build_conn()
+             |> token_conn(["strategies:read"])
+             |> get(~p"/api/v1/versions/expectancy_by_regime?stage=live")
+             |> json_response(422)
+    end
+
+    test "403s without strategies:read scope", %{conn: conn} do
+      conn =
+        conn
+        |> token_conn(["runs:read"])
+        |> get(~p"/api/v1/versions/expectancy_by_regime")
+
+      assert json_response(conn, 403)
+    end
+  end
 end

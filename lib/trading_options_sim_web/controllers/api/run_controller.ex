@@ -9,7 +9,7 @@ defmodule TradingOptionsSimWeb.Api.RunController do
   plug TradingOptionsSimWeb.ApiAuthPlug, [scope: "runs:read"] when action in [:index, :show]
 
   @doc """
-  GET /api/v1/runs?status=open&limit=20&offset=0
+  GET /api/v1/runs?status=open&strategy_version_id=UUID&limit=20&offset=0
 
   `status` (optional) filters to `"open"` or `"closed"` — omit for
   every run, matching `RunsLive`'s own "All" filter and
@@ -20,7 +20,12 @@ defmodule TradingOptionsSimWeb.Api.RunController do
   """
   def index(conn, params) do
     opts = Serializer.pagination_opts(params)
-    {runs, total_count} = Sim.list_sim_runs_page(params["status"], opts)
+
+    {runs, total_count} =
+      Sim.list_sim_runs_page(
+        params["status"],
+        Keyword.put(opts, :strategy_version_id, params["strategy_version_id"])
+      )
 
     json(conn, %{
       "sim_runs" => Enum.map(runs, &Serializer.sim_run/1),
