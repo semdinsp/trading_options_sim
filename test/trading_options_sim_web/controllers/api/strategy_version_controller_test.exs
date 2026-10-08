@@ -855,4 +855,79 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert json_response(conn, 403)
     end
   end
+
+  describe "POST /api/v1/versions/:id/fork" do
+    defp fork_source do
+      version_fixture(%{
+        rules: %{
+          "entry" => %{"signal" => "run_poly_vwap_dev_bps", "op" => "gt", "value" => 5},
+          "exit" => %{"signal" => "run_poly_vwap_dev_bps", "op" => "lt", "value" => 0}
+        },
+        params: %{
+          "risk_controls" => %{
+            "method" => "percent_of_entry",
+            "stop_loss_percent" => 10,
+            "take_profit_percent" => 20
+          }
+        }
+      })
+    end
+
+    @gate %{"signal" => "regime_trend_ordinal", "op" => "lt", "value" => 0.5}
+
+    test "201 with the new ids and the full resolved config, params included", %{conn: conn} do
+      source = fork_source()
+
+      body =
+        conn
+        |> token_conn(["strategies:write"])
+        |> post(~p"/api/v1/versions/#{source.id}/fork", %{
+          "name" => "API fork",
+          "entry_gate" => @gate,
+          "tags" => ["api-fork"]
+        })
+        |> json_response(201)
+
+      assert body["version_id"] != source.id
+      assert body["parent_version_id"] == source.id
+      assert body["activation"] == nil
+
+      v = body["strategy_version"]
+      assert v["params"]["risk_controls"]["stop_loss_percent"] == 10
+      assert v["rules"]["entry"] == %{"all" => [source.rules["entry"], @gate]}
+      assert v["rules"]["exit"] == source.rules["exit"]
+      assert v["lifecycle_stage"] == "discovery"
+      assert [%{"name" => "api-fork"}] = v["tags"]
+    end
+
+    test "422 for entry_gate with rules, 404 for an unknown source", %{conn: conn} do
+      source = fork_source()
+
+      body =
+        conn
+        |> token_conn(["strategies:write"])
+        |> post(~p"/api/v1/versions/#{source.id}/fork", %{
+          "name" => "both",
+          "entry_gate" => @gate,
+          "rules" => %{"entry" => @gate}
+        })
+        |> json_response(422)
+
+      assert body["error"] =~ "not both"
+
+      assert build_conn()
+             |> token_conn(["strategies:write"])
+             |> post(~p"/api/v1/versions/#{Ecto.UUID.generate()}/fork", %{"name" => "x"})
+             |> json_response(404)
+    end
+
+    test "403s without strategies:write scope", %{conn: conn} do
+      source = fork_source()
+
+      assert conn
+             |> token_conn(["strategies:read"])
+             |> post(~p"/api/v1/versions/#{source.id}/fork", %{"name" => "x"})
+             |> json_response(403)
+    end
+  end
 end

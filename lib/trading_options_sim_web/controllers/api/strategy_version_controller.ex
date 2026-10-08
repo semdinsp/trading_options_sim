@@ -14,6 +14,7 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "strategies:write"]
        when action in [
+              :fork,
               :promote,
               :downgrade,
               :activate,
@@ -119,6 +120,47 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
 
       {:error, :invalid_stage} ->
         conn |> put_status(:unprocessable_entity) |> json(%{"error" => "invalid_stage"})
+    end
+  end
+
+  @doc """
+  POST /api/v1/versions/:id/fork
+  {"name": "...", "entry_gate": {...} | "rules": {...}, "notes": "...", "tags": [...], "activate": false}
+
+  Forks the version into a new Strategy at version 1, copying everything
+  not named here (params including risk_controls, leg config, pool,
+  overnight_hold, trading_hours_policy ...). Same path as the
+  `fork_version` MCP tool (`VersionFork.fork/2`, serialized by
+  `Serializer.version_fork/1`). 201 on success; 404 unknown source; 422
+  for anything invalid (missing name, entry_gate with rules, invalid
+  rules, unknown signal names); 503 if trading_signal can't be asked
+  to verify a signal name.
+  """
+  def fork(conn, %{"id" => id} = params) do
+    opts = %{
+      name: params["name"],
+      entry_gate: params["entry_gate"],
+      rules: params["rules"],
+      notes: params["notes"],
+      tags: params["tags"],
+      activate: params["activate"] in [true, "true"]
+    }
+
+    case TradingOptionsSim.VersionFork.fork(id, opts) do
+      {:ok, result} ->
+        conn |> put_status(:created) |> json(Serializer.version_fork(result))
+
+      {:error, reason} ->
+        status =
+          case reason do
+            :not_found -> :not_found
+            {:signal_check_failed, _names, _reason} -> :service_unavailable
+            _ -> :unprocessable_entity
+          end
+
+        conn
+        |> put_status(status)
+        |> json(%{"error" => TradingOptionsSim.VersionFork.describe_error(reason)})
     end
   end
 

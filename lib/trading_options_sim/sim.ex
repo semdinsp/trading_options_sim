@@ -83,6 +83,62 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
+  Forks `source` into a NEW `Strategy` named `name` at version 1, in one
+  transaction (each fork gets its own Strategy, like the existing
+  "... [Var: ...]" forks). Copies everything except identity, lifecycle
+  and activation: direction, option_leg_config, position_sizing, params
+  (risk_controls, exit_strategy, holds ...), usage_conditions,
+  target_pool_id, overnight_hold and trading_hours_policy. `rules` is
+  the already-resolved rule tree to use (see `VersionFork`). Lineage:
+  `parent_version_id` is the source, `generation` is one more than its.
+  The new version starts in `discovery` and inactive; `source` is not
+  modified. `notes` is stored on both the strategy and the version;
+  `tags` are added by name.
+  """
+  @spec fork_strategy_version(StrategyVersion.t(), map()) ::
+          {:ok, StrategyVersion.t()} | {:error, Ecto.Changeset.t()}
+  def fork_strategy_version(%StrategyVersion{} = source, %{name: name, rules: rules} = attrs) do
+    notes = Map.get(attrs, :notes)
+
+    Repo.transaction(fn ->
+      with {:ok, strategy} <- create_strategy(%{name: name, notes: notes}),
+           {:ok, version} <-
+             create_strategy_version(strategy, %{
+               version: 1,
+               parent_version_id: source.id,
+               generation: (source.generation || 1) + 1,
+               direction: source.direction,
+               rules: rules,
+               option_leg_config: source.option_leg_config,
+               position_sizing: source.position_sizing,
+               params: source.params,
+               usage_conditions: source.usage_conditions,
+               target_pool_id: source.target_pool_id
+             }),
+           {:ok, version} <-
+             update_trading_hours_settings(version, %{
+               overnight_hold: source.overnight_hold,
+               trading_hours_policy: source.trading_hours_policy
+             }),
+           {:ok, version} <- set_strategy_version_notes(version, notes),
+           {:ok, version} <- add_tags_by_name(version, Map.get(attrs, :tags, [])) do
+        Repo.preload(version, [:strategy, :tags], force: true)
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp add_tags_by_name(version, names) do
+    Enum.reduce_while(names, {:ok, version}, fn name, {:ok, v} ->
+      case add_tag_to_strategy_version_by_name(v, name) do
+        {:ok, v} -> {:cont, {:ok, v}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  @doc """
   Preloads `:tags` — every real caller either needs it (any path that
   ends up serialized via `TradingOptionsSimWeb.Api.Serializer.strategy_version/1`,
   which requires it loaded) or is unaffected by the extra join (an
