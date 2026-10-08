@@ -5,8 +5,9 @@ defmodule TradingOptionsSim.VersionFork do
   Modelled on trading_system's `fork_version`, but a fork here is a new
   Strategy at version 1 (as every existing "... [Var: ...]" fork was
   made), and everything not named in the request is copied from the
-  source, including `params.risk_controls`, `overnight_hold` and
-  `trading_hours_policy`, which `create_strategy_version` can't carry.
+  source, including `params.risk_controls`, `overnight_hold`,
+  `trading_hours_policy` and the operator's `entry_delay_minutes`
+  override, which `create_strategy_version` can't carry.
 
   Steps, all before anything is written:
     1. resolve the rule tree: the source's rules; `entry_gate` AND-ed onto

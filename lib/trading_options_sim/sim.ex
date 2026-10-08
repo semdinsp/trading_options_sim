@@ -88,7 +88,8 @@ defmodule TradingOptionsSim.Sim do
   "... [Var: ...]" forks). Copies everything except identity, lifecycle
   and activation: direction, option_leg_config, position_sizing, params
   (risk_controls, exit_strategy, holds ...), usage_conditions,
-  target_pool_id, overnight_hold and trading_hours_policy. `rules` is
+  target_pool_id, overnight_hold, trading_hours_policy and the operator's
+  entry_delay_minutes override. `rules` is
   the already-resolved rule tree to use (see `VersionFork`). Lineage:
   `parent_version_id` is the source, `generation` is one more than its.
   The new version starts in `discovery` and inactive; `source` is not
@@ -118,7 +119,8 @@ defmodule TradingOptionsSim.Sim do
            {:ok, version} <-
              update_trading_hours_settings(version, %{
                overnight_hold: source.overnight_hold,
-               trading_hours_policy: source.trading_hours_policy
+               trading_hours_policy: source.trading_hours_policy,
+               entry_delay_minutes: source.entry_delay_minutes
              }),
            {:ok, version} <- set_strategy_version_notes(version, notes),
            {:ok, version} <- add_tags_by_name(version, Map.get(attrs, :tags, [])) do

@@ -25,7 +25,7 @@ defmodule TradingOptionsSim.MCP.Tools.ForkVersion do
   @impl true
   def description do
     """
-    Fork a strategy version into a NEW strategy (version 1, discovery stage, inactive unless activate is true). Everything not named here is copied exactly from the source: direction, rules, option_leg_config, position_sizing, params (including params.risk_controls stop-loss/take-profit and exit_strategy), usage_conditions, target_pool_id, overnight_hold, trading_hours_policy. The source version is not modified.
+    Fork a strategy version into a NEW strategy (version 1, discovery stage, inactive unless activate is true). Everything not named here is copied exactly from the source: direction, rules, option_leg_config, position_sizing, params (including params.risk_controls stop-loss/take-profit and exit_strategy), usage_conditions, target_pool_id, overnight_hold, trading_hours_policy, and the operator's entry_delay_minutes (min delay) override. The source version is not modified.
 
     Change the rules in ONE of two ways (not both):
     - entry_gate: a rule tree AND-ed onto the source's entry rule, so the new entry is {"all": [<source entry>, <entry_gate>]}. The exit rule is never touched.
