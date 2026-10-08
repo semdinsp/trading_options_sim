@@ -191,6 +191,10 @@ defmodule TradingOptionsSim.Sim.ExpectancyByRegimeTest do
     {:ok, all} = Sim.expectancy_by_regime()
     all_ids = Enum.map(all, & &1.strategy_version_id)
     assert discovery.id in all_ids and quarantine.id in all_ids
+
+    # A blank stage (e.g. `?stage=`) means no filter, not an invalid one
+    {:ok, blank} = Sim.expectancy_by_regime(stage: "", version_id: "")
+    assert Enum.map(blank, & &1.strategy_version_id) == all_ids
   end
 
   test "errors for an unknown version, a non-UUID id and an unknown stage" do

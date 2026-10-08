@@ -1615,16 +1615,15 @@ defmodule TradingOptionsSim.Sim do
     end)
   end
 
-  @regime_stages ~w(discovery quarantine test_portfolio retired)
-
   @doc """
   Per-version expectancy in R, bucketed by the regime label stamped at
   entry (`context["regime_label"]`, e.g. `"calm|up"`). Mirrors
   trading_system's `Trading.expectancy_by_regime/1` so both apps report
   regime buckets the same way.
 
-  Options: `version_id:` (one version) or `stage:` (one of
-  #{Enum.join(@regime_stages, ", ")}, used only without `version_id`).
+  Options: `version_id:` (one version) or `stage:` (a
+  `StrategyVersion.lifecycle_stages/0` value, used only without
+  `version_id`). A blank value counts as not given.
   With neither, every non-deleted version with at least one closed run.
   Returns `{:ok, rows}`, `{:error, :not_found}` or
   `{:error, :invalid_stage}`.
@@ -1701,7 +1700,7 @@ defmodule TradingOptionsSim.Sim do
     base =
       StrategyVersion |> where([v], is_nil(v.deleted_at)) |> preload([:strategy, :target_pool])
 
-    case {Keyword.get(opts, :version_id), Keyword.get(opts, :stage)} do
+    case {blank_to_nil(opts[:version_id]), blank_to_nil(opts[:stage])} do
       {id, _stage} when is_binary(id) ->
         with {:ok, uuid} <- Ecto.UUID.cast(id),
              %StrategyVersion{} = v <- base |> where([v], v.id == ^uuid) |> Repo.one() do
@@ -1710,20 +1709,28 @@ defmodule TradingOptionsSim.Sim do
           _ -> {:error, :not_found}
         end
 
-      {nil, stage} when is_nil(stage) or stage in @regime_stages ->
-        closed = from(r in SimRun, where: r.status == "closed", select: r.strategy_version_id)
-
-        base
-        |> where([v], v.id in subquery(closed))
-        |> then(fn q -> if stage, do: where(q, [v], v.lifecycle_stage == ^stage), else: q end)
-        |> order_by([v], asc: v.inserted_at)
-        |> Repo.all()
-        |> then(&{:ok, &1})
+      {nil, stage} when is_nil(stage) or is_binary(stage) ->
+        if stage && stage not in StrategyVersion.lifecycle_stages(),
+          do: {:error, :invalid_stage},
+          else: {:ok, versions_with_closed_runs(base, stage)}
 
       _ ->
         {:error, :invalid_stage}
     end
   end
+
+  defp versions_with_closed_runs(base, stage) do
+    closed = from(r in SimRun, where: r.status == "closed", select: r.strategy_version_id)
+
+    base
+    |> where([v], v.id in subquery(closed))
+    |> then(fn q -> if stage, do: where(q, [v], v.lifecycle_stage == ^stage), else: q end)
+    |> order_by([v], asc: v.inserted_at)
+    |> Repo.all()
+  end
+
+  defp blank_to_nil(value) when value in [nil, ""], do: nil
+  defp blank_to_nil(value), do: value
 
   # %{version_id => %{regime_label | :total => stats}} for one population
   # (:scored | :all) and grain (:regime | :total), in one grouped query.
