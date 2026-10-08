@@ -172,13 +172,16 @@ set in the last 24 h, and list them in the summary.
   net P&L, and at failing quarantine versions.
   - If one trend x vol regime cell was profitable (at least 15 trades
     over at least 2 sessions, net > 0), it forks the version with an
-    entry gate on that regime (tag `Regime-Gated-Fork`) and deactivates
-    the parent. Otherwise it just deactivates the parent.
+    entry gate on that regime (tag `Regime-Gated-Fork`) and retires the
+    parent (`retired_reason: "lifecycle_review"`). Otherwise it just
+    retires the parent. Retired, not deactivated, since 2026-10-08, so
+    losers leave /candidates and the leaderboards; unretire + activate
+    reverses it.
   - It never touches live-linked or `test_portfolio` versions, controls,
     `Noise-Baseline` or `od:slope-hold`.
   - Mode is `config :trading_options_sim, :lifecycle_review_mode`.
     `:dry_run` (the default) only logs a line like
-    `LifecycleReview (dry_run): N regime forks, M deactivations`.
+    `LifecycleReview (dry_run): N regime forks, M retirements`.
     Report the planned actions; switching to `:apply` is the user's call.
 - Live-linked versions are now excluded from automatic retirement
   (2026-10-03). Quarantine failure is judged on NET P&L, and losses with
