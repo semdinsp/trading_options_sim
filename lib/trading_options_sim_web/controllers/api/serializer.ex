@@ -252,6 +252,29 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
   end
 
   @doc """
+  `VersionFork.fork/2`'s result, shared by `POST /api/v1/versions/:id/fork`
+  and the `fork_version` MCP tool: the new ids, the full resolved
+  version (as `strategy_version/1`, params included) and what activation
+  did (`nil` when not requested).
+  """
+  def version_fork(%{version: version, activation: activation}) do
+    %{
+      "strategy_id" => version.strategy_id,
+      "version_id" => version.id,
+      "parent_version_id" => version.parent_version_id,
+      "generation" => version.generation,
+      "strategy_version" => strategy_version(version),
+      "activation" => activation(activation)
+    }
+  end
+
+  defp activation(nil), do: nil
+  defp activation(%{error: reason}), do: %{"activated" => false, "error" => inspect(reason)}
+
+  defp activation(%{monitors: n, unsubscribed_symbols: unsubscribed}),
+    do: %{"activated" => true, "monitors" => n, "unsubscribed_symbols" => unsubscribed}
+
+  @doc """
   One row of `Sim.expectancy_by_regime/1`, shared by
   `GET /api/v1/versions[/:id]/expectancy_by_regime` and the
   `expectancy_by_regime` MCP tool so their field names never drift.

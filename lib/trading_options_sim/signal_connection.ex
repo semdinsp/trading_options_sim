@@ -69,6 +69,19 @@ defmodule TradingOptionsSim.SignalConnection do
   end
 
   @doc """
+  Whether `name` is a signal trading_signal knows, without requesting it
+  (no subscriber registered, nothing started). A `"definition:<id>"`
+  name is checked with `TradingSignal.Signals.resolve_spec/1`, because
+  `Spec.parse/1` accepts any id without looking it up; a slug is checked
+  with `Spec.parse/1`, which looks it up. `{:error, :unknown_signal}`
+  when it doesn't exist; other errors mean it couldn't be checked.
+  """
+  @spec resolve_signal(String.t()) :: :ok | {:error, term()}
+  def resolve_signal(name) do
+    GenServer.call(__MODULE__, {:resolve_signal, name}, 10_000)
+  end
+
+  @doc """
   erpc's `TradingSignal.Regime.SessionLabel.current/0` — the current
   market regime label (`%{label:, vol_state:, trend_state:, ...}`, see
   that module's own moduledoc), a fixed single remote call rather than a
@@ -118,6 +131,34 @@ defmodule TradingOptionsSim.SignalConnection do
           {:error, _reason} = error ->
             {:reply, error, state}
         end
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:resolve_signal, _name}, _from, %{connected: false} = state) do
+    {:reply, {:error, :not_connected}, state}
+  end
+
+  def handle_call({:resolve_signal, "definition:" <> id}, _from, state) do
+    reply =
+      case safe_erpc(state.signal_node, TradingSignal.Signals, :resolve_spec, [id]) do
+        {:ok, _spec} -> :ok
+        {:error, :not_found} -> {:error, :unknown_signal}
+        {:error, _reason} = error -> error
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:resolve_signal, name}, _from, state) do
+    case resolve_spec(name, state) do
+      {:ok, _spec, state} ->
+        {:reply, :ok, state}
+
+      {:error, reason} when reason in [:unknown_signal, :unsupported_signal_spec] ->
+        {:reply, {:error, :unknown_signal}, state}
 
       {:error, _reason} = error ->
         {:reply, error, state}
