@@ -61,6 +61,38 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     version
   end
 
+  describe "entry delay (min delay)" do
+    test "shows the effective delay and its source, and the operator can set and clear it",
+         %{conn: conn} do
+      version = version_fixture(strategy_fixture(), %{params: %{"entry_delay_minutes" => 3}})
+      {:ok, view, html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      assert html =~
+               "Skip new entries for the first N minutes after the exchange opens. Exits are never delayed."
+
+      assert view |> element("#entry-delay-effective") |> render() =~ "3 min"
+      assert view |> element("#entry-delay-effective") |> render() =~ "version params"
+
+      view |> form("#entry-delay-form", %{entry_delay_minutes: "12"}) |> render_submit()
+      assert Sim.get_strategy_version!(version.id).entry_delay_minutes == 12
+      assert view |> element("#entry-delay-effective") |> render() =~ "12 min"
+      assert view |> element("#entry-delay-effective") |> render() =~ "operator override"
+
+      view |> form("#entry-delay-form", %{entry_delay_minutes: ""}) |> render_submit()
+      assert Sim.get_strategy_version!(version.id).entry_delay_minutes == nil
+      assert view |> element("#entry-delay-effective") |> render() =~ "version params"
+    end
+
+    test "rejects a negative value with a flash and leaves it unchanged", %{conn: conn} do
+      version = version_fixture(strategy_fixture())
+      {:ok, view, _html} = live(conn, ~p"/strategy_versions/#{version.id}")
+
+      html = view |> form("#entry-delay-form", %{entry_delay_minutes: "-4"}) |> render_submit()
+      assert html =~ "Min delay must be a whole number of minutes, 0 or more"
+      assert Sim.get_strategy_version!(version.id).entry_delay_minutes == nil
+    end
+  end
+
   test "shows strategy name, version, and lifecycle badge", %{conn: conn} do
     strategy = strategy_fixture()
     version = version_fixture(strategy)
