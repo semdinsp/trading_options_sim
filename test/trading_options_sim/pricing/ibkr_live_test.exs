@@ -99,6 +99,25 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
       assert {:ok, %{price: 6.4, delta: 0.58}} = IBKRLive.latest(symbol)
     end
 
+    # The model computation arrives about once a minute; any other tick
+    # proves the feed is alive. ContractMonitor's staleness gate uses it.
+    test "seen_at advances on every tick while the price stays the model's" do
+      symbol = occ_symbol()
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
+
+      broadcast_computation(symbol, :model_option, %{opt_price: 6.6, delta: 0.57})
+      Process.sleep(30)
+      {:ok, first} = IBKRLive.latest(symbol)
+      Process.sleep(20)
+      broadcast_computation(symbol, :bid_option_computation, %{opt_price: 5.6, delta: 0.59})
+      Process.sleep(30)
+
+      {:ok, tick} = IBKRLive.latest(symbol)
+      assert tick.price == 6.6
+      assert tick.at == first.at
+      assert DateTime.compare(tick.seen_at, first.seen_at) == :gt
+    end
+
     test "with only non-model computations there is no price yet" do
       symbol = occ_symbol()
       start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
