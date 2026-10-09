@@ -19,6 +19,98 @@ defmodule TradingOptionsSim.Pricing.IBKRLiveTest do
     Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{occ_symbol}", message)
   end
 
+  defp broadcast_computation(occ_symbol, tick_type, data) do
+    message =
+      %{
+        type: :price,
+        symbol: occ_symbol,
+        source: :ibkr,
+        data: data,
+        metadata: %{req_id: 1, tick_type: tick_type}
+      }
+      |> Map.put(:__struct__, TradingHub.Message)
+
+    Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{occ_symbol}", message)
+  end
+
+  # 2026-10-08, RSP 210C 2026-12-18: IBKR sent bid, ask, last and model
+  # computations for one illiquid contract, each with its own opt_price
+  # and IV (last 5.50 / IV 0.113 from a stale print, model ~6.6 / 0.150,
+  # ask-side 7.60 / 0.178). Taking whichever came last flapped the
+  # premium and fired stop/target 635 times. Only the model computation
+  # may set the price and greeks.
+  describe "option computation tick types" do
+    test "only a model computation sets the price; bid, ask and last computations are ignored" do
+      symbol = occ_symbol()
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
+
+      broadcast_computation(symbol, :model_option, %{
+        opt_price: 6.6,
+        implied_vol: 0.150,
+        delta: 0.57
+      })
+
+      broadcast_computation(symbol, :last_option_computation, %{
+        opt_price: 5.5,
+        implied_vol: 0.113,
+        delta: 0.60
+      })
+
+      broadcast_computation(symbol, :ask_option_computation, %{
+        opt_price: 7.6,
+        implied_vol: 0.178,
+        delta: 0.56
+      })
+
+      broadcast_computation(symbol, :bid_option_computation, %{
+        opt_price: 5.6,
+        implied_vol: 0.120,
+        delta: 0.59
+      })
+
+      broadcast_computation(symbol, :cust_option_computation, %{
+        opt_price: 9.9,
+        implied_vol: 0.3,
+        delta: 0.5
+      })
+
+      broadcast_computation(symbol, :delayed_last_option, %{
+        opt_price: 4.0,
+        implied_vol: 0.1,
+        delta: 0.6
+      })
+
+      Process.sleep(50)
+
+      assert {:ok, tick} = IBKRLive.latest(symbol)
+      assert tick.price == 6.6
+      assert tick.implied_vol == 0.150
+      assert tick.delta == 0.57
+    end
+
+    test "a delayed model computation is used when that is all there is" do
+      symbol = occ_symbol()
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
+
+      broadcast_computation(symbol, :last_option_computation, %{opt_price: 5.5, delta: 0.6})
+      broadcast_computation(symbol, :delayed_model_option, %{opt_price: 6.4, delta: 0.58})
+      Process.sleep(50)
+
+      assert {:ok, %{price: 6.4, delta: 0.58}} = IBKRLive.latest(symbol)
+    end
+
+    test "with only non-model computations there is no price yet" do
+      symbol = occ_symbol()
+      start_supervised!({IBKRLive, occ_symbol: symbol, contract: contract()})
+
+      broadcast_computation(symbol, :last_option_computation, %{opt_price: 5.5, delta: 0.6})
+      broadcast_computation(symbol, :ask_option_computation, %{opt_price: 7.3, delta: 0.56})
+      Process.sleep(50)
+
+      assert {:error, :no_data} = IBKRLive.latest(symbol)
+    end
+  end
+
   describe "latest/1" do
     test "returns {:error, :no_data} when no listener is running" do
       assert {:error, :no_data} = IBKRLive.latest("never-started")
