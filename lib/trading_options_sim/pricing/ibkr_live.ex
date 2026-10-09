@@ -80,6 +80,11 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     subscribed?: false,
     last_tick: nil,
     last_quote: nil,
+    # When ANY tick (any computation side, or a quote) last arrived for
+    # this contract -- the feed's liveness. IBKR sends the model
+    # computation only about once a minute, so last_tick's own :at says
+    # how old the PRICE is, while this says whether the feed is alive.
+    last_seen_at: nil,
     # Recovery after a trading_hub restart; see handle_info({:nodeup, _}).
     resubscribe_count: 0,
     retry_attempt: 0,
@@ -158,6 +163,10 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   fabricates a value, matching `BlackScholes.compute/1`'s own contract
   shape so `ContractMonitor` can treat both backends identically.
 
+  `:at` is when the model computation (the price) arrived; `:seen_at` is
+  when any tick for this contract last arrived, i.e. whether the feed is
+  alive. ContractMonitor's staleness gate reads both.
+
   The returned map also carries `:quote` — the last two-sided
   `%{bid:, ask:, ...}` seen for this same contract, or `nil` if no quote
   tick has arrived. `nil` is a real state, not an error: greeks and
@@ -232,7 +241,9 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   # already has to handle — see its own fill_quote/2 fallback to the
   # model mid.
   def handle_call(:latest, _from, %{last_tick: tick} = state) do
-    {:reply, {:ok, Map.put(tick, :quote, state.last_quote)}, state}
+    {:reply,
+     {:ok, tick |> Map.put(:quote, state.last_quote) |> Map.put(:seen_at, state.last_seen_at)},
+     state}
   end
 
   # A %TradingHub.Message{type: :price} broadcast — recognized
@@ -264,6 +275,11 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   @impl true
   def handle_info(%{__struct__: TradingHub.Message, type: :price, data: data} = message, state) do
     at = message_time(message)
+
+    state =
+      if greeks_tick(data) || quote_tick(data, at),
+        do: %{state | last_seen_at: later(state.last_seen_at, at)},
+        else: state
 
     state =
       case model_computation?(message) && greeks_tick(data) do
@@ -478,6 +494,10 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   # arrives late does not read as fresh.
   defp message_time(%{timestamp: %DateTime{} = ts}), do: ts
   defp message_time(_message), do: DateTime.utc_now()
+
+  # Messages can arrive out of order; liveness only ever moves forward.
+  defp later(nil, at), do: at
+  defp later(seen, at), do: if(DateTime.compare(at, seen) == :gt, do: at, else: seen)
 
   defp merge_quote(nil, quote_fields), do: quote_fields
   defp merge_quote(existing, quote_fields), do: Map.merge(existing, quote_fields)

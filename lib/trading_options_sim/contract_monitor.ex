@@ -850,7 +850,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             now = DateTime.utc_now()
             state = %{state | option_tick_at: tick[:at], quote_at: quote_received_at(tick)}
 
-            if fresh?(tick[:at], now) do
+            if fresh?(tick, now) do
               tick = drop_stale_quote(tick, now)
               snapshot = build_ibkr_live_snapshot(tick, spot, signal_values(state))
 
@@ -884,7 +884,17 @@ defmodule TradingOptionsSim.ContractMonitor do
   # suppresses trading on a quiet contract that is perfectly live. At
   # 60s it is two orders of magnitude above the multiple-per-second rate
   # of the liquid SPY/QQQ monthlies this app trades.
+  #
+  # Since 2026-10-09 the price comes only from IBKR's MODEL computation
+  # (IBKRLive), which arrives about once a minute (worst gaps measured
+  # 55-63s), so the gate measures the FEED instead: `:seen_at`, the last
+  # tick of any kind for the contract. A dead feed is still caught within
+  # the limit. The model price itself may then be up to a minute old, but
+  # no older than @model_age_factor x the limit: if model computations
+  # stop while other ticks continue, the price would otherwise never
+  # refresh.
   @default_max_tick_age_ms 60_000
+  @model_age_factor 3
 
   defp max_tick_age_ms do
     Application.get_env(
@@ -894,16 +904,26 @@ defmodule TradingOptionsSim.ContractMonitor do
     )
   end
 
-  defp fresh?(%DateTime{} = at, now),
+  defp fresh?(%{at: %DateTime{} = at} = tick, now) do
+    seen = Map.get(tick, :seen_at) || at
+
+    DateTime.diff(now, seen, :millisecond) <= max_tick_age_ms() and
+      DateTime.diff(now, at, :millisecond) <= @model_age_factor * max_tick_age_ms()
+  end
+
+  defp fresh?(_tick, _now), do: false
+
+  # A quote's own age (see drop_stale_quote/2): the plain limit.
+  defp within_limit?(%DateTime{} = at, now),
     do: DateTime.diff(now, at, :millisecond) <= max_tick_age_ms()
 
-  defp fresh?(_at, _now), do: false
+  defp within_limit?(_at, _now), do: false
 
   defp quote_received_at(%{quote: %{received_at: at}}), do: at
   defp quote_received_at(_tick), do: nil
 
   defp drop_stale_quote(%{quote: %{received_at: at}} = tick, now) do
-    if fresh?(at, now), do: tick, else: %{tick | quote: nil}
+    if within_limit?(at, now), do: tick, else: %{tick | quote: nil}
   end
 
   defp drop_stale_quote(%{quote: %{}} = tick, _now), do: %{tick | quote: nil}

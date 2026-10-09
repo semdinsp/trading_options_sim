@@ -1191,6 +1191,67 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Decimal.equal?(fill.fill_price, Decimal.new("6.00"))
     end
 
+    defp broadcast_aged_typed(occ_symbol, tick_type, data, age_ms) do
+      message =
+        %{
+          type: :price,
+          symbol: occ_symbol,
+          source: :ibkr,
+          data: data,
+          metadata: %{req_id: 1, tick_type: tick_type},
+          timestamp: DateTime.add(DateTime.utc_now(), -age_ms, :millisecond)
+        }
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{occ_symbol}", message)
+    end
+
+    # 2026-10-09: IBKR's model computation (the only price IBKRLive uses)
+    # arrives about once a minute, with worst gaps of 55-63s, so a model
+    # reading older than the 60s limit is normal on a live feed. The gate
+    # must judge the FEED by any tick, or SPY monitors skip evaluation
+    # (stops included) for a few seconds every minute.
+    test "a model price older than the limit still trades while other ticks are fresh" do
+      {pid, run} = start_live("FEED1", "FEED1_OCC")
+      broadcast_aged_typed("FEED1_OCC", :model_option, @greeks, 90_000)
+      broadcast_aged_typed("FEED1_OCC", :bid_option_computation, %{@greeks | opt_price: 5.0}, 0)
+      sync(pid)
+      broadcast_underlying_price("FEED1", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      [fill] = Sim.list_sim_fills(run)
+      assert Decimal.equal?(fill.fill_price, Decimal.new("6.00"))
+    end
+
+    test "a dead feed is still caught: nothing for longer than the limit is stale" do
+      {pid, run} = start_live("FEED2", "FEED2_OCC")
+      broadcast_aged_typed("FEED2_OCC", :model_option, @greeks, 70_000)
+      broadcast_aged_typed("FEED2_OCC", :bid_option_computation, @greeks, 65_000)
+
+      capture_log(fn ->
+        broadcast_underlying_price("FEED2", 150.0)
+        sync(pid)
+      end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    test "a model price older than 3x the limit is stale even with a live feed" do
+      {pid, run} = start_live("FEED3", "FEED3_OCC")
+      broadcast_aged_typed("FEED3_OCC", :model_option, @greeks, 200_000)
+      broadcast_aged_typed("FEED3_OCC", :ask_option_computation, @greeks, 0)
+
+      capture_log(fn ->
+        broadcast_underlying_price("FEED3", 150.0)
+        sync(pid)
+      end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+
     # Regression, 2026-09-23 open: an IBKR computation tick can carry an
     # underlying price and no option price. An always-true entry rule
     # then reached fill_price(nil) and crashed the monitor -- 78 times in
