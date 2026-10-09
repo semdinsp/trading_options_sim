@@ -266,9 +266,9 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     at = message_time(message)
 
     state =
-      case greeks_tick(data) do
-        nil -> state
-        tick -> %{state | last_tick: Map.put(tick, :at, at)}
+      case model_computation?(message) && greeks_tick(data) do
+        tick when is_map(tick) -> %{state | last_tick: Map.put(tick, :at, at)}
+        _ -> state
       end
 
     case quote_tick(data, at) do
@@ -417,6 +417,23 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
 
       :ok
   end
+
+  # IBKR sends a separate TickOptionComputation per side for the same
+  # contract -- bid (10), ask (11), last trade (12), model (13), plus
+  # custom and delayed variants -- each with its OWN opt_price and IV.
+  # trading_hub passes the side through as metadata.tick_type. Only the
+  # model computation is a coherent mark: on 2026-10-08 an illiquid RSP
+  # call's stale last print (5.50, IV 0.113) and ask-side computation
+  # (7.60, IV 0.178) alternated with the model (~6.6, IV 0.150) on a flat
+  # underlying, and taking whichever came last fired stop/target 635
+  # times. Real bid/ask for fills still come from quote ticks (quote_tick/2).
+  # A message without a tick_type (older hub, tests) is accepted as before.
+  @model_computations [:model_option, :delayed_model_option]
+
+  defp model_computation?(%{metadata: %{tick_type: tick_type}}) when not is_nil(tick_type),
+    do: tick_type in @model_computations
+
+  defp model_computation?(_message), do: true
 
   @greeks_keys [:implied_vol, :delta, :opt_price, :gamma, :vega, :theta, :und_price]
 
