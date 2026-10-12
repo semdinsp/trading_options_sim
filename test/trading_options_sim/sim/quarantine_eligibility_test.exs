@@ -302,6 +302,35 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
       {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
     end
+
+    # Controls are the baselines and are expected to lose a little; the
+    # failing non-control beside it proves the gate still fires.
+    test "never retires an always-long control, but still retires a failing strategy" do
+      pool = target_pool_fixture()
+
+      {:ok, control_strategy} =
+        Sim.create_strategy(%{name: "TLT Control: Always-Long Put Hold60"})
+
+      [control, failing] =
+        for strategy <- [control_strategy, strategy_fixture()] do
+          version = version_fixture(strategy, %{target_pool_id: pool.id})
+          {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+
+          {:ok, version} =
+            version
+            |> Ecto.Changeset.change(quarantine_trading_days: 20)
+            |> TradingOptionsSim.Repo.update()
+
+          closed_run_fixture(version, Decimal.new("-100.00"))
+          closed_run_fixture(version, Decimal.new("10.00"))
+          version
+        end
+
+      {:ok, [retired]} = Sim.auto_retire_failing_quarantine_versions()
+
+      assert retired.id == failing.id
+      assert Sim.get_strategy_version!(control.id).lifecycle_stage == "quarantine"
+    end
   end
 
   describe "QuarantineEligibilityWorker" do

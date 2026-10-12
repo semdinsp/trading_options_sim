@@ -186,6 +186,9 @@ set in the last 24 h, and list them in the summary.
 - Live-linked versions are now excluded from automatic retirement
   (2026-10-03). Quarantine failure is judged on NET P&L, and losses with
   zero wins count as failing.
+- Always-long controls (strategy name contains "Control") are excluded
+  from quarantine retirement too (2026-10-12): they are the baselines and
+  are expected to lose a little.
 
 ### M5 — Rank the discovery leaderboard
 
