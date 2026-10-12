@@ -657,15 +657,23 @@ defmodule TradingOptionsSim.Sim do
   reason `trading_system`'s own worker runs its 3 jobs in sequence:
   job 1 must land today's day-count before this job judges tenure
   against it.
+
+  Never retires a version linked to trading_live or an always-long
+  control (strategy name contains "Control").
   """
   @spec auto_retire_failing_quarantine_versions() :: {:ok, [StrategyVersion.t()]}
   def auto_retire_failing_quarantine_versions do
     quarantine_version_ids =
       StrategyVersion
+      |> join(:inner, [v], s in assoc(v, :strategy))
       |> where([v], v.lifecycle_stage == "quarantine")
       |> where([v], v.quarantine_trading_days >= @quarantine_max_trading_days)
       # Never retire a version promoted to trading_live automatically.
       |> where([v], is_nil(v.live_strategy_id))
+      # Always-long controls are the baselines every strategy is judged
+      # against, and they are expected to lose a little (theta plus
+      # commission). Same name match as LifecycleReview.
+      |> where([_v, s], not ilike(s.name, "%Control%"))
       |> select([v], v.id)
       |> Repo.all()
 
