@@ -610,13 +610,21 @@ defmodule TradingOptionsSim.Sim do
   unscoped version into a stage where `lifecycle_stage_changeset/2`'s
   own "frozen while quarantined" rule would make fixing it require a
   fork.
+
+  Never promotes an always-long control (strategy name contains
+  "Control").
   """
   @spec auto_promote_eligible_discovery_versions() :: {:ok, [StrategyVersion.t()]}
   def auto_promote_eligible_discovery_versions do
     discovery_version_ids =
       StrategyVersion
+      |> join(:inner, [v], s in assoc(v, :strategy))
       |> where([v], v.lifecycle_stage == "discovery")
       |> where([v], not is_nil(v.target_pool_id))
+      # Always-long controls are baselines, not candidates: a lucky
+      # stretch shouldn't move one into quarantine. Same name match as
+      # auto_retire_failing_quarantine_versions/0 and LifecycleReview.
+      |> where([_v, s], not ilike(s.name, "%Control%"))
       |> select([v], v.id)
       |> Repo.all()
 

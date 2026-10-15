@@ -190,6 +190,27 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
 
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "discovery"
     end
+
+    # Controls are baselines, not candidates; the eligible non-control
+    # beside it proves the gate still fires.
+    test "never promotes an always-long control, but still promotes an eligible strategy" do
+      pool = target_pool_fixture()
+
+      {:ok, control_strategy} =
+        Sim.create_strategy(%{name: "OD: Control Always-Long Put [SPY+QQQ]"})
+
+      [control, eligible] =
+        for strategy <- [control_strategy, strategy_fixture()] do
+          version = version_fixture(strategy, %{target_pool_id: pool.id})
+          for _ <- 1..20, do: closed_run_fixture(version, Decimal.new("1.00"))
+          version
+        end
+
+      {:ok, [promoted]} = Sim.auto_promote_eligible_discovery_versions()
+
+      assert promoted.id == eligible.id
+      assert Sim.get_strategy_version!(control.id).lifecycle_stage == "discovery"
+    end
   end
 
   describe "auto_retire_failing_quarantine_versions/0" do
