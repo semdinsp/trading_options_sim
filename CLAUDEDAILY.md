@@ -188,7 +188,9 @@ set in the last 24 h, and list them in the summary.
   zero wins count as failing.
 - Always-long controls (strategy name contains "Control") are excluded
   from quarantine retirement too (2026-10-12): they are the baselines and
-  are expected to lose a little.
+  are expected to lose a little. Since 2026-10-15 they are also never
+  promoted from discovery to quarantine. Controls promoted before that
+  stay in quarantine unless the user moves them.
 
 ### M5 — Rank the discovery leaderboard
 
