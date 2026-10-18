@@ -1705,9 +1705,12 @@ defmodule TradingOptionsSim.ContractMonitor do
              entry_price: price,
              stop_loss_price: stop_loss_price,
              take_profit_price: take_profit_price,
-             risk_at_entry: Sim.compute_risk_at_entry(price, state.multiplier, state.quantity),
+             risk_at_entry: risk_at_entry(state, price, snapshot),
              entry_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context),
-             context: Map.merge(entry_context(state), risk_context)
+             context:
+               entry_context(state)
+               |> Map.merge(risk_context)
+               |> Map.put("risk_basis", Sim.r_denominator(state.direction))
            }
          ) do
       {:ok, {_fill, run}} ->
@@ -1733,6 +1736,26 @@ defmodule TradingOptionsSim.ContractMonitor do
         state
     end
   end
+
+  # A short's R denominator is its Reg-T margin, not the premium it
+  # collected; see Sim.compute_short_risk_at_entry/6.
+  defp risk_at_entry(%{direction: "short"} = state, price, snapshot) do
+    Sim.compute_short_risk_at_entry(
+      price,
+      state.strike,
+      state.right,
+      positive_decimal(snapshot["run_underlying_price"]),
+      state.multiplier,
+      state.quantity
+    )
+  end
+
+  defp risk_at_entry(state, price, _snapshot),
+    do: Sim.compute_risk_at_entry(price, state.multiplier, state.quantity)
+
+  defp positive_decimal(%Decimal{} = d), do: if(Decimal.gt?(d, 0), do: d)
+  defp positive_decimal(n) when is_number(n) and n > 0, do: Decimal.from_float(n * 1.0)
+  defp positive_decimal(_missing), do: nil
 
   defp submit_exit(state, snapshot, exit_reason) do
     action = if state.direction == "short", do: "buy", else: "sell"

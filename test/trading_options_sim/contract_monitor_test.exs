@@ -474,6 +474,37 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       entered_run = Sim.get_sim_run!(run.id)
       refute is_nil(entered_run.risk_at_entry)
       assert Decimal.equal?(entered_run.risk_at_entry, Decimal.mult(entered_run.entry_price, 100))
+      assert entered_run.context["risk_basis"] == "premium_at_risk"
+    end
+
+    test "is the Reg-T margin, at the entry tick's spot, for a short" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100}
+        })
+
+      symbol = "RISKTEST2"
+      key = contract_key(symbol)
+      {pid, run} = start_monitor(version, key, direction: "short")
+
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+
+      entered_run = Sim.get_sim_run!(run.id)
+
+      expected =
+        Sim.compute_short_risk_at_entry(
+          entered_run.entry_price,
+          entered_run.strike,
+          entered_run.right,
+          Decimal.from_float(150.0),
+          100,
+          1
+        )
+
+      assert Decimal.equal?(entered_run.risk_at_entry, expected)
+      assert Decimal.gt?(entered_run.risk_at_entry, Decimal.mult(entered_run.entry_price, 100))
+      assert entered_run.context["risk_basis"] == "reg_t_margin"
     end
   end
 

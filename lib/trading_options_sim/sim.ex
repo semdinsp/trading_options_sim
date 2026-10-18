@@ -1038,7 +1038,8 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.insert()
   end
 
-  # R's denominator is premium at risk for every run, including those
+  # R's denominator is premium at risk for every LONG run (a short uses
+  # its margin, compute_short_risk_at_entry/6), including those
   # with a stop from params["risk_controls"] (written at entry since
   # 2026-09-25, and moved by params["exit_strategy"]). Premium at risk is
   # the standard convention for a defined-risk long option (its max loss
@@ -1056,6 +1057,73 @@ defmodule TradingOptionsSim.Sim do
   def compute_risk_at_entry(entry_price, multiplier, quantity) do
     entry_price |> Decimal.mult(multiplier) |> Decimal.mult(quantity)
   end
+
+  @naked_base_pct Decimal.new("0.20")
+  @naked_min_pct Decimal.new("0.10")
+
+  @doc """
+  The R denominator for a SHORT (naked, single-leg) option entry: the
+  Reg-T initial margin a broker holds against it, not the premium.
+
+  The premium is what a short collects, not what it risks: a short
+  stopped at 100% loses one premium, and an unstopped one can lose many.
+  Using the premium as the denominator inflated short R and per-capital
+  scores (`final_score`, `pnl_bps_h`) against longs, whose premium IS
+  their capital. With the margin, R on both sides means net P&L per
+  dollar of capital committed.
+
+  Per share, the standard naked equity/ETF option requirement (FINRA
+  4210 / CBOE): premium + max(20% × underlying − out-of-the-money
+  amount, 10% × underlying for a call or 10% × strike for a put), then
+  × multiplier × quantity. IBKR can charge more (house margin,
+  leveraged ETFs); this is the regulatory floor, which is the
+  conventional and reproducible choice.
+
+  `underlying` is the spot price at the entry tick. When it is missing,
+  the strike stands in for it (the OTM amount is then 0), which
+  overstates the margin of a far-OTM short slightly rather than
+  understating it.
+  """
+  @spec compute_short_risk_at_entry(
+          Decimal.t(),
+          Decimal.t(),
+          String.t(),
+          Decimal.t() | nil,
+          integer(),
+          integer()
+        ) :: Decimal.t()
+  def compute_short_risk_at_entry(entry_price, strike, right, underlying, multiplier, quantity) do
+    spot = underlying || strike
+
+    {otm, minimum} =
+      case right do
+        "C" -> {Decimal.max(Decimal.sub(strike, spot), 0), Decimal.mult(@naked_min_pct, spot)}
+        "P" -> {Decimal.max(Decimal.sub(spot, strike), 0), Decimal.mult(@naked_min_pct, strike)}
+      end
+
+    requirement =
+      @naked_base_pct
+      |> Decimal.mult(spot)
+      |> Decimal.sub(otm)
+      |> Decimal.max(minimum)
+
+    entry_price
+    |> Decimal.add(requirement)
+    |> Decimal.mult(multiplier)
+    |> Decimal.mult(quantity)
+  end
+
+  @doc """
+  The label for what `risk_at_entry` (R's and capital's denominator)
+  measures on a version's runs: `"premium_at_risk"` for a long,
+  `"reg_t_margin"` for a short (see `compute_short_risk_at_entry/6`).
+  Short runs entered before 2026-10-19 used the premium; their rows
+  still say `"reg_t_margin"` once the version is short, so a short
+  version with older runs mixes the two until those runs age out.
+  """
+  @spec r_denominator(String.t() | nil) :: String.t()
+  def r_denominator("short"), do: "reg_t_margin"
+  def r_denominator(_long), do: "premium_at_risk"
 
   @churn_max_hold_time_seconds 90
   @churn_max_reopen_gap_seconds 120
@@ -1635,8 +1703,8 @@ defmodule TradingOptionsSim.Sim do
         # same quantity. See 0_SPEC.md.
         basis: "net",
         churn: "excluded",
-        r_denominator: "premium_at_risk",
-        capital_basis: "premium_at_risk",
+        r_denominator: r_denominator(version.direction),
+        capital_basis: r_denominator(version.direction),
         n_closes: stats.n_closes,
         excluded_count: excluded.count,
         excluded_pnl: excluded.pnl,
@@ -1779,6 +1847,7 @@ defmodule TradingOptionsSim.Sim do
             strategy_version_id: v.id,
             strategy_name: v.strategy.name,
             lifecycle_stage: v.lifecycle_stage,
+            direction: v.direction,
             target_pool_name: v.target_pool && v.target_pool.name,
             buckets: buckets,
             total:

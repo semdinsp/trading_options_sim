@@ -68,14 +68,31 @@ defmodule TradingOptionsSim.Sim.TradeCostTest do
     assert s.net_pnl == nil
   end
 
-  # A short receives the premium and needs margin this simulator does
-  # not model: no capital figure rather than a wrong one.
-  test "a short has no capital or return figure" do
-    s = TradeCost.summary(qqq_run("short"), [fill("entry", "28.36", "1.05")])
+  # A short entered before its margin was recorded has the premium in
+  # risk_at_entry: no capital figure rather than a wrong one.
+  test "a short with no recorded margin has no capital or return figure" do
+    s =
+      TradeCost.summary(%{qqq_run("short") | risk_at_entry: d("2836.00")}, [
+        fill("entry", "28.36", "1.05")
+      ])
 
     assert Decimal.equal?(s.cost_to_buy, d("2836.00"))
     assert s.capital == nil
     assert s.return_pct == nil
+  end
+
+  test "a short's capital is the margin it recorded at entry" do
+    run = %{
+      qqq_run("short")
+      | risk_at_entry: d("12000.00"),
+        realized_pnl_net: d("120.00"),
+        context: %{"risk_basis" => "reg_t_margin"}
+    }
+
+    s = TradeCost.summary(run, [fill("entry", "28.36", "1.05")])
+
+    assert Decimal.equal?(s.capital, d("12000.00"))
+    assert Decimal.equal?(s.return_pct, d("1.0"))
   end
 
   # A model-priced fill stores fill_slippage "0": it must read as

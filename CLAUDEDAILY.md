@@ -209,6 +209,13 @@ from runs. The fields to rank on:
 | `cost_margin` | Expectancy minus round-trip commission. Below 0 means the edge doesn't cover costs. |
 | `exit_reason_histogram` | Gate `X` fails when forced exits (`eod_flatten`, `expiry`, `stop_loss`, `take_profit`) are 70% or more of real exits: the "edge" may just be the stop or the flatten. Mostly `rule_exit` is healthy and passes. |
 
+R's denominator depends on direction (the row's `r_denominator`): a long
+uses the premium paid, a short its Reg-T naked margin (since 2026-10-19,
+`Sim.compute_short_risk_at_entry/6`). Short R is therefore much smaller
+per trade than long R, but both mean net P&L per dollar of capital. A
+short version with runs from before 2026-10-19 mixes the two bases;
+read short versions from that date.
+
 The `/candidates` page shows the same rows with the nine gate letters
 (N S E D X C R G T). The gates are advisory and never block anything.
 

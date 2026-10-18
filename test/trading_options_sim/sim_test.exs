@@ -1394,6 +1394,55 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
+  describe "compute_short_risk_at_entry/6" do
+    defp d(s), do: Decimal.new(s)
+
+    # Worked by hand: premium + max(20% x spot - OTM, 10% floor), x 100.
+    test "an OTM put: 20% of spot less the OTM amount, plus the premium" do
+      # 0.20*760 - (760-740) = 132; floor 0.10*740 = 74; (5 + 132) * 100
+      assert Decimal.equal?(
+               Sim.compute_short_risk_at_entry(d("5.00"), d("740"), "P", d("760"), 100, 1),
+               d("13700.00")
+             )
+    end
+
+    test "an OTM call, scaled by quantity" do
+      # 0.20*760 - (780-760) = 132; floor 0.10*760 = 76; (4 + 132) * 100 * 2
+      assert Decimal.equal?(
+               Sim.compute_short_risk_at_entry(d("4.00"), d("780"), "C", d("760"), 100, 2),
+               d("27200.00")
+             )
+    end
+
+    test "a far-OTM put falls to the 10%-of-strike floor" do
+      # 0.20*760 - 160 = -8 < floor 0.10*600 = 60; (0.50 + 60) * 100
+      assert Decimal.equal?(
+               Sim.compute_short_risk_at_entry(d("0.50"), d("600"), "P", d("760"), 100, 1),
+               d("6050.00")
+             )
+    end
+
+    test "with no spot price the strike stands in for it" do
+      # spot = 740, OTM 0: 0.20*740 = 148; (5 + 148) * 100
+      assert Decimal.equal?(
+               Sim.compute_short_risk_at_entry(d("5.00"), d("740"), "P", nil, 100, 1),
+               d("15300.00")
+             )
+    end
+
+    test "a short version's metrics row is labelled reg_t_margin, a long one premium_at_risk" do
+      strategy = strategy_fixture()
+      short = version_fixture(strategy, %{version: 1, direction: "short"})
+      long = version_fixture(strategy, %{version: 2})
+
+      rows = Map.new(Sim.full_universe_version_metrics(), &{&1.strategy_version_id, &1})
+
+      assert rows[short.id].r_denominator == "reg_t_margin"
+      assert rows[short.id].capital_basis == "reg_t_margin"
+      assert rows[long.id].r_denominator == "premium_at_risk"
+    end
+  end
+
   describe "trade_outcome/1" do
     # Entry 5.00 x 100 x 1 = $500 of premium, so the scratch band is +/-$5.
     defp outcome_run(pnl) do

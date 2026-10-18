@@ -13,9 +13,13 @@ defmodule TradingOptionsSim.Sim.TradeCost do
   For a **long** option the cost to buy is paid in full up front with
   nothing on margin, so it is also the capital the trade ties up and the
   most it can lose. That is `capital`, and `return_pct` is net P&L over
-  it. A **short** option *receives* that premium instead and needs
-  margin this simulator doesn't model, so `capital`/`return_pct` are
-  `nil` for a short rather than a number that looks right and isn't.
+  it. A **short** option *receives* that premium instead, and its
+  capital is the Reg-T margin held against it, recorded as the run's
+  `risk_at_entry` (`Sim.compute_short_risk_at_entry/6`) on runs whose
+  `context["risk_basis"]` is `"reg_t_margin"` (entered from 2026-10-19).
+  An older short run recorded the premium there, so its
+  `capital`/`return_pct` stay `nil` rather than a number that looks
+  right and isn't.
 
   Costs are shown two ways, because they are two different things:
 
@@ -57,7 +61,7 @@ defmodule TradingOptionsSim.Sim.TradeCost do
     cost_to_buy = run.entry_price && per_contract.(run.entry_price)
     fees = fees(fills)
     net = net_pnl(run, fees)
-    capital = if run.direction != "short", do: cost_to_buy
+    capital = capital(run, cost_to_buy)
 
     %{
       contracts: contracts,
@@ -72,6 +76,17 @@ defmodule TradingOptionsSim.Sim.TradeCost do
       hold_minutes: hold_minutes(run)
     }
   end
+
+  # A long's capital is the premium paid; a short's is the margin held
+  # against it, but only on runs that recorded one (see the moduledoc).
+  defp capital(
+         %SimRun{direction: "short", context: %{"risk_basis" => "reg_t_margin"}} = run,
+         _cost
+       ),
+       do: run.risk_at_entry
+
+  defp capital(%SimRun{direction: "short"}, _cost), do: nil
+  defp capital(_run, cost_to_buy), do: cost_to_buy
 
   defp loaded_fills(%SimRun{sim_fills: fills}) when is_list(fills), do: fills
   defp loaded_fills(_run), do: []
