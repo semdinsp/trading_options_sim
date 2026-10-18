@@ -1117,9 +1117,9 @@ defmodule TradingOptionsSim.Sim do
   The label for what `risk_at_entry` (R's and capital's denominator)
   measures on a version's runs: `"premium_at_risk"` for a long,
   `"reg_t_margin"` for a short (see `compute_short_risk_at_entry/6`).
-  Short runs entered before 2026-10-19 used the premium; their rows
-  still say `"reg_t_margin"` once the version is short, so a short
-  version with older runs mixes the two until those runs age out.
+  Short runs entered before this landed were backfilled to the margin
+  basis on 2026-10-17, keeping the old premium figure in
+  `context["risk_at_entry_premium_basis"]`.
   """
   @spec r_denominator(String.t() | nil) :: String.t()
   def r_denominator("short"), do: "reg_t_margin"

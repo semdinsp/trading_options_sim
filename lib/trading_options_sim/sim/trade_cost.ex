@@ -16,10 +16,10 @@ defmodule TradingOptionsSim.Sim.TradeCost do
   it. A **short** option *receives* that premium instead, and its
   capital is the Reg-T margin held against it, recorded as the run's
   `risk_at_entry` (`Sim.compute_short_risk_at_entry/6`) on runs whose
-  `context["risk_basis"]` is `"reg_t_margin"` (entered from 2026-10-19).
-  An older short run recorded the premium there, so its
-  `capital`/`return_pct` stay `nil` rather than a number that looks
-  right and isn't.
+  `context["risk_basis"]` is `"reg_t_margin"` (every short run since the
+  2026-10-17 backfill). A short run without that stamp recorded the
+  premium there, so its `capital`/`return_pct` stay `nil` rather than a
+  number that looks right and isn't.
 
   Costs are shown two ways, because they are two different things:
 
