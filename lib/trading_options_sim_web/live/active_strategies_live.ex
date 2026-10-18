@@ -450,7 +450,7 @@ defmodule TradingOptionsSimWeb.ActiveStrategiesLive do
                 :if={chip.position}
                 class="whitespace-pre select-all text-base-content/40 normal-case tracking-normal"
                 title="Contract held (OCC symbol): click to select"
-              >{chip.position.occ}</span>
+              >{chip.position.occ || chip.position.contract}</span>
               <span
                 :if={chip.position && is_number(chip.position.unrealized)}
                 class={["normal-case tracking-normal", signed_class(chip.position.unrealized)]}

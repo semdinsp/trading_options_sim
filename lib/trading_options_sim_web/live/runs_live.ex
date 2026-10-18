@@ -177,6 +177,14 @@ defmodule TradingOptionsSimWeb.RunsLive do
   defp format_price(nil), do: "—"
   defp format_price(%Decimal{} = price), do: "$#{Decimal.round(price, 2)}"
 
+  # A combo run shows every leg ("-145P +140P put credit spread"); its
+  # strike/right columns hold only the primary short leg.
+  defp contract_label(%{structure: structure, legs: [_ | _] = legs} = run)
+       when is_binary(structure) do
+    "#{run.symbol} #{format_expiry(run.expiry)} #{TradingOptionsSim.Combo.legs_label(legs)} " <>
+      TradingOptionsSim.Combo.structure_label(structure)
+  end
+
   defp contract_label(run) do
     "#{run.symbol} #{format_expiry(run.expiry)} #{Decimal.to_string(run.strike)}#{run.right}"
   end
