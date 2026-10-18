@@ -65,6 +65,8 @@ defmodule TradingOptionsSim.Sim.SimFill do
     field :filled_at, :utc_datetime_usec
     field :pricing_snapshot, :map, default: %{}
     field :commission, :decimal
+    # Which SimRunLeg this fill belongs to; nil on a single-leg run.
+    field :leg_index, :integer
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -82,7 +84,8 @@ defmodule TradingOptionsSim.Sim.SimFill do
       :fill_price,
       :filled_at,
       :pricing_snapshot,
-      :commission
+      :commission,
+      :leg_index
     ])
     |> validate_required([:sim_run_id, :kind, :action, :quantity, :fill_price, :filled_at])
     |> validate_inclusion(:kind, @kinds)

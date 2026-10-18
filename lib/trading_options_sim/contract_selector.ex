@@ -143,6 +143,63 @@ defmodule TradingOptionsSim.ContractSelector do
     end)
   end
 
+  @doc """
+  Resolves a multi-leg combo `config` (`TradingOptionsSim.Combo`) for
+  `symbol` into listed legs that all share one expiry.
+
+  Leg strikes come from `Combo.templates/3` at the current spot; the
+  expiries are the same candidates a single leg would probe
+  (`ContractSelection.expiry_candidates/2`). The first expiry at which
+  EVERY leg is listed wins. There is no strike nudging: moving one leg
+  to a neighbouring strike would change the structure's width, so a leg
+  that isn't listed rules out its whole expiry instead.
+
+  Same fail-closed answers as `resolve/3`: `:no_spot`,
+  `:no_listed_contract`, and `:hub_unavailable` when the hub didn't
+  answer.
+  """
+  @spec resolve_combo(String.t(), map(), Date.t()) ::
+          {:ok, %{expiry: String.t(), legs: [map()]}} | {:error, atom()}
+  def resolve_combo(symbol, config, today \\ et_today()) do
+    with {:ok, spot} <- spot_price(symbol),
+         {:ok, expiries} <- ContractSelection.expiry_candidates(config, today) do
+      templates = TradingOptionsSim.Combo.templates(symbol, config["multi_leg"], spot)
+      first_listed_combo(expiries, templates, symbol, &resolve_via_hub/4)
+    end
+  end
+
+  @doc false
+  # `resolver` is injectable, as in first_listed/3. Probes leg by leg;
+  # a definitive miss moves to the next expiry, anything else stops with
+  # :hub_unavailable, for the reasons first_listed/3 gives.
+  def first_listed_combo(expiries, templates, symbol, resolver) do
+    Enum.reduce_while(expiries, {:error, :no_listed_contract}, fn expiry, acc ->
+      case all_legs_listed(expiry, templates, symbol, resolver) do
+        :ok ->
+          legs =
+            Enum.map(templates, &Map.merge(&1, %{expiry: expiry, strike: to_decimal(&1.strike)}))
+
+          {:halt, {:ok, %{expiry: expiry, legs: legs}}}
+
+        :miss ->
+          {:cont, acc}
+
+        :unanswered ->
+          {:halt, {:error, :hub_unavailable}}
+      end
+    end)
+  end
+
+  defp all_legs_listed(expiry, templates, symbol, resolver) do
+    Enum.reduce_while(templates, :ok, fn leg, :ok ->
+      case resolver.(symbol, expiry, leg.strike, leg.right) do
+        {:ok, _con_id} -> {:cont, :ok}
+        {:error, reason} when reason in @definitive_misses -> {:halt, :miss}
+        {:error, _transient} -> {:halt, :unanswered}
+      end
+    end)
+  end
+
   defp resolve_via_hub(symbol, expiry, strike, right) do
     case call_hub(TradingHub.IBKR.ContractResolver, :resolve, [symbol, expiry, strike, right]) do
       {:ok, con_id} -> {:ok, con_id}
