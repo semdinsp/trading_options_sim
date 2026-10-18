@@ -241,4 +241,24 @@ defmodule TradingOptionsSim.Combo do
   """
   @spec primary_leg([map()]) :: map()
   def primary_leg(legs), do: Enum.find(legs, &(&1.side == "short"))
+
+  @doc """
+  A compact, display-only description of a combo's legs in leg order:
+  `-` for a short leg, `+` for a long one, e.g. `"-145P +140P"` for a
+  145/140 put credit spread. Accepts `SimRunLeg` structs or the monitor's
+  leg maps.
+  """
+  @spec legs_label([map()]) :: String.t()
+  def legs_label(legs) do
+    legs
+    |> Enum.sort_by(& &1.leg_index)
+    |> Enum.map_join(" ", fn leg ->
+      sign = if leg.side == "short", do: "-", else: "+"
+      "#{sign}#{Decimal.to_string(leg.strike, :normal)}#{leg.right}"
+    end)
+  end
+
+  @doc "A structure name for display: `\"put_credit_spread\"` -> `\"put credit spread\"`."
+  @spec structure_label(String.t()) :: String.t()
+  def structure_label(structure), do: String.replace(structure, "_", " ")
 end

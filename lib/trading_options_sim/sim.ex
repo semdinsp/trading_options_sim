@@ -1194,8 +1194,18 @@ defmodule TradingOptionsSim.Sim do
   Short runs entered before this landed were backfilled to the margin
   basis on 2026-10-17, keeping the old premium figure in
   `context["risk_at_entry_premium_basis"]`.
+
+  Given a whole version, a multi-leg combo is `"max_loss"`: its
+  `risk_at_entry` is the structure's defined maximum loss
+  (`Combo.risk_at_entry/4`), not margin on a naked short.
   """
-  @spec r_denominator(String.t() | nil) :: String.t()
+  @spec r_denominator(StrategyVersion.t() | String.t() | nil) :: String.t()
+  def r_denominator(%StrategyVersion{option_leg_config: config, direction: direction}) do
+    if TradingOptionsSim.Combo.combo?(config || %{}),
+      do: "max_loss",
+      else: r_denominator(direction)
+  end
+
   def r_denominator("short"), do: "reg_t_margin"
   def r_denominator(_long), do: "premium_at_risk"
 
@@ -1333,7 +1343,7 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> maybe_filter_status(status)
     |> order_by([r], desc: r.inserted_at)
-    |> preload([:tags, :sim_fills, strategy_version: :strategy])
+    |> preload([:tags, :sim_fills, :legs, strategy_version: :strategy])
     |> Repo.all()
   end
 
@@ -1382,6 +1392,7 @@ defmodule TradingOptionsSim.Sim do
     :right,
     :multiplier,
     :direction,
+    :structure,
     :status,
     :entry_at,
     :entry_price,
@@ -1433,7 +1444,7 @@ defmodule TradingOptionsSim.Sim do
       |> offset(^((page - 1) * per_page))
       |> select([r], struct(r, ^@runs_page_fields))
       |> Repo.all()
-      |> Repo.preload([:tags, :sim_fills, strategy_version: :strategy])
+      |> Repo.preload([:tags, :sim_fills, :legs, strategy_version: :strategy])
 
     {runs, total}
   end
@@ -1636,7 +1647,7 @@ defmodule TradingOptionsSim.Sim do
     |> where([f, r], r.strategy_version_id == ^strategy_version_id)
     |> order_by([f], desc: f.filled_at)
     |> limit(^limit)
-    |> preload([f, r], sim_run: r)
+    |> preload([f, r], sim_run: {r, :legs})
     |> Repo.all()
   end
 
@@ -1777,8 +1788,8 @@ defmodule TradingOptionsSim.Sim do
         # same quantity. See 0_SPEC.md.
         basis: "net",
         churn: "excluded",
-        r_denominator: r_denominator(version.direction),
-        capital_basis: r_denominator(version.direction),
+        r_denominator: r_denominator(version),
+        capital_basis: r_denominator(version),
         n_closes: stats.n_closes,
         excluded_count: excluded.count,
         excluded_pnl: excluded.pnl,
@@ -1922,6 +1933,7 @@ defmodule TradingOptionsSim.Sim do
             strategy_name: v.strategy.name,
             lifecycle_stage: v.lifecycle_stage,
             direction: v.direction,
+            r_denominator: r_denominator(v),
             target_pool_name: v.target_pool && v.target_pool.name,
             buckets: buckets,
             total:

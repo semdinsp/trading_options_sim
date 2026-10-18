@@ -95,6 +95,25 @@ defmodule TradingOptionsSim.Sim.TradeCostTest do
     assert Decimal.equal?(s.return_pct, d("1.0"))
   end
 
+  test "a combo's capital is its max loss, and the cost is the net credit received" do
+    run = %{
+      qqq_run("short")
+      | entry_price: d("1.00"),
+        exit_price: d("0.50"),
+        realized_pnl: d("50.00"),
+        realized_pnl_net: d("47.40"),
+        risk_at_entry: d("400.00"),
+        structure: "put_credit_spread",
+        context: %{"risk_basis" => "max_loss"}
+    }
+
+    s = TradeCost.summary(run, [fill("entry", "2.00", "0.65"), fill("entry", "1.00", "0.65")])
+
+    assert Decimal.equal?(s.cost_to_buy, d("100.00"))
+    assert Decimal.equal?(s.capital, d("400.00"))
+    assert Decimal.equal?(s.return_pct, d("11.9"))
+  end
+
   # A model-priced fill stores fill_slippage "0": it must read as
   # unknown, not as a free fill.
   test "no two-sided quote on any fill means spread paid is unknown, not zero" do
