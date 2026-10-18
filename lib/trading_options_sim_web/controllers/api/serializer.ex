@@ -159,7 +159,9 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
 
   Three fields carry the differences that remain, per row:
   `r_denominator` and `capital_basis` are both `"premium_at_risk"`
-  here (the equities apps use stop distance and entry notional), and
+  here for a long version and `"reg_t_margin"` for a short one
+  (`Sim.r_denominator/1`; the equities apps use stop distance and
+  entry notional), and
   `cost_basis` is `"measured"` because this app derives its cost floor
   from real per-fill commissions rather than a slippage estimate.
   `avg_hold_seconds` has no `trading_system` counterpart — this app's
@@ -290,7 +292,7 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "target_pool_name" => row.target_pool_name,
       "basis" => "net",
       "churn" => "excluded",
-      "r_denominator" => "premium_at_risk",
+      "r_denominator" => TradingOptionsSim.Sim.r_denominator(row[:direction]),
       "lcb_level" => "one_sided_90",
       "buckets" =>
         Enum.map(row.buckets, &Map.put(regime_stats(&1), "regime_label", &1.regime_label)),
