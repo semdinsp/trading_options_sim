@@ -216,6 +216,19 @@ per trade than long R, but both mean net P&L per dollar of capital. The
 85 short runs entered before then were backfilled to the margin basis on
 2026-10-17 (old value kept in `context["risk_at_entry_premium_basis"]`).
 
+**Multi-leg combos** (credit verticals and iron condors, since
+2026-10-18) are a third basis: `r_denominator` `"max_loss"`. The
+version's `option_leg_config["multi_leg"]` names the `structure`
+(`put_credit_spread`, `call_credit_spread`, `iron_condor`); a
+`ComboMonitor` trades all its legs together. A combo run's
+`entry_price`/`exit_price` are the **net credit** per share, its
+`risk_at_entry` is the structure's max loss (width − credit) × 100 × qty,
+and its legs are in `sim_run_legs` (one fill per leg, with `leg_index`).
+The run's own `strike`/`right` are only the primary short leg, so read
+the legs before describing the position. Combos never promote to
+trading_live (`PromotionExport` refuses them). Compare a combo against
+the naked short on the same pool, not against the long control.
+
 The `/candidates` page shows the same rows with the nine gate letters
 (N S E D X C R G T). The gates are advisory and never block anything.
 
@@ -323,6 +336,11 @@ TradingOptionsSim.SimActivator.activate(v)  # expect {:ok, [pids], []}
 - REST equivalents of the script (Bearer token from `/settings`):
   `POST /api/v1/strategies`, then `POST /api/v1/strategies/:id/versions`
   with the same body, then `POST /api/v1/versions/:id/activate`.
+- **Combos fork the same way.** `fork_version` copies the leg config
+  including `multi_leg`; to change the structure, offset or width, use
+  the script with a new `option_leg_config["multi_leg"]`
+  (`structure`, `short_offset`, `width`; an iron condor uses the same
+  offset and width on both sides). `direction` must be `"short"`.
 - The MCP `create_strategy_version` tool **drops `params`**, so it can't
   set holds, stops or exits. Don't use it for forks.
 - Make the script idempotent: skip a name that already exists. Dry-run
