@@ -22,6 +22,8 @@ defmodule TradingOptionsSim.SimActivator do
 
   require Logger
 
+  alias TradingOptionsSim.Combo
+  alias TradingOptionsSim.ComboMonitor
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.ContractSelector
   alias TradingOptionsSim.Pricing.PolygonSubscription
@@ -68,7 +70,6 @@ defmodule TradingOptionsSim.SimActivator do
           {:ok, [pid()], [String.t()]}
           | {:error, :no_target_pool}
           | {:error, :unsupported_leg_config}
-          | {:error, :multi_leg_not_yet_supported}
   def activate(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
 
   def activate(%StrategyVersion{} = version) do
@@ -97,7 +98,6 @@ defmodule TradingOptionsSim.SimActivator do
           {:ok, [pid()], [String.t()], [String.t()]}
           | {:error, :no_target_pool}
           | {:error, :unsupported_leg_config}
-          | {:error, :multi_leg_not_yet_supported}
   def activate_report(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
 
   def activate_report(%StrategyVersion{} = version) do
@@ -308,6 +308,12 @@ defmodule TradingOptionsSim.SimActivator do
     ensure_underlying(member)
     ensure_polygon(member)
 
+    if Combo.combo?(version.option_leg_config),
+      do: start_combo_member(version, member),
+      else: start_single_leg_member(version, member)
+  end
+
+  defp start_single_leg_member(version, member) do
     case open_run_for_symbol(version, member.symbol) do
       %SimRun{} = run ->
         resume_run(version, member, run)
@@ -454,13 +460,9 @@ defmodule TradingOptionsSim.SimActivator do
   # in ContractSelector; everything else goes through the literal
   # template resolver.
   #
-  # A multi_leg combo is refused outright until its monitor exists
-  # (multi-leg stage 2), rather than falling through to the single-leg
-  # resolver and failing with a misleading :unsupported_leg_config.
+  # A multi_leg combo resolves per symbol in ContractSelector.resolve_combo/3.
   defp validate_leg_config(%{"multi_leg" => _} = config) do
-    if TradingOptionsSim.Combo.combo?(config),
-      do: {:error, :multi_leg_not_yet_supported},
-      else: {:error, :unsupported_leg_config}
+    if Combo.combo?(config), do: :ok, else: {:error, :unsupported_leg_config}
   end
 
   defp validate_leg_config(%{"strike_selection" => "atm_offset"}), do: :ok
@@ -606,6 +608,166 @@ defmodule TradingOptionsSim.SimActivator do
   # `ContractMonitor.init/1` raises if `:ibkr_live` arrives without an
   # `:occ_symbol`, so the symbol is always built here, never left for
   # the caller to remember.
+  # --- multi-leg combos (TradingOptionsSim.ComboMonitor) -------------------
+  #
+  # One ComboMonitor per version and symbol. A running one already owns
+  # its run and legs, so it is reused untouched (an idempotent re-activate,
+  # or SimReactivator's retry). An open run that holds a position resumes
+  # on its OWN stored legs: re-resolving from today's spot would move the
+  # strikes out from under the position. Otherwise the legs are resolved
+  # fresh; a flat open run is reused only if it names the same primary
+  # leg, else it is closed (manual_no_entry) and a new one opened.
+  defp start_combo_member(version, member) do
+    case ComboMonitor.whereis(version.id, member.symbol) do
+      pid when is_pid(pid) ->
+        pid
+
+      nil ->
+        case open_run_for_symbol(version, member.symbol) do
+          %SimRun{entry_at: %DateTime{}} = run ->
+            legs = Enum.map(Sim.list_sim_run_legs(run), &leg_map/1)
+            start_combo_monitor(version, member, run, legs)
+
+          flat_run ->
+            resolve_and_start_combo(version, member, flat_run)
+        end
+    end
+  end
+
+  defp resolve_and_start_combo(version, member, flat_run) do
+    case ContractSelector.resolve_combo(member.symbol, version.option_leg_config) do
+      {:ok, %{legs: legs}} ->
+        primary = Combo.primary_leg(legs)
+
+        case combo_run(version, member.symbol, primary, flat_run) do
+          {:ok, run} -> start_combo_monitor(version, member, run, legs)
+          nil -> nil
+        end
+
+      {:error, :hub_unavailable} ->
+        Logger.warning(
+          "SimActivator: #{member.symbol} combo for version #{version.id} — trading_hub didn't " <>
+            "answer the contract lookup; will retry"
+        )
+
+        {:transient, member.symbol}
+
+      {:error, reason} ->
+        Logger.warning(
+          "SimActivator: skipping #{member.symbol} combo for version #{version.id} — " <>
+            "could not resolve listed legs (#{inspect(reason)})"
+        )
+
+        nil
+    end
+  end
+
+  defp combo_run(version, symbol, primary, %SimRun{} = flat_run) do
+    if same_contract?(flat_run, Map.put(primary, :symbol, symbol)) do
+      {:ok, flat_run}
+    else
+      Sim.close_run_without_entry(flat_run, "manual_no_entry")
+      combo_run(version, symbol, primary, nil)
+    end
+  end
+
+  defp combo_run(version, symbol, primary, nil) do
+    case Sim.open_sim_run(version, %{
+           symbol: symbol,
+           expiry: primary.expiry,
+           strike: primary.strike,
+           right: primary.right,
+           multiplier: 100,
+           direction: version.direction,
+           structure: version.option_leg_config["multi_leg"]["structure"]
+         }) do
+      {:ok, run} ->
+        {:ok, run}
+
+      {:error, reason} ->
+        Logger.error(
+          "SimActivator: failed to open combo sim_run for #{version.id}/#{symbol}: #{inspect(reason)}"
+        )
+
+        nil
+    end
+  end
+
+  defp start_combo_monitor(version, member, %SimRun{} = run, legs) do
+    case combo_pricing_opts(member.symbol, legs) do
+      {:ok, legs, pricing} ->
+        spec = %{
+          id: {:combo, version.id, member.symbol},
+          start:
+            {ComboMonitor, :start_link,
+             [
+               [
+                 strategy_version: version,
+                 symbol: member.symbol,
+                 exchange: member.exchange,
+                 sim_run_id: run.id,
+                 structure: version.option_leg_config["multi_leg"]["structure"],
+                 legs: legs,
+                 quantity: 1,
+                 position_open?: not is_nil(run.entry_at),
+                 entered_at: run.entry_at,
+                 stop_loss_price: run.stop_loss_price,
+                 take_profit_price: run.take_profit_price,
+                 entry_price: run.entry_price
+               ] ++ pricing
+             ]},
+          restart: :transient
+        }
+
+        case DynamicSupervisor.start_child(TradingOptionsSim.MonitorSupervisor, spec) do
+          {:ok, pid} ->
+            pid
+
+          {:error, {:already_started, pid}} ->
+            pid
+
+          {:error, reason} ->
+            Logger.error(
+              "SimActivator: failed to start combo monitor for #{version.id}/#{member.symbol}: #{inspect(reason)}"
+            )
+
+            nil
+        end
+
+      {:error, reason} ->
+        Logger.error(
+          "SimActivator: not starting combo #{version.id}/#{member.symbol} -- #{reason}"
+        )
+
+        nil
+    end
+  end
+
+  defp leg_map(%TradingOptionsSim.Sim.SimRunLeg{} = leg),
+    do: Map.take(leg, [:leg_index, :expiry, :strike, :right, :side, :ratio])
+
+  # Every leg needs its own OCC symbol under :ibkr_live (its own quote
+  # listener); none under :black_scholes.
+  defp combo_pricing_opts(symbol, legs) do
+    case Application.get_env(:trading_options_sim, :pricing_backend, :black_scholes) do
+      :ibkr_live ->
+        legs
+        |> Enum.reduce_while({:ok, []}, fn leg, {:ok, acc} ->
+          case occ_symbol({symbol, leg.expiry, leg.strike, leg.right}) do
+            {:ok, occ} -> {:cont, {:ok, [Map.put(leg, :occ_symbol, occ) | acc]}}
+            :error -> {:halt, {:error, "no valid OCC symbol for a combo leg"}}
+          end
+        end)
+        |> case do
+          {:ok, legs} -> {:ok, Enum.reverse(legs), [pricing_backend: :ibkr_live]}
+          error -> error
+        end
+
+      _other ->
+        {:ok, legs, [pricing_backend: :black_scholes]}
+    end
+  end
+
   @doc """
   The OCC symbol for a `{symbol, expiry, strike, right}` contract key,
   built by the shared `TradingContract.OccSymbol` (v0.2.1+), which

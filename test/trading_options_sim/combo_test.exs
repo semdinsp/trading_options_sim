@@ -1,7 +1,7 @@
 defmodule TradingOptionsSim.ComboTest do
   use TradingOptionsSim.DataCase, async: true
 
-  alias TradingOptionsSim.{Combo, ContractSelector, Sim, SimActivator}
+  alias TradingOptionsSim.{Combo, ContractSelector, Sim}
   alias TradingOptionsSim.Sim.{SimRun, SimRunLeg}
 
   defp d(s), do: Decimal.new(s)
@@ -172,23 +172,6 @@ defmodule TradingOptionsSim.ComboTest do
                create(%{direction: "short", option_leg_config: combo_config(%{})})
 
       assert errors_on(changeset).option_leg_config != []
-    end
-
-    test "a combo version is refused at activation until combos can trade" do
-      {:ok, pool} =
-        Sim.create_target_pool(%{name: "Combo pool #{System.unique_integer([:positive])}"})
-
-      {:ok, _} = Sim.add_target_pool_member(pool, %{symbol: "SPY"})
-
-      {:ok, version} =
-        create(%{
-          direction: "short",
-          target_pool_id: pool.id,
-          option_leg_config:
-            combo_config(%{"structure" => "iron_condor", "short_offset" => 20, "width" => 5})
-        })
-
-      assert SimActivator.activate(version) == {:error, :multi_leg_not_yet_supported}
     end
   end
 

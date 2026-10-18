@@ -84,13 +84,6 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             :error,
             "Can't activate — option_leg_config isn't a supported fixed_strike/fixed selection"
           )
-
-        {:error, :multi_leg_not_yet_supported} ->
-          put_flash(
-            socket,
-            :error,
-            "Can't activate — multi-leg combos can be defined but don't trade yet"
-          )
       end
 
     {:noreply, load_version(socket, socket.assigns.version.id)}

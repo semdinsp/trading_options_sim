@@ -16,6 +16,7 @@ defmodule TradingOptionsSim.Sim do
     PerformanceSnapshot,
     SimFill,
     SimRun,
+    SimRunLeg,
     Strategy,
     StrategyVersion,
     Tag,
@@ -1017,6 +1018,79 @@ defmodule TradingOptionsSim.Sim do
       else
         {:error, changeset} -> Repo.rollback(changeset)
       end
+    end)
+  end
+
+  @doc """
+  Records a multi-leg combo's entry in one transaction: one `entry`
+  `SimFill` per leg (each carrying its `leg_index`), one `SimRunLeg` row
+  per leg with its entry price, and the run's own entry fields (its
+  `entry_price` is the combo's NET price). All or nothing, so a combo can
+  never be left half-entered. See `TradingOptionsSim.ComboMonitor`.
+  """
+  def record_combo_entry_fills(%SimRun{} = run, leg_fills, leg_rows, run_entry_attrs) do
+    Repo.transaction(fn ->
+      with {:ok, fills} <-
+             insert_all_ok(leg_fills, &create_sim_fill(run, Map.put(&1, :kind, "entry"))),
+           {:ok, _legs} <- insert_all_ok(leg_rows, &create_sim_run_leg(run, &1)),
+           {:ok, run} <- SimRun.entry_changeset(run, run_entry_attrs) |> Repo.update() do
+        {fills, run}
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
+  end
+
+  @doc """
+  Records a combo's exit in one transaction: one `exit` `SimFill` per
+  leg, each leg's `exit_price`, and the run's exit fields.
+  `leg_exit_prices` maps `leg_index` to that leg's exit fill price.
+  """
+  def record_combo_exit_fills(%SimRun{} = run, leg_fills, leg_exit_prices, run_exit_attrs) do
+    Repo.transaction(fn ->
+      with {:ok, fills} <-
+             insert_all_ok(leg_fills, &create_sim_fill(run, Map.put(&1, :kind, "exit"))),
+           :ok <- set_leg_exit_prices(run, leg_exit_prices),
+           {:ok, run} <- SimRun.exit_changeset(run, run_exit_attrs) |> Repo.update() do
+        {fills, run}
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
+  end
+
+  @doc "A combo run's legs, in `leg_index` order."
+  def list_sim_run_legs(%SimRun{id: run_id}) do
+    SimRunLeg
+    |> where([l], l.sim_run_id == ^run_id)
+    |> order_by([l], asc: l.leg_index)
+    |> Repo.all()
+  end
+
+  defp insert_all_ok(items, insert) do
+    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
+      case insert.(item) do
+        {:ok, row} -> {:cont, {:ok, [row | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, rows} -> {:ok, Enum.reverse(rows)}
+      error -> error
+    end
+  end
+
+  defp create_sim_run_leg(%SimRun{} = run, attrs) do
+    %SimRunLeg{}
+    |> SimRunLeg.changeset(put_key(attrs, :sim_run_id, run.id))
+    |> Repo.insert()
+  end
+
+  defp set_leg_exit_prices(%SimRun{} = run, leg_exit_prices) do
+    Enum.each(leg_exit_prices, fn {leg_index, price} ->
+      SimRunLeg
+      |> where([l], l.sim_run_id == ^run.id and l.leg_index == ^leg_index)
+      |> Repo.update_all(set: [exit_price: price, updated_at: DateTime.utc_now()])
     end)
   end
 
