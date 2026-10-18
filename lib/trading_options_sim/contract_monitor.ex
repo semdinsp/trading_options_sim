@@ -19,8 +19,12 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   ## v1 scope
 
-  Single-leg long/short only (no multi-leg — plan §7). Pricing defaults
-  to synthetic (`TradingOptionsSim.Pricing.BlackScholes`, plan §5a v1) —
+  Single-leg long/short only. Multi-leg combos (credit verticals, iron
+  condors) run in `TradingOptionsSim.ComboMonitor`, which reuses this
+  module's `@doc false` helpers (gating, fill pricing, commissions, risk
+  levels, snapshot keys) so the two price and gate trades identically.
+  Pricing defaults to synthetic
+  (`TradingOptionsSim.Pricing.BlackScholes`, plan §5a v1) —
   no live options tick feed is assumed. Entry/exit rules are evaluated
   via `TradingCore.RuleEngine.evaluate/2` against a snapshot built from
   the current theoretical price/greeks plus a synthetic
@@ -560,7 +564,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Only ever called from handle_continue/2's :ibkr_live clause, never
   # from init/1 — see that callback for the DynamicSupervisor deadlock
   # this ordering avoids.
-  defp start_ibkr_live(occ_symbol, symbol, expiry, strike, right) do
+  @doc false
+  def start_ibkr_live(occ_symbol, symbol, expiry, strike, right) do
     # underlying_symbol is required alongside sec_type/expiry/strike/right
     # — this is what trading_hub actually sends as the wire Contract.symbol
     # field; occ_symbol is purely trading_hub's own tracking key/PubSub
@@ -748,7 +753,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # up yet just means "retry on the next :trading_signal_connected
   # broadcast," not a fatal error for a contract monitor that may have
   # nothing to do with live signals failing.
-  defp subscribe_to_signals(signal_names) do
+  @doc false
+  def subscribe_to_signals(signal_names) do
     Map.new(signal_names, fn name -> {name, SignalBus.request(name)} end)
     |> Enum.reduce(%{}, fn
       {name, {:ok, topic}}, acc ->
@@ -795,12 +801,13 @@ defmodule TradingOptionsSim.ContractMonitor do
     :ok
   end
 
-  defp underlying_price(%{last: last}) when is_number(last), do: last
+  @doc false
+  def underlying_price(%{last: last}) when is_number(last), do: last
 
-  defp underlying_price(%{bid: bid, ask: ask}) when is_number(bid) and is_number(ask),
+  def underlying_price(%{bid: bid, ask: ask}) when is_number(bid) and is_number(ask),
     do: (bid + ask) / 2
 
-  defp underlying_price(_data), do: nil
+  def underlying_price(_data), do: nil
 
   defp evaluate_black_scholes(state, spot) do
     dte = days_to_expiry(state.expiry)
@@ -896,7 +903,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   @default_max_tick_age_ms 60_000
   @model_age_factor 3
 
-  defp max_tick_age_ms do
+  @doc false
+  def max_tick_age_ms do
     Application.get_env(
       :trading_options_sim,
       :ibkr_live_max_tick_age_ms,
@@ -904,14 +912,15 @@ defmodule TradingOptionsSim.ContractMonitor do
     )
   end
 
-  defp fresh?(%{at: %DateTime{} = at} = tick, now) do
+  @doc false
+  def fresh?(%{at: %DateTime{} = at} = tick, now) do
     seen = Map.get(tick, :seen_at) || at
 
     DateTime.diff(now, seen, :millisecond) <= max_tick_age_ms() and
       DateTime.diff(now, at, :millisecond) <= @model_age_factor * max_tick_age_ms()
   end
 
-  defp fresh?(_tick, _now), do: false
+  def fresh?(_tick, _now), do: false
 
   # A quote's own age (see drop_stale_quote/2): the plain limit.
   defp within_limit?(%DateTime{} = at, now),
@@ -919,15 +928,17 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp within_limit?(_at, _now), do: false
 
-  defp quote_received_at(%{quote: %{received_at: at}}), do: at
-  defp quote_received_at(_tick), do: nil
+  @doc false
+  def quote_received_at(%{quote: %{received_at: at}}), do: at
+  def quote_received_at(_tick), do: nil
 
-  defp drop_stale_quote(%{quote: %{received_at: at}} = tick, now) do
+  @doc false
+  def drop_stale_quote(%{quote: %{received_at: at}} = tick, now) do
     if within_limit?(at, now), do: tick, else: %{tick | quote: nil}
   end
 
-  defp drop_stale_quote(%{quote: %{}} = tick, _now), do: %{tick | quote: nil}
-  defp drop_stale_quote(tick, _now), do: tick
+  def drop_stale_quote(%{quote: %{}} = tick, _now), do: %{tick | quote: nil}
+  def drop_stale_quote(tick, _now), do: tick
 
   defp warn_stale(%{stale_warned?: true} = state, _at), do: state
 
@@ -955,7 +966,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # latest trading_signal values plus the underlying's Polygon features
   # (run_poly_*, see PolygonFeatures). Polygon keys are absent, not
   # zero, when stale or unknown, so a rule on them fails closed.
-  defp signal_values(state) do
+  @doc false
+  def signal_values(state) do
     Map.merge(state.last_signal_values, PolygonFeatures.snapshot(state.symbol))
   end
 
@@ -998,7 +1010,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # rule like `run_bid lt 5` could fire on "no market". Absent instead,
   # which fails closed, matching trading_live (D2). Fills already
   # ignored it (quote_from/1), as did the derived spread keys.
-  defp quote_values(%{} = q) do
+  @doc false
+  def quote_values(%{} = q) do
     bid = q[:bid]
     ask = q[:ask]
     real? = &(is_number(&1) and &1 > 0)
@@ -1016,7 +1029,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     end)
   end
 
-  defp quote_values(_quote), do: %{}
+  def quote_values(_quote), do: %{}
 
   # Values a rule needs but can't compute itself (RuleEngine only
   # compares): run_spread, run_spread_pct, run_theta_pct, run_lambda.
@@ -1052,7 +1065,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # regime_trend_ordinal / regime_vol_ordinal from the cached session
   # label; absent until trading_signal has sent one, so a rule on them
   # fails closed rather than reading a guessed 0.
-  defp regime_values,
+  @doc false
+  def regime_values,
     do: TradingOptionsSim.RegimeCache.snapshot_values(TradingOptionsSim.RegimeCache.current())
 
   @doc false
@@ -1131,16 +1145,18 @@ defmodule TradingOptionsSim.ContractMonitor do
   def cooled_down?(%{reentry_cooldown_seconds: secs, last_exit_at: at}, now),
     do: DateTime.diff(now, at, :second) >= secs
 
-  defp param_seconds(%{params: params}, key) when is_map(params) do
+  @doc false
+  def param_seconds(%{params: params}, key) when is_map(params) do
     case Map.get(params, key) do
       secs when is_integer(secs) and secs > 0 -> secs
       _ -> 0
     end
   end
 
-  defp param_seconds(_version, _key), do: 0
+  def param_seconds(_version, _key), do: 0
 
-  defp seed_last_exit_at(version, symbol) when is_binary(symbol) do
+  @doc false
+  def seed_last_exit_at(version, symbol) when is_binary(symbol) do
     if param_seconds(version, "reentry_cooldown_seconds") > 0 do
       case Sim.last_closed_sim_run(version, symbol) do
         %{exit_at: %DateTime{} = at} -> at
@@ -1149,7 +1165,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
-  defp seed_last_exit_at(_version, _symbol), do: nil
+  def seed_last_exit_at(_version, _symbol), do: nil
 
   defp symbol_from_opts(opts) do
     case Keyword.get(opts, :contract_key) do
@@ -1336,11 +1352,12 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Same flag name and buffer as trading_live. The stop is left alone.
   @round_number_buffer Decimal.new("0.02")
 
-  defp risk_levels(
-         %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
-         price,
-         snapshot
-       ) do
+  @doc false
+  def risk_levels(
+        %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
+        price,
+        snapshot
+      ) do
     resolved =
       TradingCore.RiskControls.resolve_levels(price, config, state.direction,
         daily_vol: snapshot["run_premium_daily_vol"]
@@ -1354,7 +1371,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     {resolved.stop_loss, take_profit, risk_context(config, resolved)}
   end
 
-  defp risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
+  def risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
 
   defp risk_context(%{"method" => "volatility_multiple"}, resolved) do
     %{
@@ -1405,9 +1422,10 @@ defmodule TradingOptionsSim.ContractMonitor do
   # close. On 2026-09-30 five QQQ monitors entered at 20:00:00.038 UTC,
   # the closing tick, 11 minutes after their EOD flatten, and held
   # overnight. Checking today's session directly closes that gap.
-  defp closing_soon?(%{strategy_version: %{overnight_hold: true}}), do: false
+  @doc false
+  def closing_soon?(%{strategy_version: %{overnight_hold: true}}), do: false
 
-  defp closing_soon?(%{exchange: exchange}) do
+  def closing_soon?(%{exchange: exchange}) do
     now = DateTime.utc_now()
 
     TradingOptionsSim.EodCloser.in_close_window?(exchange, now) or
@@ -1537,14 +1555,15 @@ defmodule TradingOptionsSim.ContractMonitor do
   # params["min_hold_seconds"] on the strategy version. Anything that is
   # not a positive integer -- absent, nil, 0, a string, a float -- means
   # no gate, so a malformed value can never silently suppress an exit.
-  defp min_hold_seconds(%{params: params}) when is_map(params) do
+  @doc false
+  def min_hold_seconds(%{params: params}) when is_map(params) do
     case Map.get(params, "min_hold_seconds") do
       seconds when is_integer(seconds) and seconds > 0 -> seconds
       _absent_or_invalid -> nil
     end
   end
 
-  defp min_hold_seconds(_version), do: nil
+  def min_hold_seconds(_version), do: nil
 
   # "Observation always runs, the resulting action is what's gated" —
   # same split TradingLive.StrategyStockMonitor's transmission_allowed?/1
@@ -1591,12 +1610,13 @@ defmodule TradingOptionsSim.ContractMonitor do
   # unlike overnight_hold, which trading_live DOES apply live via
   # PubSub; this app's own overnight_hold is read fresh per EodCloser
   # tick instead, so it doesn't need that same live-apply mechanism).
-  defp session_open?(%{strategy_version: %{trading_hours_policy: "unrestricted"}}), do: true
-  defp session_open?(%{strategy_version: %{trading_hours_policy: "extended_only"}}), do: false
+  @doc false
+  def session_open?(%{strategy_version: %{trading_hours_policy: "unrestricted"}}), do: true
+  def session_open?(%{strategy_version: %{trading_hours_policy: "extended_only"}}), do: false
 
-  defp session_open?(%{exchange: nil}), do: true
+  def session_open?(%{exchange: nil}), do: true
 
-  defp session_open?(%{exchange: exchange}) do
+  def session_open?(%{exchange: exchange}) do
     case TradingOptionsSim.ExchangeSessionCache.fetch(exchange) do
       nil -> false
       session -> TradingCore.MarketHours.open?(session, DateTime.utc_now())
@@ -1664,7 +1684,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # and lose the trade. Any failure is logged and the fill is written
   # without a stamp (nil), the same "omit rather than guess" rule the
   # stamp applies to its own values.
-  defp market_context do
+  @doc false
+  def market_context do
     TradingCore.MarketContext.build(
       TradingOptionsSim.RegimeCache.current(),
       TradingOptionsSim.MarketContextSignals.values(),
@@ -1680,8 +1701,9 @@ defmodule TradingOptionsSim.ContractMonitor do
       nil
   end
 
-  defp stamp(snapshot, nil), do: snapshot
-  defp stamp(snapshot, context), do: Map.put(snapshot, "market_context", context)
+  @doc false
+  def stamp(snapshot, nil), do: snapshot
+  def stamp(snapshot, context), do: Map.put(snapshot, "market_context", context)
 
   defp record_entry(state, snapshot, action, price, fill_basis) do
     context = market_context()
@@ -1926,7 +1948,8 @@ defmodule TradingOptionsSim.ContractMonitor do
     %{state | unpriced_warned?: true}
   end
 
-  defp spread_fraction(state, reason) do
+  @doc false
+  def spread_fraction(state, reason) do
     if reason in @forced_exit_reasons do
       Decimal.new(to_string(@forced_exit_spread_fraction))
     else
@@ -1937,7 +1960,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Mid, moved `fraction` of the way across the spread against the
   # trader: a buy pays up toward the ask, a sell gives up toward the
   # bid. At fraction 0.5 this is exactly the touch.
-  defp touch_price(bid, ask, action, fraction) do
+  @doc false
+  def touch_price(bid, ask, action, fraction) do
     mid = bid |> Decimal.add(ask) |> Decimal.div(2)
     concession = ask |> Decimal.sub(bid) |> Decimal.mult(fraction)
 
@@ -1970,7 +1994,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # a fill price. Decimal.from_float/1 itself is exact (preserves every
   # digit of the float's own decimal representation); the precision loss
   # this guards against is upstream, in the float arithmetic itself.
-  defp fill_price(price) when is_float(price) do
+  @doc false
+  def fill_price(price) when is_float(price) do
     price |> Decimal.from_float() |> Decimal.round(2)
   end
 
@@ -1981,14 +2006,14 @@ defmodule TradingOptionsSim.ContractMonitor do
   # own doc on run_-prefix precedence) — confirmed live 2026-09-15: a
   # signal-derived Decimal reaching here crashed this GenServer outright
   # with a FunctionClauseError, since only the is_float/1 clause existed.
-  defp fill_price(%Decimal{} = price), do: Decimal.round(price, 2)
-  defp fill_price(price) when is_integer(price), do: price |> Decimal.new() |> Decimal.round(2)
+  def fill_price(%Decimal{} = price), do: Decimal.round(price, 2)
+  def fill_price(price) when is_integer(price), do: price |> Decimal.new() |> Decimal.round(2)
 
   # nil: no price on this tick. Crashed the monitor with a
   # FunctionClauseError until 2026-09-23 -- 78 crashes in the first two
   # seconds after that day's open, when entry rules fired against IBKR
   # option ticks that had not yet carried a price.
-  defp fill_price(nil), do: nil
+  def fill_price(nil), do: nil
 
   # entry_snapshot/exit_snapshot are DB `:map` columns Ecto persists via
   # Jason — but this same snapshot map is also handed to
@@ -2003,7 +2028,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # with exactly this error. Converted to a plain string here, at the
   # point of persistence only — the in-memory snapshot RuleEngine
   # actually evaluates against is never touched.
-  defp jsonify_snapshot(snapshot) do
+  @doc false
+  def jsonify_snapshot(snapshot) do
     Map.new(snapshot, fn
       {key, %Decimal{} = value} -> {key, Decimal.to_string(value)}
       {key, value} -> {key, value}
@@ -2030,7 +2056,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # rather than a strike-based notional — the fill price is what this
   # contract actually traded at, so it's the more accurate of
   # option_cost/5's own two documented notional choices.
-  defp estimate_commission(state, fill_price, action) do
+  @doc false
+  def estimate_commission(state, fill_price, action) do
     side = if action == "sell", do: :sell, else: :buy
     notional = fill_price |> Decimal.mult(state.multiplier) |> Decimal.mult(state.quantity)
     TradingCore.Costs.IBKR.option_cost(Decimal.new(state.quantity), notional, side)
@@ -2052,7 +2079,8 @@ defmodule TradingOptionsSim.ContractMonitor do
     }
   end
 
-  defp regime_label do
+  @doc false
+  def regime_label do
     case TradingOptionsSim.SignalConnection.current_regime() do
       {:ok, %{label: label}} -> label
       {:error, _reason} -> nil

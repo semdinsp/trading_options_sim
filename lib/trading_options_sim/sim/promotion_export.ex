@@ -48,6 +48,8 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
       explicit `risk_controls` and promote the fork.
     * a `risk_controls` or `exit_strategy` this app can't run
       (`StrategyVersion.params_errors/1`).
+    * a multi-leg combo (`option_leg_config.multi_leg`): trading_live
+      executes single-leg options only.
 
   `"volatility_multiple"` versions are exported: both apps size them on
   `run_premium_daily_vol` from `TradingCore.Options.Derived` at the entry
@@ -67,7 +69,7 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
     # A malformed id is "not found", not a cast crash (500).
     with {:ok, uuid} <- Ecto.UUID.cast(version_id),
          %StrategyVersion{} = version <- Repo.get(StrategyVersion, uuid) do
-      case not_promotable_reasons(version.params) do
+      case not_promotable_reasons(version.params) ++ combo_reasons(version.option_leg_config) do
         [] ->
           {:ok,
            version |> Repo.preload([:strategy, target_pool: :target_pool_members]) |> to_payload()}
@@ -92,6 +94,14 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
         ]
 
     missing ++ StrategyVersion.params_errors(params)
+  end
+
+  # trading_live executes single-leg options only (no comboLegs in
+  # tws_api), so a combo would arrive there as a malformed single leg.
+  defp combo_reasons(leg_config) do
+    if TradingOptionsSim.Combo.combo?(leg_config),
+      do: ["option_leg_config.multi_leg: trading_live can't execute multi-leg combos yet"],
+      else: []
   end
 
   defp to_payload(v) do

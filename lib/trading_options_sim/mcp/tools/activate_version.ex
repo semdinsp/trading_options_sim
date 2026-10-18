@@ -42,12 +42,6 @@ defmodule TradingOptionsSim.MCP.Tools.ActivateVersion do
              "cannot activate — option_leg_config isn't a supported fixed_strike/fixed selection"
            ), frame}
 
-        {:error, :multi_leg_not_yet_supported} ->
-          {:error,
-           Error.execution(
-             "cannot activate — multi-leg combos can be defined but don't trade yet"
-           ), frame}
-
         body ->
           {:reply, Response.json(Response.tool(), body), frame}
       end
