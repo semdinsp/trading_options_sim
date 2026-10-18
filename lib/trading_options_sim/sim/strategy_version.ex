@@ -494,6 +494,25 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
         |> validate_leg_config_field(config, "right", @option_rights)
         |> validate_leg_config_field(config, "expiry_selection", @expiry_selections)
         |> validate_leg_config_field(config, "strike_selection", @strike_selections)
+        |> validate_combo(config)
+    end
+  end
+
+  # A multi_leg combo (TradingOptionsSim.Combo) has its own config
+  # shape, and every supported structure is sold for a credit.
+  defp validate_combo(changeset, config) do
+    if TradingOptionsSim.Combo.combo?(config) or Map.has_key?(config, "multi_leg") do
+      config
+      |> Map.put_new("multi_leg", %{})
+      |> TradingOptionsSim.Combo.config_errors(get_field(changeset, :direction))
+      |> then(fn errors ->
+        if errors == [] and not TradingOptionsSim.Combo.combo?(config),
+          do: ["multi_leg must be a map with a structure"],
+          else: errors
+      end)
+      |> Enum.reduce(changeset, &add_error(&2, :option_leg_config, &1))
+    else
+      changeset
     end
   end
 

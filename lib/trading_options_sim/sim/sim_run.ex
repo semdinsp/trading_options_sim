@@ -60,7 +60,13 @@ defmodule TradingOptionsSim.Sim.SimRun do
     # excluded_reasons/0 and Sim.exclude_runs/2.
     field :excluded_reason, :string
 
+    # nil for a single-leg run. For a multi-leg combo, the structure
+    # name (TradingOptionsSim.Combo.structures/0); its contracts are then
+    # in `legs`, and strike/right above hold the primary short leg.
+    field :structure, :string
+
     has_many :sim_fills, TradingOptionsSim.Sim.SimFill
+    has_many :legs, TradingOptionsSim.Sim.SimRunLeg, preload_order: [asc: :leg_index]
 
     many_to_many :tags, TradingOptionsSim.Sim.Tag,
       join_through: TradingOptionsSim.Sim.RunTag,
@@ -83,9 +89,11 @@ defmodule TradingOptionsSim.Sim.SimRun do
       :strike,
       :right,
       :multiplier,
-      :direction
+      :direction,
+      :structure
     ])
     |> validate_required([:strategy_version_id, :symbol, :expiry, :strike, :right])
+    |> validate_inclusion(:structure, TradingOptionsSim.Combo.structures())
     |> validate_inclusion(:direction, @directions)
     |> validate_inclusion(:right, @rights)
     |> foreign_key_constraint(:strategy_version_id)

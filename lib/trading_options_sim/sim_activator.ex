@@ -68,6 +68,7 @@ defmodule TradingOptionsSim.SimActivator do
           {:ok, [pid()], [String.t()]}
           | {:error, :no_target_pool}
           | {:error, :unsupported_leg_config}
+          | {:error, :multi_leg_not_yet_supported}
   def activate(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
 
   def activate(%StrategyVersion{} = version) do
@@ -96,6 +97,7 @@ defmodule TradingOptionsSim.SimActivator do
           {:ok, [pid()], [String.t()], [String.t()]}
           | {:error, :no_target_pool}
           | {:error, :unsupported_leg_config}
+          | {:error, :multi_leg_not_yet_supported}
   def activate_report(%StrategyVersion{target_pool_id: nil}), do: {:error, :no_target_pool}
 
   def activate_report(%StrategyVersion{} = version) do
@@ -451,6 +453,16 @@ defmodule TradingOptionsSim.SimActivator do
   # lookup and a round of hub RPCs. atm_offset is validated per symbol
   # in ContractSelector; everything else goes through the literal
   # template resolver.
+  #
+  # A multi_leg combo is refused outright until its monitor exists
+  # (multi-leg stage 2), rather than falling through to the single-leg
+  # resolver and failing with a misleading :unsupported_leg_config.
+  defp validate_leg_config(%{"multi_leg" => _} = config) do
+    if TradingOptionsSim.Combo.combo?(config),
+      do: {:error, :multi_leg_not_yet_supported},
+      else: {:error, :unsupported_leg_config}
+  end
+
   defp validate_leg_config(%{"strike_selection" => "atm_offset"}), do: :ok
 
   defp validate_leg_config(config) do
