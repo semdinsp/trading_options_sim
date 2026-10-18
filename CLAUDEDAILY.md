@@ -212,9 +212,9 @@ from runs. The fields to rank on:
 R's denominator depends on direction (the row's `r_denominator`): a long
 uses the premium paid, a short its Reg-T naked margin (since 2026-10-19,
 `Sim.compute_short_risk_at_entry/6`). Short R is therefore much smaller
-per trade than long R, but both mean net P&L per dollar of capital. A
-short version with runs from before 2026-10-19 mixes the two bases;
-read short versions from that date.
+per trade than long R, but both mean net P&L per dollar of capital. The
+85 short runs entered before then were backfilled to the margin basis on
+2026-10-17 (old value kept in `context["risk_at_entry_premium_basis"]`).
 
 The `/candidates` page shows the same rows with the nine gate letters
 (N S E D X C R G T). The gates are advisory and never block anything.
