@@ -107,7 +107,6 @@ defmodule TradingOptionsSim.Application do
              {:streamable_http,
               start: Application.get_env(:trading_options_sim, :mcp_force_start)}}
         ] ++
-        mcp_sse_reaper_child() ++
         hub_client_children() ++
         [
           # Start to serve requests, typically the last entry
@@ -118,14 +117,6 @@ defmodule TradingOptionsSim.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: TradingOptionsSim.Supervisor]
     Supervisor.start_link(children, opts)
-  end
-
-  # Ends leaked anubis_mcp SSE streams; see SseStreamReaper's moduledoc.
-  # Off in :test so the MCP integration tests' streams get no extra writes.
-  defp mcp_sse_reaper_child do
-    if Application.get_env(:trading_options_sim, :mcp_sse_reaper, true),
-      do: [TradingOptionsSim.MCP.SseStreamReaper],
-      else: []
   end
 
   # Skipped in :test — SimReactivator queries the Repo from application
