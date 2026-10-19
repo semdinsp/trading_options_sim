@@ -35,6 +35,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
   use TradingOptionsSimWeb, :live_view
 
+  alias TradingOptionsSim.Combo
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.SimActivator
@@ -334,8 +335,21 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     }
   end
 
+  # A combo enters with one fill per leg; its entry fee is every leg's
+  # commission, so the first fill carries their sum.
   defp entry_fill(run) do
-    run |> Sim.list_sim_fills() |> Enum.find(&(&1.kind == "entry"))
+    case run |> Sim.list_sim_fills() |> Enum.filter(&(&1.kind == "entry")) do
+      [] ->
+        nil
+
+      [fill | _] = fills ->
+        if Enum.any?(fills, &is_nil(&1.commission)),
+          do: fill,
+          else: %{
+            fill
+            | commission: Enum.reduce(fills, Decimal.new(0), &Decimal.add(&2, &1.commission))
+          }
+    end
   end
 
   defp fetch_monitor_snapshot(pid) do
@@ -425,12 +439,17 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       if is_number(mark) and is_number(entry), do: sign * (mark - entry) * multiplier * qty
 
     # Quotes are per share; a contract is `multiplier` shares. For a long
-    # this premium is paid in full up front -- the capital at risk.
+    # this premium is paid in full up front -- the capital at risk. A
+    # short (or a combo, whose entry is the net credit) receives it, and
+    # its capital is the margin or max loss recorded as risk_at_entry.
     cost_to_buy = if is_number(entry), do: entry * multiplier * qty
+    legs = combo_legs(snapshot)
 
     %{
-      contract: "#{snapshot.expiry} #{Decimal.to_string(snapshot.strike)}#{snapshot.right}",
-      occ: occ_symbol(snapshot),
+      contract: contract_text(snapshot, legs),
+      occ: if(is_nil(legs), do: occ_symbol(snapshot)),
+      structure: Map.get(snapshot, :structure),
+      cost_label: if(sign == 1, do: "Cost to buy", else: "Credit received"),
       entry: entry,
       qty: raw_qty,
       mark: mark,
@@ -441,7 +460,12 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       unrealized: unrealized,
       cost_to_buy: cost_to_buy,
       multiplier: multiplier,
-      capital: if(sign == 1, do: cost_to_buy),
+      capital:
+        if(sign == 1,
+          do: cost_to_buy,
+          else: decimal_to_float(run && Map.get(run, :risk_at_entry))
+        ),
+      capital_basis: capital_basis(sign, legs),
       entry_fee: entry_fill && decimal_to_float(entry_fill.commission),
       unrealized_pct:
         if(unrealized && entry && entry > 0, do: unrealized / (entry * multiplier * qty) * 100),
@@ -866,13 +890,18 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             <tr :for={fill <- @fills} class="text-base-content/80 border-t border-base-300/50">
               <td class="pr-3 py-0.5 font-bold">{fill.sim_run.symbol}</td>
               <td class="pr-3 py-0.5 text-base-content/60">
-                {format_expiry(fill.sim_run.expiry)} {Decimal.to_string(fill.sim_run.strike)}{fill.sim_run.right}
+                {format_expiry(fill_contract(fill).expiry)} {Decimal.to_string(
+                  fill_contract(fill).strike
+                )}{fill_contract(fill).right}
+                <span :if={fill.sim_run.structure} class="text-base-content/40">
+                  ({Combo.structure_label(fill.sim_run.structure)} leg {fill.leg_index})
+                </span>
               </td>
               <td class="pr-3 py-0.5 text-base-content/60">
                 <span
                   class="whitespace-pre select-all"
                   title="OCC symbol — click to select, paste into IBKR"
-                >{occ_symbol(fill.sim_run)}</span>
+                >{occ_symbol(fill_contract(fill))}</span>
               </td>
               <td class="pr-3 py-0.5 uppercase">{fill.kind}</td>
               <td class="pr-3 py-0.5 uppercase">{fill.action}</td>
@@ -909,6 +938,41 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
   defp occ_symbol(_run), do: "—"
 
+  # A combo monitor's snapshot carries its legs; a single-leg one doesn't.
+  defp combo_legs(%{structure: s, legs: [_ | _] = legs}) when is_binary(s), do: legs
+  defp combo_legs(_snapshot), do: nil
+
+  defp contract_text(snapshot, nil),
+    do: "#{snapshot.expiry} #{Decimal.to_string(snapshot.strike)}#{snapshot.right}"
+
+  defp contract_text(snapshot, legs),
+    do:
+      "#{snapshot.expiry} #{Combo.legs_label(legs)} #{Combo.structure_label(snapshot.structure)}"
+
+  defp capital_basis(1, _legs), do: "premium paid"
+  defp capital_basis(_short, nil), do: "Reg-T margin"
+  defp capital_basis(_short, _legs), do: "max loss"
+
+  # The contract a fill was for: a combo leg's own strike/right when the
+  # fill names a leg, else the run's contract.
+  defp fill_contract(%{leg_index: i, sim_run: %{legs: [_ | _] = legs} = run})
+       when is_integer(i) do
+    case Enum.find(legs, &(&1.leg_index == i)) do
+      nil -> run
+      leg -> %{run | expiry: leg.expiry, strike: leg.strike, right: leg.right}
+    end
+  end
+
+  defp fill_contract(fill), do: fill.sim_run
+
+  # The member header's contract: every leg for a combo run.
+  defp run_contract_text(run, snapshot) do
+    case snapshot && combo_legs(snapshot) do
+      nil -> "#{format_expiry(run.expiry)} #{Decimal.to_string(run.strike)}#{run.right}"
+      legs -> "#{format_expiry(run.expiry)} #{Combo.legs_label(legs)}"
+    end
+  end
+
   attr :entry, :map, required: true
 
   defp member_card(assigns) do
@@ -927,7 +991,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
           <span class="text-base-content/40 text-sm">{@entry.member.exchange || "—"}</span>
 
           <span :if={@entry.run} class="font-data text-[11px] text-base-content/50">
-            {format_expiry(@entry.run.expiry)} {Decimal.to_string(@entry.run.strike)}{@entry.run.right}
+            {run_contract_text(@entry.run, @entry.snapshot)}
           </span>
 
           <span class={[
@@ -996,6 +1060,13 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
             >{@entry.position.occ}</span>
           </div>
 
+          <div
+            :if={@entry.snapshot.position_open? && @entry.position.structure}
+            class="font-data text-[11px] text-base-content/40 mb-1"
+          >
+            Prices below are the combo's NET credit per share (short legs less long legs).
+          </div>
+
           <div :if={not @entry.snapshot.position_open?} class="text-base-content/30 text-sm">
             Flat — watching this contract for an entry
           </div>
@@ -1031,7 +1102,7 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
                   </td>
                 </tr>
                 <tr :if={@entry.position.cost_to_buy}>
-                  <td class="text-base-content/40 pr-3 py-0.5">Cost to buy</td>
+                  <td class="text-base-content/40 pr-3 py-0.5">{@entry.position.cost_label}</td>
                   <td class="pr-3 py-0.5 tabular-nums">
                     {money(@entry.position.cost_to_buy)}
                     <span class="text-base-content/40">
@@ -1039,9 +1110,19 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
                         @entry.position.qty
                       )}
                     </span>
-                    <span :if={@entry.position.capital} class="text-base-content/40">
+                    <span
+                      :if={@entry.position.capital && @entry.position.cost_label == "Cost to buy"}
+                      class="text-base-content/40"
+                    >
                       · capital at risk
                     </span>
+                  </td>
+                </tr>
+                <tr :if={@entry.position.capital && @entry.position.cost_label != "Cost to buy"}>
+                  <td class="text-base-content/40 pr-3 py-0.5">Capital at risk</td>
+                  <td class="pr-3 py-0.5 tabular-nums">
+                    {money(@entry.position.capital)}
+                    <span class="text-base-content/40">({@entry.position.capital_basis})</span>
                   </td>
                 </tr>
                 <tr :if={@entry.position.entry_fee}>
@@ -1144,18 +1225,20 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
         <span :if={@run.exit_price}>
           <span :if={@run.entry_price}>${Decimal.round(@run.entry_price, 2)} →</span>
           ${Decimal.round(@run.exit_price, 2)}
-          <span class="text-base-content/40">per share</span>
+          <span class="text-base-content/40">
+            {if @run.structure, do: "net per share", else: "per share"}
+          </span>
         </span>
         <span :if={is_nil(@run.exit_price)} class="text-base-content/50">
           Closed without an entry ({@run.exit_reason})
         </span>
       </div>
       <div :if={@run.exit_price && @cost.cost_to_buy} class="text-base-content/70">
-        Cost {dollars(@cost.cost_to_buy)}
+        {if @run.direction == "short", do: "Credit", else: "Cost"} {dollars(@cost.cost_to_buy)}
         <span class="text-base-content/40">
           ({@cost.contracts} × {@run.multiplier || 100} sh)
         </span>
-        → proceeds {dollars(@cost.proceeds)} · gross
+        → {if @run.direction == "short", do: "buyback", else: "proceeds"} {dollars(@cost.proceeds)} · gross
         <span class={pnl_class(@cost.gross_pnl)}>{signed_dollars(@cost.gross_pnl)}</span>
         · fees {dollars(@cost.fees)}
         <span :if={@cost.spread_paid} class="text-base-content/40">

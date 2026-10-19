@@ -17,7 +17,10 @@ defmodule TradingOptionsSim.Sim.TradeCost do
   capital is the Reg-T margin held against it, recorded as the run's
   `risk_at_entry` (`Sim.compute_short_risk_at_entry/6`) on runs whose
   `context["risk_basis"]` is `"reg_t_margin"` (every short run since the
-  2026-10-17 backfill). A short run without that stamp recorded the
+  2026-10-17 backfill). A multi-leg combo run (`context["risk_basis"]`
+  `"max_loss"`) records the structure's maximum loss there instead, and
+  that is its capital. For a combo `entry_price` is the NET credit, so
+  "cost to buy" is the credit received. A short run without either stamp recorded the
   premium there, so its `capital`/`return_pct` stay `nil` rather than a
   number that looks right and isn't.
 
@@ -84,6 +87,10 @@ defmodule TradingOptionsSim.Sim.TradeCost do
          _cost
        ),
        do: run.risk_at_entry
+
+  # A combo's is its defined max loss (Combo.risk_at_entry/4).
+  defp capital(%SimRun{direction: "short", context: %{"risk_basis" => "max_loss"}} = run, _cost),
+    do: run.risk_at_entry
 
   defp capital(%SimRun{direction: "short"}, _cost), do: nil
   defp capital(_run, cost_to_buy), do: cost_to_buy

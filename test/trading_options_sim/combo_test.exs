@@ -286,4 +286,30 @@ defmodule TradingOptionsSim.ComboTest do
       refute changeset.valid?
     end
   end
+
+  describe "display labels and R basis" do
+    test "legs_label/1 lists legs in order, short as - and long as +" do
+      legs = [
+        %{leg_index: 1, side: "long", strike: Decimal.new("140"), right: "P"},
+        %{leg_index: 0, side: "short", strike: Decimal.new("145.00"), right: "P"}
+      ]
+
+      assert Combo.legs_label(legs) == "-145.00P +140P"
+      assert Combo.structure_label("iron_condor") == "iron condor"
+    end
+
+    test "r_denominator/1 labels a combo version max_loss, a naked short reg_t_margin" do
+      combo = %TradingOptionsSim.Sim.StrategyVersion{
+        direction: "short",
+        option_leg_config: %{"multi_leg" => %{"structure" => "iron_condor"}}
+      }
+
+      naked = %TradingOptionsSim.Sim.StrategyVersion{direction: "short", option_leg_config: %{}}
+      long = %TradingOptionsSim.Sim.StrategyVersion{direction: "long", option_leg_config: nil}
+
+      assert Sim.r_denominator(combo) == "max_loss"
+      assert Sim.r_denominator(naked) == "reg_t_margin"
+      assert Sim.r_denominator(long) == "premium_at_risk"
+    end
+  end
 end
