@@ -398,10 +398,19 @@ are baselines.
 
 **Signal hygiene:**
 - **Never use a `trading_signal` definition classified as noise**:
-  SPY/QQQ/VIX derivatives, the SPY/QQQ wavelet derivatives and
+  the QQQ/VIX derivatives, the SPY/QQQ wavelet derivatives and
   accelerations, raw VIX, SPY IV rank, QQQ volume z, XLE signed volume.
   Prefer the persistent ones: wavelet levels, VWAP deviation, self-z
   scores, NYSE TICK, `run_poly_*`.
+- **The SPY derivative (`fc6b3f93`, `massive_spy_derivative`) is
+  usable** (cleared 2026-10-21). Its noise label came from the old
+  5-minute sampling. At 1-minute sampling (RTH, 2026-09-28 to 10-20)
+  its lag-1 autocorrelation is 0.79 and its sign flips on 23% of
+  minutes. It behaves like SPY's 5-minute return: its sign matches
+  `run_poly_ret_5m_bps` at 98% of entries (correlation 0.77). The
+  ±0.002 threshold is crossed rarely: the signal sits beyond it on about
+  6–7% of minutes each side. Only this derivative was re-measured; the
+  others stay excluded until they're measured the same way.
 - Don't use Kyle's lambda as a filter until trading_core's unit
   rescale lands: most readings currently round to 0.
 - Before relying on a definition, read its `notes` (the "CAVEATS FIRST"
