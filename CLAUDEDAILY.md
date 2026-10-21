@@ -398,19 +398,10 @@ are baselines.
 
 **Signal hygiene:**
 - **Never use a `trading_signal` definition classified as noise**:
-  the QQQ/VIX derivatives, the SPY/QQQ wavelet derivatives and
+  SPY/QQQ/VIX derivatives, the SPY/QQQ wavelet derivatives and
   accelerations, raw VIX, SPY IV rank, QQQ volume z, XLE signed volume.
   Prefer the persistent ones: wavelet levels, VWAP deviation, self-z
   scores, NYSE TICK, `run_poly_*`.
-- **The SPY derivative (`fc6b3f93`, `massive_spy_derivative`) is
-  usable** (cleared 2026-10-21). Its noise label came from the old
-  5-minute sampling. At 1-minute sampling (RTH, 2026-09-28 to 10-20)
-  its lag-1 autocorrelation is 0.79 and its sign flips on 23% of
-  minutes. It behaves like SPY's 5-minute return: its sign matches
-  `run_poly_ret_5m_bps` at 98% of entries (correlation 0.77). The
-  ±0.002 threshold is crossed rarely: the signal sits beyond it on about
-  6–7% of minutes each side. Only this derivative was re-measured; the
-  others stay excluded until they're measured the same way.
 - Don't use Kyle's lambda as a filter until trading_core's unit
   rescale lands: most readings currently round to 0.
 - Before relying on a definition, read its `notes` (the "CAVEATS FIRST"
@@ -420,6 +411,23 @@ are baselines.
   -- from signal_value_history, persisted every 1 minute
   -- lag-1 autocorrelation near 0, or ~50% sign flips, means noise at this cadence
   ```
+
+  **That test is wrong for signals built on overlapping windows.**
+  Derivatives, n-minute returns and rolling sums are like this: a
+  5-minute change written every minute shares 4 of its 5 minutes with
+  the next reading. Pure noise built that way already has a lag-1
+  autocorrelation of about (k−1)/k (0.80 for 5 minutes), with only
+  ~20% sign flips. For these signals, compare the autocorrelation with a
+  **matched random-walk null**: the same window and cadence applied to a
+  random walk, per session, as the Signal Quality Board does. A signal
+  is persistent only if it sits clearly above that null. Example: the
+  SPY derivative (`fc6b3f93`) has a lag-1 autocorrelation of 0.79,
+  which looks persistent but is at the 17.6th percentile of its null,
+  so it stays noise. It also means its sign is just the trailing
+  5-minute return (`run_poly_ret_5m_bps`), so a sign rule on it adds
+  nothing. Its magnitude can still carry information: its bottom decile
+  is followed by about +5 bps over 60 minutes, a mean-reversion effect
+  (trading_signal, 2026-10-21).
 
 - Don't set thresholds from history that predates a known fix:
   - OFI (all symbols): ignore history before 2026-09-28.
