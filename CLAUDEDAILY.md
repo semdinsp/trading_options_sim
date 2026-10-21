@@ -412,6 +412,23 @@ are baselines.
   -- lag-1 autocorrelation near 0, or ~50% sign flips, means noise at this cadence
   ```
 
+  **That test is wrong for signals built on overlapping windows.**
+  Derivatives, n-minute returns and rolling sums are like this: a
+  5-minute change written every minute shares 4 of its 5 minutes with
+  the next reading. Pure noise built that way already has a lag-1
+  autocorrelation of about (k−1)/k (0.80 for 5 minutes), with only
+  ~20% sign flips. For these signals, compare the autocorrelation with a
+  **matched random-walk null**: the same window and cadence applied to a
+  random walk, per session, as the Signal Quality Board does. A signal
+  is persistent only if it sits clearly above that null. Example: the
+  SPY derivative (`fc6b3f93`) has a lag-1 autocorrelation of 0.79,
+  which looks persistent but is at the 17.6th percentile of its null,
+  so it stays noise. It also means its sign is just the trailing
+  5-minute return (`run_poly_ret_5m_bps`), so a sign rule on it adds
+  nothing. Its magnitude can still carry information: its bottom decile
+  is followed by about +5 bps over 60 minutes, a mean-reversion effect
+  (trading_signal, 2026-10-21).
+
 - Don't set thresholds from history that predates a known fix:
   - OFI (all symbols): ignore history before 2026-09-28.
   - RSP–SPY spread: ignore history before 2026-09-24.
