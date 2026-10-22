@@ -25,6 +25,14 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
   * `snapshot_keys` -- `ContractMonitor.snapshot_keys/0`, the keys this
     app writes, so trading_live's capability check is driven by the
     source rather than a copied list.
+  * `session_evidence` -- the version's per-session record, oldest first:
+    `[%{"date", "n", "r_mid", "r_net", "r_touch"}]`, each R summed over
+    that UTC exit date's closes. `r_mid` is before costs (mid-to-mid),
+    `r_net` the published R (worked fills plus commission), `r_touch`
+    every fill at the touch plus commission (`Sim.session_evidence/1`).
+    Asked for by trading_live 2026-10-22 so a promotion carries its
+    quarantine evidence. Additive, like `entry_delay_minutes`: no
+    `schema_version` bump.
   * `content_hash` -- SHA-256 (lowercase hex) of the canonical JSON of
     `%{"option_leg_config", "params", "rules"}`: object keys sorted at
     every depth, no whitespace. Map ordering can't change it; any change
@@ -131,8 +139,23 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
       "execution" =>
         Map.new(ContractMonitor.execution_defaults(), fn {k, val} -> {to_string(k), val} end),
       "snapshot_keys" => ContractMonitor.snapshot_keys(),
-      "content_hash" => content_hash(v)
+      "content_hash" => content_hash(v),
+      "session_evidence" => session_evidence(v.id)
     }
+  end
+
+  # One row per UTC exit date, oldest first, with that session's summed R
+  # before costs (mid), as simulated (net) and at the touch.
+  defp session_evidence(version_id) do
+    for e <- TradingOptionsSim.Sim.session_evidence(version_id) do
+      %{
+        "date" => Date.to_iso8601(e.date),
+        "n" => e.n,
+        "r_mid" => e.r_mid,
+        "r_net" => e.r_net,
+        "r_touch" => e.r_touch
+      }
+    end
   end
 
   defp target_pool(nil), do: nil

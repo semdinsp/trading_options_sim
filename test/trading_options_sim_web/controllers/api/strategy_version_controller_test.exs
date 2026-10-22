@@ -110,6 +110,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
       assert "run_poly_vwap_dev_bps" in body["snapshot_keys"]
       refute "dte" in body["snapshot_keys"]
       assert body["content_hash"] =~ ~r/\A[0-9a-f]{64}\z/
+      # Per-session evidence travels with the promotion; none yet here.
+      assert body["session_evidence"] == []
     end
 
     test "requires strategies:read", %{conn: conn} do
@@ -377,6 +379,8 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
         first_traded_on last_traded_on
         expectancy_r sd_r total_r
         n_sessions mean_daily_r sd_daily_r
+        mean_daily_r_mid sd_daily_r_mid mean_daily_r_touch sd_daily_r_touch
+        cost_share quote_fill_share
         realized_pnl realized_pnl_gross
         required_r cost_basis cost_margin
         capital_hours capital_basis scored_runs scored_runs_coverage
