@@ -1547,6 +1547,98 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert fill.pricing_snapshot["fill_ask"] == "7.0"
     end
 
+    # Stops are checked on the option's price, but a price outside the
+    # live book is stale. 2026-10-22: at the open after a gap, IBKR's
+    # price was still the prior session's, below the stop set off the
+    # quote fill, and stops fired half a second after entry.
+    defp enter_with_quote_and_stop(symbol, occ_symbol) do
+      version =
+        version_fixture(
+          %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "lt", "value" => 0}
+          },
+          %{
+            "risk_controls" => %{
+              "method" => "percent_of_entry",
+              "stop_loss_percent" => 15,
+              "take_profit_percent" => 25
+            }
+          }
+        )
+
+      {pid, run} =
+        start_monitor(version, contract_key(symbol),
+          pricing_backend: :ibkr_live,
+          occ_symbol: occ_symbol
+        )
+
+      await_ibkr_live(occ_symbol)
+
+      greeks = %{
+        implied_vol: 0.30,
+        delta: 0.55,
+        opt_price: 6.00,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        und_price: 150.0
+      }
+
+      broadcast_option_greeks(occ_symbol, greeks)
+      broadcast_option_quote(occ_symbol, %{bid: 5.00, bid_size: 10})
+      broadcast_option_quote(occ_symbol, %{ask: 7.00, ask_size: 10})
+      sync(pid)
+      broadcast_underlying_price(symbol, 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      # Filled at 6.50 on the 5.00/7.00 book: the 15% stop is 5.525.
+      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.5250"))
+
+      reprice = fn opt_price ->
+        broadcast_option_greeks(occ_symbol, %{greeks | opt_price: opt_price})
+        sync(pid)
+        broadcast_underlying_price(symbol, 150.0)
+        sync(pid)
+      end
+
+      {pid, run, reprice}
+    end
+
+    test "a stale price below the live book does not trigger the stop" do
+      {pid, run, reprice} = enter_with_quote_and_stop("IBKRSTALE1", "IBKRSTALE1_OCC")
+
+      # 4.00 is under the stop but outside the unchanged 5.00/7.00 book;
+      # the 6.00 mid is what could trade.
+      reprice.(4.00)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).status == "open"
+    end
+
+    test "a price inside the live book still triggers the stop" do
+      {pid, run, reprice} = enter_with_quote_and_stop("IBKRSTALE2", "IBKRSTALE2_OCC")
+
+      reprice.(5.20)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).exit_reason == "stop_loss"
+    end
+
+    test "the stop still fires when the book itself falls through it" do
+      {pid, run, reprice} = enter_with_quote_and_stop("IBKRSTALE3", "IBKRSTALE3_OCC")
+
+      broadcast_option_quote("IBKRSTALE3_OCC", %{bid: 4.00, bid_size: 10})
+      broadcast_option_quote("IBKRSTALE3_OCC", %{ask: 4.40, ask_size: 10})
+      sync(pid)
+      # The price stays at the stale 6.00, above the book: the 4.20 mid is used.
+      reprice.(6.00)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).exit_reason == "stop_loss"
+    end
+
     test "a worked rule exit crosses only the configured spread fraction" do
       {pid, run} = enter_with_quote("IBKRQ2", "IBKRQ2_OCC", [])
 
