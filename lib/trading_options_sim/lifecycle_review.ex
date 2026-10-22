@@ -5,9 +5,15 @@ defmodule TradingOptionsSim.LifecycleReview do
 
   A version is a LOSER when it is:
     * an active `discovery` version with at least #{30} closed trades
-      over at least #{3} sessions and negative net P&L (commissions in), or
+      and negative net P&L (commissions in), or
     * a `quarantine` version that fails the quarantine test
-      (`Sim.quarantine_failing?/1`) after #{20}+ quarantine trading days.
+      (`Sim.quarantine_failing?/1`) after #{20}+ quarantine trading days,
+
+  and in both cases has traded on at least
+  `Sim.min_trading_days_to_retire/0` (15) distinct days. Calendar age
+  doesn't count: a version that has existed for 120 days but traded on
+  only 14 of them is left alone (user's rule, 2026-10-22; it was 3
+  sessions before).
 
   Before switching a loser off, its trades are split by the trend x vol
   regime recorded at entry (`Sim.best_regime_cell/1`). If one regime
@@ -40,7 +46,6 @@ defmodule TradingOptionsSim.LifecycleReview do
   alias TradingOptionsSim.Sim.{SimRun, Strategy, StrategyVersion}
 
   @min_trades 30
-  @min_sessions 3
   @protected_tags ~w(Noise-Baseline od:slope-hold)
   @default_risk_controls %{
     "method" => "percent_of_entry",
@@ -110,14 +115,17 @@ defmodule TradingOptionsSim.LifecycleReview do
         "discovery" ->
           case stats[v.id] do
             %{n: n, sessions: s, net: net} ->
-              n >= @min_trades and s >= @min_sessions and Decimal.compare(net, 0) == :lt
+              n >= @min_trades and s >= Sim.min_trading_days_to_retire() and
+                Decimal.compare(net, 0) == :lt
 
             _ ->
               false
           end
 
         "quarantine" ->
-          v.quarantine_trading_days >= 20 and Sim.quarantine_failing?(v.id) and
+          v.quarantine_trading_days >= 20 and
+            Map.get(stats, v.id, %{sessions: 0}).sessions >= Sim.min_trading_days_to_retire() and
+            Sim.quarantine_failing?(v.id) and
             Sim.best_regime_cell(v.id) != nil
       end
     end)
