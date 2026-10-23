@@ -2216,6 +2216,72 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       refute_in_delta Decimal.to_float(run.stop_loss_price), entry * 0.85, 1.0e-6
     end
 
+    # "atr": k underlying ATRs, carried into premium by the entry delta.
+    # The ATR source is stubbed (no trading_signal node in tests).
+    defmodule StubAtr do
+      def lookup(_symbol, _period), do: :persistent_term.get({__MODULE__, :reply}, :miss)
+    end
+
+    defp with_stub_atr(reply, fun) do
+      :persistent_term.put({StubAtr, :reply}, reply)
+      Application.put_env(:trading_options_sim, :daily_atr_source, StubAtr)
+
+      try do
+        fun.()
+      after
+        Application.delete_env(:trading_options_sim, :daily_atr_source)
+        :persistent_term.erase({StubAtr, :reply})
+      end
+    end
+
+    @atr %{
+      "method" => "atr",
+      "sl_atr_mult" => 0.5,
+      "tp_atr_mult" => 1.0,
+      "stop_loss_percent" => 15,
+      "take_profit_percent" => 25
+    }
+
+    test "atr sizes the levels from the underlying's ATR times the entry delta" do
+      with_stub_atr({:ok, %{atr: Decimal.new("3.0")}}, fn ->
+        {pid, run} = start_monitor(risk_version(%{"risk_controls" => @atr}), contract_key("ATR1"))
+        broadcast_underlying_price("ATR1", 150.0)
+        sync(pid)
+
+        run = Sim.get_sim_run!(run.id)
+        delta = abs(ContractMonitor.snapshot(pid).last_snapshot["run_delta"])
+        entry = Decimal.to_float(run.entry_price)
+
+        assert run.context["risk_method"] == "atr"
+        assert run.context["atr"] == 3.0
+        assert run.context["risk_fallback_reason"] == nil
+        assert_in_delta run.context["atr_premium_daily_vol"], 3.0 * delta / entry, 1.0e-6
+        # A 0.5-ATR move in the stock is 1.5 * delta of premium.
+        assert_in_delta Decimal.to_float(run.stop_loss_price), entry - 0.5 * 3.0 * delta, 1.0e-6
+        assert_in_delta Decimal.to_float(run.take_profit_price), entry + 1.0 * 3.0 * delta, 1.0e-6
+        refute_in_delta Decimal.to_float(run.stop_loss_price), entry * 0.85, 1.0e-6
+      end)
+    end
+
+    # Must not fire on healthy input: no ATR is not "no stop" -- the
+    # version's own percents apply, and the run records why.
+    test "atr falls back to the version's percents when no ATR is available" do
+      with_stub_atr(:miss, fn ->
+        {pid, run} = start_monitor(risk_version(%{"risk_controls" => @atr}), contract_key("ATR2"))
+        broadcast_underlying_price("ATR2", 150.0)
+        sync(pid)
+
+        run = Sim.get_sim_run!(run.id)
+        assert run.context["risk_method"] == "percent_of_entry"
+        assert run.context["risk_fallback_reason"] == "no_atr"
+
+        assert Decimal.equal?(
+                 run.stop_loss_price,
+                 Decimal.mult(run.entry_price, Decimal.new("0.85"))
+               )
+      end)
+    end
+
     test "round_numbers applies the adjustment to the entry's take profit" do
       risk = Map.put(@risk, "round_numbers", true)
       {pid, run} = start_monitor(risk_version(%{"risk_controls" => risk}), contract_key("SLTP7"))

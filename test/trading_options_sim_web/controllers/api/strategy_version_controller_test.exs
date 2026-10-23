@@ -127,6 +127,31 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
 
     # Without risk_controls this app runs with no stop, but the live apps
     # fall back to a 5%/10% default, so exporting would change behaviour.
+    # trading_live has no ATR source for option stops: it would run the
+    # 5%/10% default instead.
+    test "422 not_promotable for an atr risk_controls version", %{conn: conn} do
+      version = export_version(%{})
+
+      atr = %{
+        "method" => "atr",
+        "sl_atr_mult" => 0.5,
+        "tp_atr_mult" => 1.0,
+        "stop_loss_percent" => 10,
+        "take_profit_percent" => 20
+      }
+
+      {:ok, _} = Repo.update(Ecto.Changeset.change(version, params: %{"risk_controls" => atr}))
+
+      body =
+        conn
+        |> token_conn(["strategies:read"])
+        |> get(~p"/api/v1/versions/#{version.id}/promotion_export")
+        |> json_response(422)
+
+      assert [reason] = body["reasons"]
+      assert reason =~ "atr"
+    end
+
     test "422 not_promotable for a version without risk_controls", %{conn: conn} do
       version = export_version(%{})
       {:ok, _} = Repo.update(Ecto.Changeset.change(version, params: %{"min_hold_seconds" => 1}))
