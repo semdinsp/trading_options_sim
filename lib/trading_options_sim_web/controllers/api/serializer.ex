@@ -213,6 +213,14 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "n_sessions" => row.n_sessions,
       "mean_daily_r" => decimal_or_float(row.mean_daily_r),
       "sd_daily_r" => decimal_or_float(row.sd_daily_r),
+      # Before costs (mid-to-mid) and at the touch; see
+      # Sim.session_cost_stats_by_version/1.
+      "mean_daily_r_mid" => row.mean_daily_r_mid,
+      "sd_daily_r_mid" => row.sd_daily_r_mid,
+      "mean_daily_r_touch" => row.mean_daily_r_touch,
+      "sd_daily_r_touch" => row.sd_daily_r_touch,
+      "cost_share" => row.cost_share,
+      "quote_fill_share" => row.quote_fill_share,
 
       # Money
       "realized_pnl" => decimal_or_float(row.realized_pnl),

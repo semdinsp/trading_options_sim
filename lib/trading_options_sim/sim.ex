@@ -1779,6 +1779,7 @@ defmodule TradingOptionsSim.Sim do
     commission_by_id = avg_commission_by_version(version_ids)
     exit_histogram_by_id = exit_reason_histogram_by_version(version_ids)
     session_by_id = session_stats_by_version(version_ids)
+    cost_by_id = session_cost_stats_by_version(version_ids)
     computed_through = DateTime.utc_now()
     last_traded_by_id = last_traded_on_by_version(version_ids)
     excluded_by_id = excluded_run_stats_by_version(version_ids)
@@ -1807,6 +1808,16 @@ defmodule TradingOptionsSim.Sim do
           n_sessions: 0,
           mean_daily_r: nil,
           sd_daily_r: nil
+        })
+
+      cost =
+        Map.get(cost_by_id, version.id, %{
+          mean_daily_r_mid: nil,
+          sd_daily_r_mid: nil,
+          mean_daily_r_touch: nil,
+          sd_daily_r_touch: nil,
+          cost_share: nil,
+          quote_fill_share: nil
         })
 
       %{
@@ -1846,6 +1857,19 @@ defmodule TradingOptionsSim.Sim do
         n_sessions: session.n_sessions,
         mean_daily_r: session.mean_daily_r,
         sd_daily_r: session.sd_daily_r,
+        # This app's addition (2026-10-22, from trading_live's review):
+        # the same per-session grain on two more cost bases, as (mean, sd)
+        # sufficient statistics like the net pair above. _mid is before
+        # costs (mid-to-mid), _touch pays the full half-spread on every
+        # fill plus commission. cost_share is the share of mid-to-mid R
+        # the simulated costs take; quote_fill_share is how much of the
+        # evidence had a real quote. See session_cost_stats_by_version/1.
+        mean_daily_r_mid: cost.mean_daily_r_mid,
+        sd_daily_r_mid: cost.sd_daily_r_mid,
+        mean_daily_r_touch: cost.mean_daily_r_touch,
+        sd_daily_r_touch: cost.sd_daily_r_touch,
+        cost_share: cost.cost_share,
+        quote_fill_share: cost.quote_fill_share,
 
         # Money
         realized_pnl: stats.realized_pnl,
@@ -2260,6 +2284,182 @@ defmodule TradingOptionsSim.Sim do
 
       {row.strategy_version_id,
        %{n_sessions: row.n_sessions, mean_daily_r: row.mean_daily_r, sd_daily_r: sd}}
+    end)
+  end
+
+  # --- Cost bases (this app's addition to 0_SPEC.md's per-session grain) ---
+  #
+  # The published R (`r_multiple/1`) is NET: fills already give up the
+  # spread (a worked fill crosses `worked_spread_fraction` of it, a forced
+  # exit the full half-spread) and realized_pnl_net takes out commission.
+  # Asking "is there an edge before costs?" needs the trade measured
+  # mid-to-mid, and "does it survive a pessimistic fill?" needs every fill
+  # at the touch. Both are rebuilt per run from what each SimFill already
+  # recorded, over the SAME scored population as the net R:
+  #
+  #   r_mid   = (realized_pnl + slippage) / risk_at_entry
+  #   r_touch = (realized_pnl + slippage - half_spread - commission) / risk_at_entry
+  #
+  # slippage is sum(fill_slippage * qty) * multiplier -- fill_slippage is
+  # the per-share distance from the quote mid, always against the trade --
+  # and half_spread is sum((fill_ask - fill_bid) / 2 * qty) * multiplier.
+  # A fill with no quote (fill_basis "model_price") has neither, so it
+  # counts as mid in both; quote_fill_share says how much of a version's
+  # evidence that covers.
+  defp run_cost_r(version_ids) do
+    fill_costs =
+      from f in SimFill,
+        group_by: f.sim_run_id,
+        select: %{
+          sim_run_id: f.sim_run_id,
+          slippage:
+            sum(
+              fragment(
+                "COALESCE(NULLIF(?->>'fill_slippage', '')::numeric, 0) * ?",
+                f.pricing_snapshot,
+                f.quantity
+              )
+            ),
+          half_spread:
+            sum(
+              fragment(
+                "COALESCE((NULLIF(?->>'fill_ask', '')::numeric - NULLIF(?->>'fill_bid', '')::numeric) / 2, 0) * ?",
+                f.pricing_snapshot,
+                f.pricing_snapshot,
+                f.quantity
+              )
+            ),
+          commission: sum(coalesce(f.commission, 0)),
+          fills: count(f.id),
+          quote_fills:
+            fragment("COUNT(*) FILTER (WHERE ?->>'fill_basis' = 'quote')", f.pricing_snapshot)
+        }
+
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids)
+    |> scored()
+    |> join(:left, [r], c in subquery(fill_costs), on: c.sim_run_id == r.id)
+    |> select([r, c], %{
+      strategy_version_id: r.strategy_version_id,
+      d: fragment("(? AT TIME ZONE 'UTC')::date", r.exit_at),
+      r_net: r_multiple(r),
+      r_mid:
+        fragment(
+          "(COALESCE(?, ?) + COALESCE(?, 0) * ?) / ?",
+          r.realized_pnl,
+          r.realized_pnl_net,
+          c.slippage,
+          r.multiplier,
+          r.risk_at_entry
+        ),
+      r_touch:
+        fragment(
+          "(COALESCE(?, ?) + (COALESCE(?, 0) - COALESCE(?, 0)) * ? - COALESCE(?, 0)) / ?",
+          r.realized_pnl,
+          r.realized_pnl_net,
+          c.slippage,
+          c.half_spread,
+          r.multiplier,
+          c.commission,
+          r.risk_at_entry
+        ),
+      fills: coalesce(c.fills, 0),
+      quote_fills: coalesce(c.quote_fills, 0)
+    })
+  end
+
+  # Per-session sufficient statistics on the mid and touch bases, plus the
+  # share of mid-to-mid R the costs consume. Same grain and date as
+  # session_stats_by_version/1, so mean_daily_r and mean_daily_r_mid are
+  # directly comparable.
+  defp session_cost_stats_by_version(version_ids) do
+    daily =
+      from x in subquery(run_cost_r(version_ids)),
+        group_by: [x.strategy_version_id, x.d],
+        select: %{
+          strategy_version_id: x.strategy_version_id,
+          d: x.d,
+          r_mid: sum(x.r_mid),
+          r_touch: sum(x.r_touch),
+          r_net: sum(x.r_net),
+          fills: sum(x.fills),
+          quote_fills: sum(x.quote_fills)
+        }
+
+    from(x in subquery(daily),
+      group_by: x.strategy_version_id,
+      select: %{
+        strategy_version_id: x.strategy_version_id,
+        n_sessions: count(x.d),
+        mean_daily_r_mid: avg(x.r_mid),
+        sd_daily_r_mid: fragment("stddev_samp(?)", x.r_mid),
+        mean_daily_r_touch: avg(x.r_touch),
+        sd_daily_r_touch: fragment("stddev_samp(?)", x.r_touch),
+        total_r_mid: sum(x.r_mid),
+        total_r_net: sum(x.r_net),
+        fills: sum(x.fills),
+        quote_fills: sum(x.quote_fills)
+      }
+    )
+    |> Repo.all()
+    |> Map.new(fn row ->
+      two? = row.n_sessions >= 2
+
+      {row.strategy_version_id,
+       %{
+         mean_daily_r_mid: float_or_nil(row.mean_daily_r_mid),
+         sd_daily_r_mid: if(two?, do: float_or_nil(row.sd_daily_r_mid)),
+         mean_daily_r_touch: float_or_nil(row.mean_daily_r_touch),
+         sd_daily_r_touch: if(two?, do: float_or_nil(row.sd_daily_r_touch)),
+         cost_share: cost_share(row.total_r_mid, row.total_r_net),
+         quote_fill_share: ratio(float_or_nil(row.quote_fills), float_or_nil(row.fills))
+       }}
+    end)
+  end
+
+  # Share of the before-costs edge the costs take: 0.4 means costs ate 40%
+  # of mid-to-mid R. Only meaningful when there was an edge to eat, so nil
+  # unless total_r_mid > 0.
+  defp cost_share(mid, net) do
+    mid = float_or_nil(mid)
+    net = float_or_nil(net)
+    if is_float(mid) and is_float(net) and mid > 0, do: (mid - net) / mid
+  end
+
+  defp float_or_nil(nil), do: nil
+  defp float_or_nil(x), do: to_float(x)
+
+  @doc """
+  The per-session evidence for one version, oldest first: one map per UTC
+  exit date with `date`, `n` (closes), and that session's summed R on
+  three bases -- `r_mid` (before costs, mid-to-mid), `r_net` (as
+  simulated: worked fills plus commission, the published R) and
+  `r_touch` (every fill at the touch, plus commission). Same scored
+  population and grain as `full_universe_version_metrics/0`'s
+  per-session fields, so the list's `r_net` sums to that row's `total_r`.
+  Attached to `PromotionExport` so a promotion carries its own evidence.
+  """
+  @spec session_evidence(String.t()) :: [map()]
+  def session_evidence(version_id) do
+    from(x in subquery(run_cost_r([version_id])),
+      group_by: x.d,
+      order_by: x.d,
+      select: %{
+        date: x.d,
+        n: count(x.d),
+        r_mid: sum(x.r_mid),
+        r_net: sum(x.r_net),
+        r_touch: sum(x.r_touch)
+      }
+    )
+    |> Repo.all()
+    |> Enum.map(fn row ->
+      %{
+        row
+        | r_mid: float_or_nil(row.r_mid),
+          r_net: float_or_nil(row.r_net),
+          r_touch: float_or_nil(row.r_touch)
+      }
     end)
   end
 
