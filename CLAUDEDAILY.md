@@ -166,10 +166,16 @@ set in the last 24 h, and list them in the summary.
 - Gate values: discovery → quarantine needs ≥ 20 closed runs (with an
   entry) and realized P&L ≥ 0. Quarantine → retired needs ≥ 20
   quarantine trading days and a loss/win ratio > 2.0.
+- **Nothing is retired automatically before it has traded on 15
+  distinct days** (`Sim.min_trading_days_to_retire/0`, since
+  2026-10-22). Calendar age doesn't count: a version 120 days old that
+  traded on 14 of them stays. This applies to both the quarantine job
+  and LifecycleReview. Before it, LifecycleReview retired discovery
+  losers after only 3 sessions.
 - **LifecycleReview** runs right after the 07:00 job
   (`TradingOptionsSim.LifecycleReview`). It looks at active discovery
-  versions with at least 30 trades over at least 3 sessions and negative
-  net P&L, and at failing quarantine versions.
+  versions with at least 30 trades and negative net P&L, and at failing
+  quarantine versions.
   - If one trend x vol regime cell was profitable (at least 15 trades
     over at least 2 sessions, net > 0), it forks the version with an
     entry gate on that regime (tag `Regime-Gated-Fork`) and retires the

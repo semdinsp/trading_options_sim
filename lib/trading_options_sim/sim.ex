@@ -542,6 +542,13 @@ defmodule TradingOptionsSim.Sim do
   @quarantine_max_trading_days 20
   @quarantine_max_loss_ratio Decimal.new("2.0")
 
+  # No automatic retirement before a version has traded on this many
+  # distinct days (user's choice, 2026-10-22). Calendar age doesn't
+  # count: a version 120 days old that traded on 14 of them is kept.
+  # Before this, LifecycleReview retired discovery losers after only 3
+  # sessions -- 49 of its first 51 retirements had fewer than 15.
+  @min_trading_days_to_retire 15
+
   @doc """
   Job 1 of the daily quarantine-eligibility check
   (`TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker`):
@@ -668,7 +675,9 @@ defmodule TradingOptionsSim.Sim do
   against it.
 
   Never retires a version linked to trading_live or an always-long
-  control (strategy name contains "Control").
+  control (strategy name contains "Control"), nor one that has traded on
+  fewer than `#{@min_trading_days_to_retire}` distinct days in its life
+  (`enough_trading_days_to_retire?/1`).
   """
   @spec auto_retire_failing_quarantine_versions() :: {:ok, [StrategyVersion.t()]}
   def auto_retire_failing_quarantine_versions do
@@ -689,9 +698,13 @@ defmodule TradingOptionsSim.Sim do
     # A failing version that is profitable in one regime is NOT retired
     # here: TradingOptionsSim.LifecycleReview forks it with that regime
     # gate and deactivates it instead.
+    # quarantine_trading_days only counts days in quarantine with a close,
+    # but it can be edited by hand, so the lifetime floor is checked
+    # directly as well.
     failing_ids =
       Enum.filter(quarantine_version_ids, fn version_id ->
-        quarantine_failing?(version_id) and is_nil(best_regime_cell(version_id))
+        enough_trading_days_to_retire?(version_id) and quarantine_failing?(version_id) and
+          is_nil(best_regime_cell(version_id))
       end)
 
     retired =
@@ -791,6 +804,34 @@ defmodule TradingOptionsSim.Sim do
         Decimal.compare(loss, 0) == :gt
     end
   end
+
+  @doc "Distinct days a version must have traded on before it can be retired automatically."
+  @spec min_trading_days_to_retire() :: pos_integer()
+  def min_trading_days_to_retire, do: @min_trading_days_to_retire
+
+  @doc """
+  `%{version_id => days}`: the number of distinct exit dates with a
+  closed, entered, non-excluded run, per version. Versions that never
+  traded are absent (read them as 0).
+  """
+  @spec trading_days([String.t()]) :: %{String.t() => non_neg_integer()}
+  def trading_days([]), do: %{}
+
+  def trading_days(version_ids) do
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids and r.status == "closed")
+    |> where([r], is_nil(r.excluded_reason))
+    |> entered()
+    |> group_by([r], r.strategy_version_id)
+    |> select([r], {r.strategy_version_id, count(fragment("DISTINCT (?)::date", r.exit_at))})
+    |> Repo.all()
+    |> Map.new()
+  end
+
+  @doc "Whether `version_id` has traded on enough distinct days to be retired automatically."
+  @spec enough_trading_days_to_retire?(String.t()) :: boolean()
+  def enough_trading_days_to_retire?(version_id),
+    do: Map.get(trading_days([version_id]), version_id, 0) >= @min_trading_days_to_retire
 
   # A regime cell needs this much evidence before it saves a losing
   # version (user's choice, 2026-10-03): >= 15 trades over >= 2 sessions
