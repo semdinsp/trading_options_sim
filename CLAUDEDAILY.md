@@ -296,6 +296,20 @@ nothing, and one that fires too often turns a good entry into a loss.
 options held intraday (VWAP Spread Reversion Put: 0 of 43 exits).
 When this review recommends a new default, change this line in a PR.
 
+**Methods available:**
+
+| Method | Levels from | Keys |
+|---|---|---|
+| `percent_of_entry` | a fixed % of the premium | `stop_loss_percent`, `take_profit_percent` |
+| `volatility_multiple` | the premium's implied daily move (IV) | `sl_vol_mult`, `tp_vol_mult`, plus the two percents as fallback |
+| `atr` (since 2026-10-22) | k × the underlying's daily ATR(14) × the entry delta, from trading_signal | `sl_atr_mult`, `tp_atr_mult`, plus the two percents as fallback |
+
+An `atr` run records `atr`, `atr_premium_daily_vol` and any
+`risk_fallback_reason` (`no_atr`) in its context, so an A/B review can
+drop the runs that fell back. `atr` versions are **not promotable** yet:
+trading_live has no ATR source for option stops, and the export refuses
+them.
+
 1. **How often each setting fires.** Over the last 5 sessions, group
    closed, entered runs by their version's risk settings (method, SL%,
    TP%, ratchet/trailing, or none). For each group report:

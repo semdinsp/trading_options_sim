@@ -60,10 +60,31 @@ defmodule TradingOptionsSim.Sim.StrategyVersionParamsTest do
              StrategyVersion.params_errors(%{"risk_controls" => Map.delete(@vol, "sl_vol_mult")})
   end
 
+  @atr %{
+    "method" => "atr",
+    "sl_atr_mult" => 0.5,
+    "tp_atr_mult" => 1.0,
+    "stop_loss_percent" => 10,
+    "take_profit_percent" => 20
+  }
+
+  test "accepts atr with its multiples and fallback percents" do
+    assert StrategyVersion.params_errors(%{"risk_controls" => @atr}) == []
+    assert {:ok, _} = create(%{"risk_controls" => @atr})
+  end
+
+  # The percents are the fallback when there is no ATR or delta at entry.
+  test "rejects atr without its multiples or fallback percents" do
+    for key <- ~w(sl_atr_mult tp_atr_mult stop_loss_percent take_profit_percent) do
+      assert [msg] = StrategyVersion.params_errors(%{"risk_controls" => Map.delete(@atr, key)})
+      assert msg =~ key
+    end
+  end
+
   # RiskControls falls back to its 5%/10% default for an unknown method,
   # so these would otherwise run with stops nobody configured.
   test "rejects an unknown method and a percent_of_entry missing its percents" do
-    assert [_] = StrategyVersion.params_errors(%{"risk_controls" => %{"method" => "atr"}})
+    assert [_] = StrategyVersion.params_errors(%{"risk_controls" => %{"method" => "kelly"}})
     assert [_] = StrategyVersion.params_errors(%{"risk_controls" => %{}})
 
     assert [msg] =

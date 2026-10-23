@@ -517,6 +517,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   # the first tick can arrive -- but the supervisor is free by then.
   @impl true
   def handle_continue(:start_ibkr_live, %{pricing_backend: :ibkr_live} = state) do
+    maybe_prewarm_atr(state)
+
     subscribed? =
       start_ibkr_live(
         state.occ_symbol,
@@ -529,7 +531,21 @@ defmodule TradingOptionsSim.ContractMonitor do
     {:noreply, %{state | ibkr_live_subscribed?: subscribed?}}
   end
 
-  def handle_continue(:start_ibkr_live, state), do: {:noreply, state}
+  def handle_continue(:start_ibkr_live, state) do
+    maybe_prewarm_atr(state)
+    {:noreply, state}
+  end
+
+  # An "atr" version reads the underlying's daily ATR at its entry tick
+  # from trading_signal's cache; start the fetch now so that read hits.
+  defp maybe_prewarm_atr(%{
+         symbol: symbol,
+         strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"}}}
+       })
+       when is_binary(symbol),
+       do: TradingOptionsSim.DailyAtr.prewarm(symbol)
+
+  defp maybe_prewarm_atr(_state), do: :ok
 
   @impl true
   def terminate(_reason, %{pricing_backend: :ibkr_live, occ_symbol: occ_symbol}) do
@@ -1350,7 +1366,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   # put stops on every existing strategy; a version without the key keeps
   # its purely rule-driven exits.
   #
-  # Only "percent_of_entry" and "volatility_multiple" reach here:
+  # Only "percent_of_entry", "volatility_multiple" and "atr" reach here:
   # StrategyVersion's changeset rejects any other method, since
   # RiskControls would silently fall back to its default for one it
   # can't resolve.
@@ -1376,6 +1392,43 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   @doc false
   def risk_levels(
+        %{strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"} = config}}} =
+          state,
+        price,
+        snapshot
+      ) do
+    {daily_vol, atr} = atr_premium_vol(state, price, snapshot)
+
+    resolved =
+      TradingCore.RiskControls.resolve_levels(
+        price,
+        atr_as_vol_config(config),
+        state.direction,
+        daily_vol: daily_vol
+      )
+
+    resolved =
+      if resolved.fallback_reason == :no_daily_vol,
+        do: %{resolved | fallback_reason: :no_atr},
+        else: resolved
+
+    take_profit =
+      if config["round_numbers"] == true and resolved.take_profit,
+        do: round_number_take_profit(resolved.take_profit, price, state.direction),
+        else: resolved.take_profit
+
+    context = %{
+      "risk_method" =>
+        if(resolved.method == "volatility_multiple", do: "atr", else: resolved.method),
+      "atr" => atr && Decimal.to_float(atr),
+      "atr_premium_daily_vol" => daily_vol && Decimal.to_float(daily_vol),
+      "risk_fallback_reason" => resolved.fallback_reason && to_string(resolved.fallback_reason)
+    }
+
+    {resolved.stop_loss, take_profit, context}
+  end
+
+  def risk_levels(
         %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
         price,
         snapshot
@@ -1394,6 +1447,35 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   def risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
+
+  # "atr" (sl_atr_mult / tp_atr_mult): the stop sits k daily ATRs of the
+  # UNDERLYING away, carried into premium by the entry delta -- a k-ATR
+  # move in the stock moves the option about k * ATR * |delta|. As a
+  # fraction of the premium that is ATR * |delta| / premium, which is
+  # exactly the daily_vol volatility_multiple already sizes from, so the
+  # levels reuse TradingCore.RiskControls unchanged (trading_system's
+  # "atr" reuses the same math without the delta, since a share moves
+  # one-for-one). The ATR is the underlying's daily ATR(14) from
+  # trading_signal (TradingOptionsSim.DailyAtr). No ATR, no delta (a
+  # combo has no single one), or a zero price falls back to the config's
+  # own percents with fallback_reason "no_atr".
+  defp atr_premium_vol(state, price, snapshot) do
+    with {:ok, atr} <- TradingOptionsSim.DailyAtr.atr(state.symbol),
+         delta when is_number(delta) and delta != 0 <- snapshot["run_delta"],
+         true <- Decimal.compare(price, 0) == :gt do
+      vol = atr |> Decimal.mult(Decimal.from_float(abs(delta) / 1)) |> Decimal.div(price)
+      {vol, atr}
+    else
+      _ -> {nil, nil}
+    end
+  end
+
+  defp atr_as_vol_config(config) do
+    config
+    |> Map.put("method", "volatility_multiple")
+    |> Map.put("sl_vol_mult", config["sl_atr_mult"])
+    |> Map.put("tp_vol_mult", config["tp_atr_mult"])
+  end
 
   defp risk_context(%{"method" => "volatility_multiple"}, resolved) do
     %{

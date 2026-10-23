@@ -335,8 +335,11 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       premium), or `"volatility_multiple"` with positive `"sl_vol_mult"`
       and `"tp_vol_mult"` (multiples of the premium's daily vol, see
       `ContractMonitor.premium_vol_values/2`) AND the two percents, used
-      when that vol is unavailable. Optional boolean `"round_numbers"`
-      for either. Any other method is rejected rather than run:
+      when that vol is unavailable, or `"atr"` with positive
+      `"sl_atr_mult"` and `"tp_atr_mult"` (multiples of the underlying's
+      daily ATR, carried into premium by the entry delta) AND the two
+      percents, the fallback when there is no ATR. Optional boolean
+      `"round_numbers"` for any. Any other method is rejected rather than run:
       `TradingCore.RiskControls` falls back to its 5%/10% default for a
       method it can't resolve.
     * `"exit_strategy"`: `"ratchet"` with positive `"trigger_pct"` and a
@@ -393,10 +396,23 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
         "take_profit_percent"
       ])
 
+  # "atr": multiples of the underlying's daily ATR, carried into premium by
+  # the entry delta (ContractMonitor.risk_levels/3). Same key names as
+  # trading_system's "atr". The percents are the fallback when there is no
+  # ATR or delta at entry.
+  defp risk_controls_errors(%{"method" => "atr"} = config),
+    do:
+      levels_config_errors(config, [
+        "sl_atr_mult",
+        "tp_atr_mult",
+        "stop_loss_percent",
+        "take_profit_percent"
+      ])
+
   defp risk_controls_errors(%{"method" => method}),
     do: [
       "risk_controls.method #{inspect(method)} is not supported; " <>
-        "use percent_of_entry or volatility_multiple"
+        "use percent_of_entry, volatility_multiple or atr"
     ]
 
   defp risk_controls_errors(_config),

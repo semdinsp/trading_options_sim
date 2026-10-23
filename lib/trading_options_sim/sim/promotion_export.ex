@@ -56,6 +56,8 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
       explicit `risk_controls` and promote the fork.
     * a `risk_controls` or `exit_strategy` this app can't run
       (`StrategyVersion.params_errors/1`).
+    * an `"atr"` risk_controls method: trading_live has no ATR source
+      for option stops yet, so it would run the 5%/10% default.
     * a multi-leg combo (`option_leg_config.multi_leg`): trading_live
       executes single-leg options only.
 
@@ -101,8 +103,18 @@ defmodule TradingOptionsSim.Sim.PromotionExport do
             "but live would apply its default; fork it with an explicit risk_controls"
         ]
 
-    missing ++ StrategyVersion.params_errors(params)
+    missing ++ StrategyVersion.params_errors(params) ++ atr_reasons(params)
   end
+
+  # trading_live has no ATR source for option stops, and TradingCore
+  # .RiskControls would run an unknown method on its 5%/10% default.
+  defp atr_reasons(%{"risk_controls" => %{"method" => "atr"}}),
+    do: [
+      "risk_controls.method \"atr\": trading_live can't size option stops from ATR yet; " <>
+        "promote a percent_of_entry or volatility_multiple fork instead"
+    ]
+
+  defp atr_reasons(_params), do: []
 
   # trading_live executes single-leg options only (no comboLegs in
   # tws_api), so a combo would arrive there as a malformed single leg.
