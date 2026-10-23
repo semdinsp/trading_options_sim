@@ -1121,7 +1121,8 @@ defmodule TradingOptionsSim.SimTest do
             quantity: 1,
             fill_price: entry_price,
             filled_at: entry_at,
-            commission: Decimal.new("1.68")
+            commission: Decimal.new("1.68"),
+            pricing_snapshot: Map.get(attrs, :entry_pricing, %{})
           },
           %{entry_at: entry_at, entry_price: entry_price, risk_at_entry: risk_at_entry}
         )
@@ -1134,7 +1135,8 @@ defmodule TradingOptionsSim.SimTest do
             quantity: 1,
             fill_price: Map.fetch!(attrs, :exit_price),
             filled_at: exit_at,
-            commission: Decimal.new("1.68")
+            commission: Decimal.new("1.68"),
+            pricing_snapshot: Map.get(attrs, :exit_pricing, %{})
           },
           %{
             exit_at: exit_at,
@@ -1372,6 +1374,93 @@ defmodule TradingOptionsSim.SimTest do
       # that already governs lcb95.
       assert is_nil(row.sd_daily_r)
       assert is_nil(row.sr_session)
+    end
+
+    # trading_live's review (2026-10-22): is there an edge BEFORE costs,
+    # and does it survive paying the touch? Worked by hand, risk 500:
+    #   net   = 100 / 500                                  = 0.2
+    #   mid   = (100 + (0.10 + 0.10) * 100) / 500          = 0.24
+    #   touch = (100 + (0.20 - (0.20 + 0.20)) * 100 - 3.36) / 500 = 0.15328
+    test "per-session R before costs (mid) and at the touch, with the cost share" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      candidate_run_fixture(version, %{
+        symbol: "COST1",
+        exit_price: Decimal.new("6.00"),
+        realized_pnl: Decimal.new("100.00"),
+        hold_seconds: 3600,
+        entry_pricing: %{
+          "fill_basis" => "quote",
+          "fill_bid" => "4.80",
+          "fill_ask" => "5.20",
+          "fill_slippage" => "0.10"
+        },
+        exit_pricing: %{
+          "fill_basis" => "quote",
+          "fill_bid" => "5.80",
+          "fill_ask" => "6.20",
+          "fill_slippage" => "0.10"
+        }
+      })
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert_in_delta Decimal.to_float(row.mean_daily_r), 0.2, 1.0e-9
+      assert_in_delta row.mean_daily_r_mid, 0.24, 1.0e-9
+      assert_in_delta row.mean_daily_r_touch, 0.15328, 1.0e-9
+      assert_in_delta row.cost_share, 0.04 / 0.24, 1.0e-9
+      assert row.quote_fill_share == 1.0
+      # One session: no sd, as for the net pair.
+      assert is_nil(row.sd_daily_r_mid) and is_nil(row.sd_daily_r_touch)
+
+      assert [%{n: 1, r_mid: mid, r_net: net, r_touch: touch}] = Sim.session_evidence(version.id)
+      assert_in_delta mid, 0.24, 1.0e-9
+      assert_in_delta net, 0.2, 1.0e-9
+      assert_in_delta touch, 0.15328, 1.0e-9
+    end
+
+    # Healthy input: a fill with no quote has no slippage or spread to add
+    # back, so all three bases agree apart from commission at the touch.
+    test "model-priced fills count as mid on every basis" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      candidate_run_fixture(version, %{
+        symbol: "COST2",
+        exit_price: Decimal.new("6.00"),
+        realized_pnl: Decimal.new("100.00"),
+        hold_seconds: 3600
+      })
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert_in_delta row.mean_daily_r_mid, 0.2, 1.0e-9
+      assert_in_delta row.mean_daily_r_touch, (100 - 3.36) / 500, 1.0e-9
+      assert row.cost_share == 0.0
+      assert row.quote_fill_share == 0.0
+    end
+
+    test "cost_share is nil when there was no edge before costs" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy, %{version: 1})
+
+      candidate_run_fixture(version, %{
+        symbol: "COST3",
+        exit_price: Decimal.new("4.00"),
+        realized_pnl: Decimal.new("-100.00"),
+        hold_seconds: 3600
+      })
+
+      [row] =
+        Sim.full_universe_version_metrics()
+        |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert is_nil(row.cost_share)
     end
 
     test "final_score is nil (not a huge number) when capital_hours is near zero" do

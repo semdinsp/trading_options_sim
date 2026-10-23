@@ -166,10 +166,16 @@ set in the last 24 h, and list them in the summary.
 - Gate values: discovery → quarantine needs ≥ 20 closed runs (with an
   entry) and realized P&L ≥ 0. Quarantine → retired needs ≥ 20
   quarantine trading days and a loss/win ratio > 2.0.
+- **Nothing is retired automatically before it has traded on 15
+  distinct days** (`Sim.min_trading_days_to_retire/0`, since
+  2026-10-22). Calendar age doesn't count: a version 120 days old that
+  traded on 14 of them stays. This applies to both the quarantine job
+  and LifecycleReview. Before it, LifecycleReview retired discovery
+  losers after only 3 sessions.
 - **LifecycleReview** runs right after the 07:00 job
   (`TradingOptionsSim.LifecycleReview`). It looks at active discovery
-  versions with at least 30 trades over at least 3 sessions and negative
-  net P&L, and at failing quarantine versions.
+  versions with at least 30 trades and negative net P&L, and at failing
+  quarantine versions.
   - If one trend x vol regime cell was profitable (at least 15 trades
     over at least 2 sessions, net > 0), it forks the version with an
     entry gate on that regime (tag `Regime-Gated-Fork`) and retires the
@@ -228,6 +234,46 @@ The run's own `strike`/`right` are only the primary short leg, so read
 the legs before describing the position. Combos never promote to
 trading_live (`PromotionExport` refuses them). Compare a combo against
 the naked short on the same pool, not against the long control.
+
+**Rank by session, before and after costs** (since 2026-10-22, from
+trading_live's review). `lcb95` above is per *trade*, and same-day
+trades on one underlying aren't independent, so it overstates the
+evidence. Each row also carries per-session sufficient statistics on
+three cost bases, one observation per UTC exit date (`daily_r` is the
+**sum** of that day's R, per `0_SPEC.md`):
+
+| Fields | Basis |
+|---|---|
+| `mean_daily_r_mid`, `sd_daily_r_mid` | Before costs: mid-to-mid, slippage and commission added back. |
+| `mean_daily_r`, `sd_daily_r` | As simulated (the published, net R). |
+| `mean_daily_r_touch`, `sd_daily_r_touch` | Every fill pays the full half-spread, plus commission. |
+
+Compute the one-sided 90% bound yourself, `mean − 1.2816 × sd / √n_sessions`
+(the spec's `lcb90` z). A strategy has an edge only if the **mid** bound
+is above zero; it is worth promoting only if the **net** bound is too.
+Report the touch bound alongside. `cost_share` is the share of the mid
+edge the costs take; `quote_fill_share` how much of the evidence had a
+real quote. Ignore any version with fewer than 10 sessions.
+
+State of play on 2026-10-22 (84 versions with ≥ 30 trades and ≥ 10
+sessions): mid bound > 0 for 15, net for 4, touch for 0; where there was
+a mid edge, costs took a median 184% of it. The spread, not commission,
+is the cost here: 1-lot commission is ~0.001R on a 45-DTE premium. 84
+versions tested at 10% one-sided means ~8 false positives are expected
+by chance, so 15 is weak evidence.
+
+**Before anything is promoted to trading_live:**
+- Its hypothesis (signal, threshold, DTE, moneyness, exits) was fixed
+  before the evidence window, and the window it is judged on starts
+  after its creation date. Every fork here is a variant in a sweep;
+  its parent's numbers are in-sample for it.
+- Mid and net per-session bounds above zero on that window.
+- Not a duplicate: siblings that took the same trades (the XLE VWAP
+  Trend variants are one bet) and put forks of an equity breakdown
+  strategy already live count once. trading_live checks correlation
+  against what's live.
+- The export carries `session_evidence` (date, `n`, `r_mid`, `r_net`,
+  `r_touch`), which trading_live asked for as quarantine evidence.
 
 The `/candidates` page shows the same rows with the nine gate letters
 (N S E D X C R G T). The gates are advisory and never block anything.

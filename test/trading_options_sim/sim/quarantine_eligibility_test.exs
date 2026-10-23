@@ -41,6 +41,19 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
     pool
   end
 
+  # Zero-P&L closed runs on `days` distinct past dates, so a version
+  # clears Sim.min_trading_days_to_retire/0 without changing its win/loss
+  # totals.
+  defp traded_on_days_fixture(version, days \\ Sim.min_trading_days_to_retire()) do
+    for d <- 1..days,
+        do:
+          closed_run_fixture(
+            version,
+            Decimal.new("0"),
+            DateTime.add(DateTime.utc_now(), -d * 86_400)
+          )
+  end
+
   # Inserts a closed sim_run directly (bypassing ContractMonitor/fill
   # recording) since these tests only care about the aggregate
   # realized_pnl a closed run leaves behind, not the fill mechanics.
@@ -225,6 +238,8 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
         |> Ecto.Changeset.change(quarantine_trading_days: 20)
         |> TradingOptionsSim.Repo.update()
 
+      traded_on_days_fixture(version)
+
       closed_run_fixture(version, Decimal.new("-100.00"))
       closed_run_fixture(version, Decimal.new("10.00"))
 
@@ -260,6 +275,8 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
         |> Ecto.Changeset.change(quarantine_trading_days: 20)
         |> TradingOptionsSim.Repo.update()
 
+      traded_on_days_fixture(version)
+
       closed_run_fixture(version, Decimal.new("-10.00"))
       closed_run_fixture(version, Decimal.new("10.00"))
 
@@ -281,6 +298,8 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
         |> Ecto.Changeset.change(quarantine_trading_days: 20)
         |> TradingOptionsSim.Repo.update()
 
+      traded_on_days_fixture(version)
+
       closed_run_fixture(version, Decimal.new("-10.00"))
 
       {:ok, [retired]} = Sim.auto_retire_failing_quarantine_versions()
@@ -301,6 +320,8 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
         |> Ecto.Changeset.change(quarantine_trading_days: 20)
         |> TradingOptionsSim.Repo.update()
 
+      traded_on_days_fixture(version)
+
       {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
     end
 
@@ -318,10 +339,36 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
         )
         |> TradingOptionsSim.Repo.update()
 
+      traded_on_days_fixture(version)
       closed_run_fixture(version, Decimal.new("-10.00"))
 
       {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
+    end
+
+    # The user's rule (2026-10-22): calendar age and quarantine_trading_days
+    # aren't enough on their own; the version must have traded on 15 days.
+    test "does not retire a failing version that has traded on fewer than 15 distinct days" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+
+      {:ok, version} =
+        version
+        |> Ecto.Changeset.change(quarantine_trading_days: 20)
+        |> TradingOptionsSim.Repo.update()
+
+      # 13 past days + today = 14 distinct days.
+      traded_on_days_fixture(version, Sim.min_trading_days_to_retire() - 2)
+      closed_run_fixture(version, Decimal.new("-100.00"))
+
+      {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
+
+      traded_on_days_fixture(version, Sim.min_trading_days_to_retire() - 1)
+      {:ok, [retired]} = Sim.auto_retire_failing_quarantine_versions()
+      assert retired.id == version.id
     end
 
     # Controls are the baselines and are expected to lose a little; the
@@ -341,6 +388,8 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
             version
             |> Ecto.Changeset.change(quarantine_trading_days: 20)
             |> TradingOptionsSim.Repo.update()
+
+          traded_on_days_fixture(version)
 
           closed_run_fixture(version, Decimal.new("-100.00"))
           closed_run_fixture(version, Decimal.new("10.00"))

@@ -90,7 +90,7 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
 
   test "a loser with no profitable regime is retired (monitors stopped), not forked" do
     v = version_fixture("LCR Loser")
-    add_trades(v, 30, "-5", {-1, -1}, 3)
+    add_trades(v, 30, "-5", {-1, -1}, 15)
 
     actions = LifecycleReview.run(mode: :apply)
 
@@ -103,7 +103,7 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
   test "a loser profitable in one regime is forked with that regime gate; the parent is retired" do
     v = version_fixture("LCR Rescue")
     add_trades(v, 15, "10", {-1, -1}, 2)
-    add_trades(v, 30, "-10", {1, 0}, 3)
+    add_trades(v, 30, "-10", {1, 0}, 15)
 
     actions = LifecycleReview.run(mode: :apply)
     a = action_for(actions, v)
@@ -133,7 +133,7 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
   test "dry run reports the same plan but changes nothing" do
     v = version_fixture("LCR Dry")
     add_trades(v, 15, "10", {-1, -1}, 2)
-    add_trades(v, 30, "-10", {1, 0}, 3)
+    add_trades(v, 30, "-10", {1, 0}, 15)
 
     actions = LifecycleReview.run(mode: :dry_run)
 
@@ -146,8 +146,21 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
   test "a profitable regime on a single session is not enough to fork" do
     v = version_fixture("LCR OneDay")
     add_trades(v, 15, "10", {-1, -1}, 1)
-    add_trades(v, 30, "-10", {1, 0}, 3, 2)
+    add_trades(v, 30, "-10", {1, 0}, 15, 2)
 
+    assert action_for(LifecycleReview.run(mode: :dry_run), v).action == :retire
+  end
+
+  # The user's rule (2026-10-22): trades and losses aren't enough until the
+  # version has traded on 15 distinct days, however old it is.
+  test "a loser that has traded on fewer than 15 days is left alone" do
+    v = version_fixture("LCR FewDays")
+    add_trades(v, 60, "-10", {1, 0}, 14)
+
+    refute action_for(LifecycleReview.run(mode: :apply), v)
+    assert active?(v)
+
+    add_trades(v, 1, "-10", {1, 0}, 1, 15)
     assert action_for(LifecycleReview.run(mode: :dry_run), v).action == :retire
   end
 
@@ -157,19 +170,19 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
     add_trades(winner, 30, "5", {1, 0}, 3)
 
     young = version_fixture("LCR Young")
-    add_trades(young, 29, "-5", {1, 0}, 3)
+    add_trades(young, 29, "-5", {1, 0}, 15)
 
     control = version_fixture("LCR Control: Always-Long Put")
-    add_trades(control, 30, "-5", {1, 0}, 3)
+    add_trades(control, 30, "-5", {1, 0}, 15)
 
     linked = version_fixture("LCR Linked")
-    add_trades(linked, 30, "-5", {1, 0}, 3)
+    add_trades(linked, 30, "-5", {1, 0}, 15)
 
     {:ok, _} =
       linked |> Ecto.Changeset.change(live_strategy_id: Ecto.UUID.generate()) |> Repo.update()
 
     baseline = version_fixture("LCR Baseline")
-    add_trades(baseline, 30, "-5", {1, 0}, 3)
+    add_trades(baseline, 30, "-5", {1, 0}, 15)
     {:ok, _} = Sim.add_tag_to_strategy_version_by_name(baseline, "Noise-Baseline")
 
     actions = LifecycleReview.run(mode: :apply)
@@ -186,7 +199,7 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
     {:ok, v} = Sim.promote_strategy_version(v, "quarantine")
     {:ok, v} = v |> Ecto.Changeset.change(quarantine_trading_days: 20) |> Repo.update()
     add_trades(v, 15, "10", {-1, -1}, 2)
-    add_trades(v, 30, "-20", {1, 0}, 3)
+    add_trades(v, 30, "-20", {1, 0}, 15)
 
     {:ok, retired} = Sim.auto_retire_failing_quarantine_versions()
     refute Enum.any?(retired, &(&1.id == v.id))

@@ -1257,8 +1257,30 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
-  # The option's price, on which every stop and target here is set.
-  defp premium(snapshot), do: decimal_price(snapshot["run_current_price"]) || quote_mid(snapshot)
+  # The option's price, on which every stop and target here is set:
+  # run_current_price, unless a real quote says it can't be traded.
+  #
+  # A price outside the live bid/ask is stale, not a market move. At the
+  # open IBKR's option price can still be the prior session's while the
+  # book has already repriced for an overnight gap. On 2026-10-22 (SPY
+  # -0.9% gap) a QQQ 715P showed 18.57 against a 23.64/23.88 book; the
+  # entry filled on the quote at 23.82 (stop 20.25), the stale price was
+  # already under the stop, and the run stopped out half a second later,
+  # 21 times that morning on one entry_delay 0 version. Using the quote
+  # mid then keeps stops and trailing highs on prices that could trade.
+  defp premium(snapshot) do
+    price = decimal_price(snapshot["run_current_price"])
+
+    case quote_from(snapshot) do
+      {bid, ask} when price != nil ->
+        if Decimal.lt?(price, bid) or Decimal.gt?(price, ask),
+          do: quote_mid(snapshot),
+          else: price
+
+      _ ->
+        price || quote_mid(snapshot)
+    end
+  end
 
   # Ratchet / trailing stops from params["exit_strategy"], via
   # TradingCore.ExitStrategy.check/5 -- the same math and config shapes
