@@ -77,10 +77,15 @@ so new forks are running at the open. **Run the close routine** after
 
 ## Market-open routine
 
-Run M0–M7 in order. **On the first trading day of each week, also run
-M5b** (the weekly risk-control review) before forking in M6. Stop and
-report if M0 or M1 finds the app unhealthy: forking onto a broken app
-only hides the problem.
+Run M0–M7 in order. Two steps only run on some days:
+- **M5b** (the weekly risk-control review): on the first trading day of
+  each week, before forking in M6.
+- **M6b** (the literature review): every Monday and Wednesday, after M6.
+  If either day is a market holiday, run it on the next trading day
+  instead.
+
+Stop and report if M0 or M1 finds the app unhealthy: forking onto a
+broken app only hides the problem.
 
 ### M0 — Is the app up?
 
@@ -513,6 +518,88 @@ are baselines.
 - New experiment groups also go in the user's A/B experiments memory,
   with their compare-from date (normally the next trading day).
 
+### M6b — Literature review (Mondays and Wednesdays)
+
+**This step writes. Deploy each new strategy the same day**, under the
+same rules as M6: risk controls, one idea per version, notes, tags, and
+immediate activation. It runs alongside M6, not instead of it, and has
+its own budget.
+
+**1. Search.** Use web search for recent research on strategies this app
+can trade:
+- intraday or overnight options and ETF strategies on the pools the app
+  has (SPY, QQQ, RSP, TLT, XLE and the other sector ETFs);
+- short-horizon signals: VWAP, opening range, order flow and imbalance,
+  NYSE TICK, intraday momentum and reversal, end-of-day effects;
+- volatility timing: VIX term structure, the variance risk premium,
+  realized vs. implied vol, calm vs. stressed regimes;
+- premium selling and defined-risk structures: credit verticals and iron
+  condors.
+
+Prefer SSRN, arXiv q-fin, journals and named practitioner research.
+Prefer work from the last ~3 years, but don't skip an older result that
+was never tested here. Run several searches in one turn.
+
+**2. Check what's already here.** Before building anything, search the
+existing versions' names and notes for the paper and the idea:
+
+```elixir
+Repo.all(from v in Sim.StrategyVersion, join: s in assoc(v, :strategy),
+  where: ilike(s.name, ^"%<keyword>%") or ilike(v.notes, ^"%<keyword>%"),
+  select: {v.id, s.name, v.lifecycle_stage, v.retired_reason})
+```
+
+- If a paper is already implemented, build only what the paper says the
+  existing version lacks (a filter, an exit, a time window), as a
+  one-change fork. Lit-Review-2026-10-19 did this.
+- If the same idea was tried and retired, don't rebuild it unless the
+  paper gives a concrete reason the earlier version failed.
+
+**3. Keep only what the app can test honestly:**
+- **The signals exist.** It uses built-in monitor keys or a
+  `trading_signal` definition. Don't use noise-classified signals or
+  transition operators, as in M6.
+- **The holding period fits the app.** Intraday, or `overnight_hold`.
+  Multi-day close-to-close setups, such as Connors RSI(2) exits, only
+  fit as `overnight_hold` versions; say so in the notes.
+- **The edge can plausibly clear costs.** It must beat the ~0.4%
+  round-trip cost at a 45-DTE ATM option's delta. A paper's stock-level
+  edge of a few basis points per trade doesn't survive the spread.
+- **No AMD or MU,** and no pool without a strike grid.
+
+**If a paper needs a signal that doesn't exist,** don't build a proxy
+silently. Draft a prompt for trading_signal's session describing the
+signal, and give it to the user. Note the idea as "waiting on signal" in
+the summary.
+
+**4. Build.** At most **5** new versions per review, and fewer or none
+if nothing qualifies. Never build to fill a quota.
+- **Name:** `Lit: <idea> [<detail>]`.
+- **Form:** either a one-change fork of the closest existing version, or
+  a new strategy on a control's contract and pool, with the paper's rule
+  as the entry gate. The second form makes the control the comparison.
+  Don't put "Control" in the name: controls are never promoted or
+  retired.
+- **Notes:** start with the paper: authors, year, title and URL. Then:
+  - the claimed effect and its size;
+  - exactly what was implemented and how it differs from the paper
+    (instrument, horizon, thresholds);
+  - which version or control it has to beat;
+  - the signal caveats, as in M6.
+- **Thresholds:** use the paper's, or textbook values. If you fit one to
+  this app's history instead, say so ("in-sample").
+- **Tags:** the batch tag `options-discovery-<YYYY-MM-DD>`, plus
+  `Lit-Review-<YYYY-MM-DD>`; on a fork's parent,
+  `Lit-Review-<YYYY-MM-DD>-parent`.
+- **Activate immediately** and check that `activate` returned no
+  `unsubscribed_symbols`. Record the group and its compare-from date in
+  the user's A/B experiments memory.
+
+**5. Follow up the previous review.** List the last two `Lit-Review-*`
+groups and give each version's trades and per-session net against its
+comparison. Don't judge anything on fewer than ~10 sessions; say
+"too early" instead.
+
 ### M7 — Morning summary
 
 Report, briefly:
@@ -533,6 +620,13 @@ Report, briefly:
   - the A/B results;
   - versions newly tagged `NO Risk Controls`;
   - the recommended defaults.
+- **Literature review (M6b, Mondays and Wednesdays):**
+  - the papers found, with links;
+  - what was built from each (name, form, comparison);
+  - what was rejected, and why;
+  - ideas waiting on a new signal (with the drafted trading_signal
+    prompt);
+  - the previous groups' follow-up.
 - **Problems:** anything needing the user's decision.
 
 ---
@@ -596,7 +690,7 @@ TradingOptionsSim.Sim.oban_pending_job_count()
 
 ### C4 — Did this morning's forks run?
 
-For each version created in M6:
+For each version created in M6 or M6b:
 - its monitors are running;
 - it isn't missing contracts (`activate` returned
   `unsubscribed_symbols`);
