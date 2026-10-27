@@ -2529,6 +2529,95 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Decimal.equal?(:sys.get_state(pid).take_profit_price, Decimal.new("100.00"))
     end
 
+    test "a trailing exit is labelled stop_kind trailing, with its MFE and MAE" do
+      trailing = %{"method" => "trailing", "trail_pct" => 10}
+      wide = Map.put(@risk, "take_profit_percent", 200)
+      {pid, run} = enter("XCUR1", %{"risk_controls" => wide, "exit_strategy" => trailing})
+      assert run.context["initial_stop_loss_price"] == Decimal.to_string(run.stop_loss_price)
+
+      move(pid, "XCUR1", 160.0, run)
+
+      high =
+        Decimal.new(to_string(ContractMonitor.snapshot(pid).last_snapshot["run_current_price"]))
+
+      run = move(pid, "XCUR1", 150.0, run)
+
+      assert run.exit_reason == "stop_loss"
+      assert run.context["stop_kind"] == "trailing"
+      assert Decimal.equal?(Decimal.new(run.context["best_premium"]), high)
+
+      expected_mfe =
+        high |> Decimal.sub(run.entry_price) |> Decimal.div(run.entry_price) |> Decimal.to_float()
+
+      assert_in_delta run.context["mfe_pct"], expected_mfe * 100, 0.001
+      # The worst premium seen is the exit tick's, still about at entry.
+      worst = Decimal.new(run.context["worst_premium"])
+
+      expected_mae =
+        run.entry_price
+        |> Decimal.sub(worst)
+        |> Decimal.div(run.entry_price)
+        |> Decimal.to_float()
+
+      assert_in_delta run.context["mae_pct"], expected_mae * 100, 0.001
+      assert run.context["excursion_from"] == "entry"
+      # Entry-time context is kept alongside the exit additions.
+      assert run.context["risk_basis"]
+    end
+
+    test "a ratchet exit is labelled stop_kind ratchet" do
+      ratchet = %{"method" => "ratchet", "trigger_pct" => 10, "lock_pct" => 2}
+      {pid, run} = enter("XCUR2", %{"risk_controls" => @risk, "exit_strategy" => ratchet})
+
+      move(pid, "XCUR2", 185.0, run)
+      run = move(pid, "XCUR2", 150.0, run)
+
+      assert run.exit_reason == "stop_loss"
+      assert run.context["stop_kind"] == "ratchet"
+    end
+
+    # Healthy input: a stop that never moved is the initial one, even
+    # with an exit_strategy configured (this trail is wider than the stop).
+    test "an unmoved stop is labelled stop_kind initial" do
+      trailing = %{"method" => "trailing", "trail_pct" => 50}
+      {pid, run} = enter("XCUR3", %{"risk_controls" => @risk, "exit_strategy" => trailing})
+
+      run = move(pid, "XCUR3", 120.0, run)
+
+      assert run.exit_reason == "stop_loss"
+      assert run.context["stop_kind"] == "initial"
+      assert run.context["mae_pct"] >= 15
+    end
+
+    test "a take-profit exit records the excursion but no stop_kind" do
+      {pid, run} = enter("XCUR4", %{"risk_controls" => @risk})
+
+      run = move(pid, "XCUR4", 185.0, run)
+
+      assert run.exit_reason == "take_profit"
+      refute Map.has_key?(run.context, "stop_kind")
+      assert run.context["mfe_pct"] >= 25
+    end
+
+    # A resumed monitor lost the extremes before the restart, and a run
+    # entered before the initial stop was recorded can't be classified.
+    test "a resumed position's excursion is partial and its stop kind unknown" do
+      version = exit_version(%{"risk_controls" => @risk})
+
+      {pid, run} =
+        start_monitor(version, contract_key("XCUR5"),
+          position_open?: true,
+          entry_price: Decimal.new("50.00"),
+          stop_loss_price: Decimal.new("42.50")
+        )
+
+      run = move(pid, "XCUR5", 120.0, run)
+
+      assert run.exit_reason == "stop_loss"
+      assert run.context["excursion_from"] == "restart"
+      assert run.context["stop_kind"] == "unknown"
+    end
+
     # SimActivator resumes a held position with its entry price and
     # persisted levels; the moved stop keeps working from there.
     test "a resumed position keeps moving its stop" do
