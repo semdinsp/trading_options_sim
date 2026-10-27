@@ -185,9 +185,13 @@ defmodule TradingOptionsSim.LifecycleReviewTest do
     add_trades(baseline, 30, "-5", {1, 0}, 15)
     {:ok, _} = Sim.add_tag_to_strategy_version_by_name(baseline, "Noise-Baseline")
 
+    held = version_fixture("LCR Experiment Control")
+    add_trades(held, 30, "-5", {1, 0}, 15)
+    {:ok, _} = Sim.add_tag_to_strategy_version_by_name(held, Sim.experiment_hold_tag())
+
     actions = LifecycleReview.run(mode: :apply)
 
-    for v <- [winner, young, control, linked, baseline] do
+    for v <- [winner, young, control, linked, baseline, held] do
       assert action_for(actions, v) == nil
       assert active?(v)
       refute Sim.get_strategy_version!(v.id).lifecycle_stage == "retired"

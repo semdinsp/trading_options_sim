@@ -346,6 +346,27 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
       assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
     end
 
+    test "never retires a version tagged Experiment-Hold" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+
+      {:ok, version} =
+        version
+        |> Ecto.Changeset.change(quarantine_trading_days: 20)
+        |> TradingOptionsSim.Repo.update()
+
+      traded_on_days_fixture(version)
+      closed_run_fixture(version, Decimal.new("-100.00"))
+      closed_run_fixture(version, Decimal.new("10.00"))
+
+      {:ok, _} = Sim.add_tag_to_strategy_version_by_name(version, Sim.experiment_hold_tag())
+
+      {:ok, []} = Sim.auto_retire_failing_quarantine_versions()
+      assert Sim.get_strategy_version!(version.id).lifecycle_stage == "quarantine"
+    end
+
     # The user's rule (2026-10-22): calendar age and quarantine_trading_days
     # aren't enough on their own; the version must have traded on 15 days.
     test "does not retire a failing version that has traded on fewer than 15 distinct days" do
