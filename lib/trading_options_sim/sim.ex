@@ -549,6 +549,13 @@ defmodule TradingOptionsSim.Sim do
   # sessions -- 49 of its first 51 retirements had fewer than 15.
   @min_trading_days_to_retire 15
 
+  # Versions with this tag are never retired automatically, by job 3
+  # below or by LifecycleReview: the control and arms of a running A/B
+  # experiment, which must keep trading on the same dates until it reads
+  # out (first use: the 2026-10-27 options exit test, whose controls are
+  # quarantine versions past the floor). Remove the tag at readout.
+  @experiment_hold_tag "Experiment-Hold"
+
   @doc """
   Job 1 of the daily quarantine-eligibility check
   (`TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker`):
@@ -674,8 +681,9 @@ defmodule TradingOptionsSim.Sim do
   job 1 must land today's day-count before this job judges tenure
   against it.
 
-  Never retires a version linked to trading_live or an always-long
-  control (strategy name contains "Control"), nor one that has traded on
+  Never retires a version linked to trading_live, an always-long
+  control (strategy name contains "Control"), or one tagged
+  `"#{@experiment_hold_tag}"` (a running experiment), nor one that has traded on
   fewer than `#{@min_trading_days_to_retire}` distinct days in its life
   (`enough_trading_days_to_retire?/1`).
   """
@@ -692,6 +700,7 @@ defmodule TradingOptionsSim.Sim do
       # against, and they are expected to lose a little (theta plus
       # commission). Same name match as LifecycleReview.
       |> where([_v, s], not ilike(s.name, "%Control%"))
+      |> where([v], v.id not in subquery(experiment_hold_version_ids()))
       |> select([v], v.id)
       |> Repo.all()
 
@@ -808,6 +817,18 @@ defmodule TradingOptionsSim.Sim do
   @doc "Distinct days a version must have traded on before it can be retired automatically."
   @spec min_trading_days_to_retire() :: pos_integer()
   def min_trading_days_to_retire, do: @min_trading_days_to_retire
+
+  @doc "Tag that exempts a version from automatic retirement while an experiment runs."
+  @spec experiment_hold_tag() :: String.t()
+  def experiment_hold_tag, do: @experiment_hold_tag
+
+  defp experiment_hold_version_ids do
+    from svt in "strategy_version_tags",
+      join: t in Tag,
+      on: t.id == svt.tag_id,
+      where: t.name == ^@experiment_hold_tag,
+      select: svt.strategy_version_id
+  end
 
   @doc """
   `%{version_id => days}`: the number of distinct exit dates with a

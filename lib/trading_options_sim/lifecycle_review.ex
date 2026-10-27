@@ -31,8 +31,10 @@ defmodule TradingOptionsSim.LifecycleReview do
   (unretire, then activate).
 
   Never touched: versions linked to trading_live or in `test_portfolio`,
-  always-long controls (the baselines), and the `Noise-Baseline` and
-  `od:slope-hold` sets the user asked to keep. Nothing is deleted.
+  always-long controls (the baselines), the `Noise-Baseline` and
+  `od:slope-hold` sets the user asked to keep, and anything tagged
+  `Experiment-Hold` (`Sim.experiment_hold_tag/0`: the controls and arms
+  of a running experiment). Nothing is deleted.
 
   Mode: `:dry_run` (report only) or `:apply`, from
   `config :trading_options_sim, :lifecycle_review_mode`. Defaults to
@@ -46,7 +48,7 @@ defmodule TradingOptionsSim.LifecycleReview do
   alias TradingOptionsSim.Sim.{SimRun, Strategy, StrategyVersion}
 
   @min_trades 30
-  @protected_tags ~w(Noise-Baseline od:slope-hold)
+  @protected_tags ["Noise-Baseline", "od:slope-hold", Sim.experiment_hold_tag()]
   @default_risk_controls %{
     "method" => "percent_of_entry",
     "stop_loss_percent" => 10,
