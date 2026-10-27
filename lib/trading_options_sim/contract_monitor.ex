@@ -483,8 +483,12 @@ defmodule TradingOptionsSim.ContractMonitor do
       take_profit_price: Keyword.get(opts, :take_profit_price),
       # The persisted stop already reflects any ratchet/trail before the
       # restart; exit_state starts empty, which is safe because a moved
-      # stop only ever tightens (see apply_moved_stop/4).
+      # stop only ever tightens (see apply_moved_stop/4). The excursion it
+      # tracks restarts too, so a resumed position's is flagged as partial
+      # (see excursion_context/2).
       entry_price: Keyword.get(opts, :entry_price),
+      exit_state:
+        if(Keyword.get(opts, :position_open?, false), do: %{excursion_resumed: true}, else: %{}),
       min_hold_seconds: min_hold_seconds(strategy_version),
       entry_delay_minutes: TradingOptionsSim.EntryDelay.minutes(strategy_version),
       entry_confirm_seconds: param_seconds(strategy_version, "entry_confirm_seconds"),
@@ -1204,7 +1208,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp maybe_transition(%{position_open?: true} = state, snapshot) do
-    state = maybe_move_stop(state, snapshot)
+    state = state |> track_excursion(snapshot) |> maybe_move_stop(snapshot)
 
     case risk_exit(state, snapshot) do
       nil ->
@@ -1319,6 +1323,33 @@ defmodule TradingOptionsSim.ContractMonitor do
       _ -> state
     end
   end
+
+  # Best and worst premium seen while the position is open (MFE / MAE),
+  # on the same premium/1 and in-session ticks the trailing stop follows,
+  # kept in exit_state (reset at entry and exit) rather than new struct
+  # fields, so a code reload doesn't meet running monitors whose state
+  # lacks them. Written to the run's context at exit (excursion_context/2).
+  defp track_excursion(%{entry_price: nil} = state, _snapshot), do: state
+
+  defp track_excursion(state, snapshot) do
+    with true <- session_open?(state),
+         %Decimal{} = price <- premium(snapshot) do
+      exit_state =
+        state.exit_state
+        |> Map.update(:best_premium, price, &favorable(&1, price, state.direction))
+        |> Map.update(:worst_premium, price, &favorable(&1, price, opposite(state.direction)))
+
+      %{state | exit_state: exit_state}
+    else
+      _ -> state
+    end
+  end
+
+  defp favorable(a, b, "short"), do: Decimal.min(a, b)
+  defp favorable(a, b, _long), do: Decimal.max(a, b)
+
+  defp opposite("short"), do: "long"
+  defp opposite(_long), do: "short"
 
   defp exit_strategy_config(%{strategy_version: %{params: %{"exit_strategy" => %{} = config}}}),
     do: config
@@ -1837,6 +1868,8 @@ defmodule TradingOptionsSim.ContractMonitor do
                entry_context(state)
                |> Map.merge(risk_context)
                |> Map.put("risk_basis", Sim.r_denominator(state.direction))
+               |> Map.put("initial_stop_loss_price", decimal_string(stop_loss_price))
+               |> Map.put("initial_take_profit_price", decimal_string(take_profit_price))
            }
          ) do
       {:ok, {_fill, run}} ->
@@ -1862,6 +1895,81 @@ defmodule TradingOptionsSim.ContractMonitor do
         state
     end
   end
+
+  defp decimal_string(%Decimal{} = d), do: Decimal.to_string(d)
+  defp decimal_string(nil), do: nil
+
+  # MFE / MAE as percent of the entry premium, in the position's favor
+  # and against it (both positive for a long that went up 5% and down
+  # 3%; a negative MFE means the premium never traded above entry, a
+  # negative MAE that it never traded below). Measured from the monitor's
+  # own entry price, falling back to the run's; nothing is written when
+  # neither is usable, since this must never fail an exit.
+  # "excursion_from" is "restart" when the monitor was resumed mid-trade,
+  # since the extremes before the restart were not kept.
+  defp excursion_context(%{exit_state: %{best_premium: best, worst_premium: worst}} = state, run) do
+    case state.entry_price || run.entry_price do
+      %Decimal{} = entry ->
+        if Decimal.gt?(entry, 0), do: excursion(state, entry, best, worst), else: %{}
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp excursion_context(_state, _run), do: %{}
+
+  defp excursion(state, entry, best, worst) do
+    sign = if state.direction == "short", do: -1, else: 1
+
+    pct = fn price ->
+      Decimal.to_float(Decimal.div(Decimal.sub(price, entry), entry)) * 100 * sign
+    end
+
+    %{
+      "mfe_pct" => Float.round(pct.(best), 4),
+      "mae_pct" => Float.round(-pct.(worst), 4),
+      "best_premium" => Decimal.to_string(best),
+      "worst_premium" => Decimal.to_string(worst),
+      "excursion_from" => if(state.exit_state[:excursion_resumed], do: "restart", else: "entry")
+    }
+  end
+
+  # Which stop a "stop_loss" exit hit. The exit_reason stays "stop_loss"
+  # (fill pricing and CandidateGates treat every stop alike), and this
+  # says whether it was the stop set at entry or one moved by
+  # params["exit_strategy"] ("trailing" / "ratchet"). Judged against the
+  # initial level saved at entry, so it survives a restart. "unknown" for
+  # runs entered before that level was recorded.
+  defp stop_context(state, run, "stop_loss") do
+    context = run.context || %{}
+
+    kind =
+      cond do
+        not Map.has_key?(context, "initial_stop_loss_price") ->
+          "unknown"
+
+        same_level?(state.stop_loss_price, context["initial_stop_loss_price"]) ->
+          "initial"
+
+        true ->
+          case exit_strategy_config(state) do
+            %{"method" => method} when method in ["trailing", "ratchet"] -> method
+            _ -> "moved"
+          end
+      end
+
+    %{"stop_kind" => kind}
+  end
+
+  defp stop_context(_state, _run, _exit_reason), do: %{}
+
+  defp same_level?(nil, nil), do: true
+
+  defp same_level?(%Decimal{} = level, initial) when is_binary(initial),
+    do: Decimal.equal?(level, Decimal.new(initial))
+
+  defp same_level?(_level, _initial), do: false
 
   # A short's R denominator is its Reg-T margin, not the premium it
   # collected; see Sim.compute_short_risk_at_entry/6.
@@ -1933,7 +2041,11 @@ defmodule TradingOptionsSim.ContractMonitor do
              exit_reason: exit_reason,
              realized_pnl: realized_pnl,
              realized_pnl_net: realized_pnl_net,
-             exit_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context)
+             exit_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context),
+             context:
+               (run.context || %{})
+               |> Map.merge(excursion_context(state, run))
+               |> Map.merge(stop_context(state, run, exit_reason))
            }
          ) do
       {:ok, {_fill, _run}} ->

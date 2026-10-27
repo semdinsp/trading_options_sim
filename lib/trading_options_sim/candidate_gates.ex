@@ -48,7 +48,8 @@ defmodule TradingOptionsSim.CandidateGates do
   @sample_floor 30
   @exit_bucket_dominance_threshold Decimal.new("0.70")
   # Gate X: exits that close a trade without the exit rule firing
-  # (trailing and ratchet stops record as "stop_loss").
+  # (trailing and ratchet stops record as "stop_loss"; the run's
+  # context["stop_kind"] tells them apart from the initial stop).
   @forced_exit_reasons ~w(eod_flatten expiry stop_loss take_profit)
   @non_trade_exit_reasons ~w(manual_no_entry orphaned)
   @churn_exclusion_ratio_threshold Decimal.new("0.20")

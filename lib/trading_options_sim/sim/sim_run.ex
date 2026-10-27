@@ -177,6 +177,10 @@ defmodule TradingOptionsSim.Sim.SimRun do
   is optional here and left `nil`, never coerced to zero, whenever either
   leg's commission hasn't been estimated — mirrors `trading_system`'s own
   `realized_pnl_net` (confirmed by reading its `close_run/3`).
+
+  `context`, when given, replaces the run's whole context map, so the
+  caller passes the existing one merged with its additions (the
+  monitor's MFE/MAE and stop kind; see `ContractMonitor.record_exit/6`).
   """
   def exit_changeset(sim_run, attrs) do
     sim_run
@@ -186,7 +190,8 @@ defmodule TradingOptionsSim.Sim.SimRun do
       :exit_reason,
       :realized_pnl,
       :realized_pnl_net,
-      :exit_snapshot
+      :exit_snapshot,
+      :context
     ])
     |> put_change(:status, "closed")
     |> validate_required([:exit_at, :exit_price, :exit_reason, :realized_pnl])
