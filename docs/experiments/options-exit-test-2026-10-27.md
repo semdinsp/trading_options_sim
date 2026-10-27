@@ -144,3 +144,17 @@ level (entry × (1 − SL%) for a long) counts as a trail exit.
 2. **Trailing exits aren't labeled.** They are recorded as `stop_loss`, so the exit mix has to infer them as described above.
 3. **No way to keep a control running past the lifecycle jobs.** Added `Experiment-Hold` (this branch) for that.
 4. **`VersionFork` can't override `params`.** The forks were made by calling `Sim.fork_strategy_version/2` with a copy of the parent whose `params` had changed: same transaction, same changeset validation.
+
+## Forks (created and activated 2026-10-26 ~20:45 UTC, after the close)
+
+| Parent | `tp-mfe-p50` | `tp-mfe-p75` | `trail-mfe-p50` |
+|---|---|---|---|
+| `01a0f313-92d7` XLE VWAP Trend Call | `01a17ace-43b4` TP7 | `01a17ace-4456` TP14 | `01a17ace-4463` Trail 7% |
+| `01a12367-83e0` Donchian Put [Exit: Donchian Flip] | `01a17ace-4485` TP5 | `01a17ace-449c` TP8 | `01a17ace-44ab` Trail 5% |
+| `01a12367-83a2` Donchian Put [Cooldown 30m] | `01a17ace-44c9` TP4 | `01a17ace-44e0` TP9 | `01a17ace-44f9` Trail 4% |
+| `01a0d92d-d6de` TLT Volume Breakout Call [TP-SL] | `01a17ace-451a` TP10 | `01a17ace-4527` TP17 | `01a17ace-4534` Trail 10% |
+| `01a10de8-cf60` Poly: Volume Breakout Call [OFI-Confirmed] | `01a17ace-4548` TP5.5 | `01a17ace-45a5` TP11 | `01a17ace-45ea` Trail 5.5% |
+| `01a112f1-fa1d` TLT VWAP Trend Call [Entry: Donchian] | `01a17ace-4643` TP6 | `01a17ace-464d` TP15 | `01a17ace-4655` Trail 6% |
+
+Checked after creation: each fork's rules, legs, pool, sizing, entry delay
+and non-exit params equal its parent's.
