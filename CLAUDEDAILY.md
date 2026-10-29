@@ -69,9 +69,23 @@ so new forks are running at the open. **Run the close routine** after
    or restart anything. It's a path dependency, so uncommitted work there
    ships silently into this app.
 
-4. **Guard `MonitorRegistry` selects with `is_binary($1)`.** The
-   registry holds more than one kind of process. An unguarded select
-   once crashed 50 live monitors.
+4. **Guard `MonitorRegistry` selects on the key's first element.**
+   Every key is a 2-tuple: monitors use `{version_id, contract_or_symbol}`
+   (ContractMonitor and ComboMonitor), while the price feeds use
+   `{:ibkr_live, occ}`, `{:underlying, sym}` and `{:polygon, sym}`. Match
+   the tuple and guard its first element:
+
+   ```elixir
+   Registry.select(TradingOptionsSim.MonitorRegistry,
+     [{{{:"$1", :"$2"}, :"$3", :_}, [{:is_binary, :"$1"}], [{{:"$1", :"$2", :"$3"}}]}])
+   ```
+
+   A match head of plain `{:"$1", :_, :_}` binds the whole tuple, so
+   `is_binary(:"$1")` then matches nothing. The guard keeps the feed
+   processes out, but combo monitors still pass it. Before calling a
+   matched pid, check its kind (a contract key looks like
+   `"SYM:exp:strike:R"`, a combo key is the bare symbol). A loose
+   select that called the feed processes once crashed 50 of them.
 
 ---
 
@@ -210,11 +224,13 @@ Sim.full_universe_version_metrics()
 ```
 
 This returns one row per discovery/quarantine version, computed fresh
-from runs. The fields to rank on:
+from runs. Several numeric fields (`cost_margin`, the `mean_daily_r*` /
+`sd_daily_r*` statistics) are `Decimal`s, so convert them before doing
+arithmetic. The fields to rank on:
 
 | Field | Meaning |
 |---|---|
-| `n` | Closed, non-churn, non-excluded trades. Below 30 the gate `N` fails; treat any ranking on fewer than 30 trades as noise and say so. |
+| `n_closes` | Closed, non-churn, non-excluded trades (`scored_runs` is the same number). Below 30 the gate `N` fails; treat any ranking on fewer than 30 trades as noise and say so. |
 | `lcb95` | Lower 95% bound of expectancy in R. The main ranking key: positive means the edge probably survives the sample size. |
 | `scored_expectancy_r`, `final_score` | Mean R per trade, and R per capital-hour (scaled by 10^6). Use them to break ties, not to rank on alone. |
 | `cost_margin` | Expectancy minus round-trip commission. Below 0 means the edge doesn't cover costs. |
@@ -354,7 +370,7 @@ them.
 paper trading, and the user doesn't need to approve each fork.
 
 **Which to fork:**
-- Roughly the top 20% by `lcb95` among rows with `n ≥ 30` and
+- Roughly the top 20% by `lcb95` among rows with `n_closes ≥ 30` and
   `cost_margin > 0`.
 - If nothing qualifies, fork fewer or none, and say why. Never fork to
   fill a quota.
@@ -610,7 +626,7 @@ Report, briefly:
 - **Overnight jobs:** each job's state; the snapshot count and `missed`.
 - **Leftovers:** positions EodCloser missed, if any.
 - **Lifecycle changes:** promoted / retired overnight.
-- **Leaderboard:** the top 5 and bottom 5 by `lcb95` (with `n`), and
+- **Leaderboard:** the top 5 and bottom 5 by `lcb95` (with `n_closes`), and
   how each compares with its control.
 - **Forks created:**
   - name, parent and the one change;
