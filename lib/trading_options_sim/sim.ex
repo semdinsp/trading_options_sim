@@ -1052,10 +1052,27 @@ defmodule TradingOptionsSim.Sim do
   Persists a moved stop-loss / take-profit for an open run (ratchet or
   trailing stop), so a restarted monitor resumes from it. A missing run
   is logged and ignored: the monitor keeps the level in memory either way.
+
+  So is a database that can't take the write. A trailing stop moves on
+  most ticks, and on 2026-11-02 a pool exhaustion raised here inside 29
+  monitors at once; each crashed mid-position and restarted flat. The
+  next move persists the stop again, so a missed write costs nothing.
   """
   @spec update_sim_run_risk_levels(String.t(), Decimal.t() | nil, Decimal.t() | nil) ::
           :ok | {:error, term()}
   def update_sim_run_risk_levels(run_id, stop_loss_price, take_profit_price) do
+    do_update_sim_run_risk_levels(run_id, stop_loss_price, take_profit_price)
+  rescue
+    error in DBConnection.ConnectionError ->
+      Logger.warning(
+        "Sim: update_sim_run_risk_levels: run #{run_id} not written, " <>
+          "database unavailable: #{Exception.message(error)}"
+      )
+
+      {:error, :db_unavailable}
+  end
+
+  defp do_update_sim_run_risk_levels(run_id, stop_loss_price, take_profit_price) do
     with %SimRun{} = run <- Repo.get(SimRun, run_id),
          {:ok, _run} <-
            run
@@ -1347,6 +1364,34 @@ defmodule TradingOptionsSim.Sim do
     SimRun
     |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "open")
     |> Repo.all()
+  end
+
+  @doc """
+  The open run that holds a position on one contract of a version (the
+  latest entry if, against expectation, there are several), or `nil`.
+  `ContractMonitor.init/1` reads it so a monitor restarted by its
+  supervisor resumes the position it held instead of starting flat.
+  """
+  @spec open_entered_run_for_contract(
+          String.t(),
+          {String.t(), String.t(), Decimal.t(), String.t()}
+        ) ::
+          %SimRun{} | nil
+  def open_entered_run_for_contract(strategy_version_id, {symbol, expiry, strike, right}) do
+    SimRun
+    |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "open")
+    |> where([r], not is_nil(r.entry_at))
+    |> where([r], r.symbol == ^symbol and r.expiry == ^expiry and r.strike == ^strike)
+    |> where([r], r.right == ^right)
+    |> order_by([r], desc: r.entry_at)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  @doc "`true` when the run exists and is open (a deleted run is not)."
+  @spec sim_run_open?(String.t()) :: boolean()
+  def sim_run_open?(run_id) do
+    SimRun |> where([r], r.id == ^run_id and r.status == "open") |> Repo.exists?()
   end
 
   @doc """
