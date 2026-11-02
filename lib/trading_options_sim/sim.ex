@@ -1388,10 +1388,10 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.one()
   end
 
-  @doc "`true` when the run exists and is closed."
-  @spec sim_run_closed?(String.t()) :: boolean()
-  def sim_run_closed?(run_id) do
-    SimRun |> where([r], r.id == ^run_id and r.status == "closed") |> Repo.exists?()
+  @doc "`true` when the run exists and is open (a deleted run is not)."
+  @spec sim_run_open?(String.t()) :: boolean()
+  def sim_run_open?(run_id) do
+    SimRun |> where([r], r.id == ^run_id and r.status == "open") |> Repo.exists?()
   end
 
   @doc """

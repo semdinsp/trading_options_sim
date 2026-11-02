@@ -2685,6 +2685,24 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       refute ContractMonitor.snapshot(pid).position_open?
     end
 
+    # While the open-run read is failing (database down), the opts'
+    # position flag may be stale, so the monitor must neither enter nor
+    # force-close until the retry succeeds.
+    test "nothing trades while the open-run read is pending" do
+      {pid, run} = start_monitor(exit_version(%{}), contract_key("CRASH3"))
+      :sys.replace_state(pid, &%{&1 | resume_pending?: true})
+
+      broadcast_underlying_price("CRASH3", 150.0)
+      sync(pid)
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+
+      send(pid, :resume_from_db)
+      broadcast_underlying_price("CRASH3", 150.0)
+      sync(pid)
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+
     defp await_restart(version_id, key, old_pid, tries \\ 50) do
       case ContractMonitor.whereis(version_id, key) do
         pid when is_pid(pid) and pid != old_pid ->

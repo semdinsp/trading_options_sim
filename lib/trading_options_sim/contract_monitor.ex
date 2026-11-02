@@ -284,6 +284,9 @@ defmodule TradingOptionsSim.ContractMonitor do
     exit_state: %{},
     # Same warn-once shape for the staleness gate in evaluate_ibkr_live/2.
     stale_warned?: false,
+    # True until resume_from_db/1 has read this contract's open run and
+    # last exit from the database. Nothing trades while it is set.
+    resume_pending?: true,
     signal_names: [],
     canonical_names: %{},
     last_signal_values: %{}
@@ -414,7 +417,6 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   @impl true
   def init(opts) do
-    opts = resume_from_db(opts)
     sim_run_id = Keyword.fetch!(opts, :sim_run_id)
     {symbol, expiry, strike, right} = Keyword.fetch!(opts, :contract_key)
     strategy_version = Keyword.fetch!(opts, :strategy_version)
@@ -494,12 +496,11 @@ defmodule TradingOptionsSim.ContractMonitor do
       entry_delay_minutes: TradingOptionsSim.EntryDelay.minutes(strategy_version),
       entry_confirm_seconds: param_seconds(strategy_version, "entry_confirm_seconds"),
       reentry_cooldown_seconds: param_seconds(strategy_version, "reentry_cooldown_seconds"),
-      last_exit_at: seed_last_exit_at(strategy_version, symbol_from_opts(opts)),
       signal_names: signal_names,
       canonical_names: canonical_names
     }
 
-    {:ok, state, {:continue, :start_ibkr_live}}
+    {:ok, state, {:continue, :resume_from_db}}
   end
 
   # The database, not the start opts, says whether this contract holds a
@@ -511,47 +512,65 @@ defmodule TradingOptionsSim.ContractMonitor do
   # EodCloser skipped them because each monitor reported flat.
   #
   # An open run with an entry resumes, with its persisted levels. With
-  # none, a position flag that points at a closed run is stale and is
-  # dropped (the next entry opens a fresh run via ensure_open_run/1).
-  # Retried briefly: the crash that triggers a restart is often the
-  # database being briefly unavailable.
-  defp resume_from_db(opts, attempts_left \\ 5) do
-    version = Keyword.fetch!(opts, :strategy_version)
-    contract_key = Keyword.fetch!(opts, :contract_key)
+  # none, a position flag on a run that is closed or gone is stale and is
+  # dropped (the next entry opens a fresh run via ensure_open_run/1). The
+  # cooldown's last exit is seeded here too.
+  #
+  # Runs after init/1, not in it: init/1 runs inside MonitorSupervisor,
+  # which serves one start at a time, and the crash that triggers a
+  # restart is often the database being unavailable. A failed read keeps
+  # resume_pending? set (no trading, no forced close) and retries on a
+  # timer, so an outage neither stalls the supervisor nor burns through
+  # its restart limit.
+  @resume_retry_ms 1_000
 
-    case Sim.open_entered_run_for_contract(version.id, contract_key) do
+  defp resume_from_db(state) do
+    state
+    |> apply_open_run()
+    |> Map.merge(%{
+      last_exit_at: seed_last_exit_at(state.strategy_version, state.symbol),
+      resume_pending?: false
+    })
+  rescue
+    error in [DBConnection.ConnectionError, Postgrex.Error] ->
+      Logger.warning(
+        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+          "could not read its open run, retrying: #{Exception.message(error)}"
+      )
+
+      Process.send_after(self(), :resume_from_db, @resume_retry_ms)
+      state
+  end
+
+  defp apply_open_run(state) do
+    case Sim.open_entered_run_for_contract(state.strategy_version.id, state.contract_key) do
       %Sim.SimRun{} = run ->
-        Keyword.merge(opts,
-          sim_run_id: run.id,
-          position_open?: true,
-          entered_at: run.entry_at,
-          entry_price: run.entry_price,
-          stop_loss_price: run.stop_loss_price,
-          take_profit_price: run.take_profit_price
-        )
+        %{
+          state
+          | sim_run_id: run.id,
+            position_open?: true,
+            entered_at: run.entry_at,
+            entry_price: run.entry_price,
+            stop_loss_price: run.stop_loss_price,
+            take_profit_price: run.take_profit_price,
+            exit_state: %{excursion_resumed: true}
+        }
 
       nil ->
-        if Keyword.get(opts, :position_open?, false) and
-             Sim.sim_run_closed?(Keyword.fetch!(opts, :sim_run_id)) do
-          Keyword.merge(opts,
-            position_open?: false,
-            entered_at: nil,
-            entry_price: nil,
-            stop_loss_price: nil,
-            take_profit_price: nil
-          )
+        if state.position_open? and not Sim.sim_run_open?(state.sim_run_id) do
+          %{
+            state
+            | position_open?: false,
+              entered_at: nil,
+              entry_price: nil,
+              stop_loss_price: nil,
+              take_profit_price: nil,
+              exit_state: %{}
+          }
         else
-          opts
+          state
         end
     end
-  rescue
-    error in DBConnection.ConnectionError ->
-      if attempts_left > 1 do
-        Process.sleep(200)
-        resume_from_db(opts, attempts_left - 1)
-      else
-        reraise error, __STACKTRACE__
-      end
   end
 
   # Starting the shared IBKRLive listener is deliberately NOT done in
@@ -573,6 +592,10 @@ defmodule TradingOptionsSim.ContractMonitor do
   # other message is processed, so the listener is still attached before
   # the first tick can arrive -- but the supervisor is free by then.
   @impl true
+  def handle_continue(:resume_from_db, state) do
+    {:noreply, resume_from_db(state), {:continue, :start_ibkr_live}}
+  end
+
   def handle_continue(:start_ibkr_live, %{pricing_backend: :ibkr_live} = state) do
     maybe_prewarm_atr(state)
 
@@ -789,6 +812,12 @@ defmodule TradingOptionsSim.ContractMonitor do
   # tick) rather than re-pricing — EodCloser has no spot price of its
   # own to hand back. A flat monitor (no open position, or no snapshot
   # priced yet) is a no-op; `reason` is always `:eod_flatten`.
+  def handle_info(:resume_from_db, %{resume_pending?: true} = state) do
+    {:noreply, resume_from_db(state)}
+  end
+
+  def handle_info(:resume_from_db, state), do: {:noreply, state}
+
   def handle_info({:force_close_eod, reason}, state) do
     {:noreply, do_force_close(state, reason)}
   end
@@ -803,6 +832,8 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   def handle_info(_other, state), do: {:noreply, state}
 
+  # Until the open run is read, position_open? may be the stale opts flag.
+  defp do_force_close(%{resume_pending?: true} = state, _reason), do: state
   defp do_force_close(%{position_open?: false} = state, _reason), do: state
 
   defp do_force_close(%{last_snapshot: snapshot} = state, _reason)
@@ -1240,12 +1271,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   def seed_last_exit_at(_version, _symbol), do: nil
 
-  defp symbol_from_opts(opts) do
-    case Keyword.get(opts, :contract_key) do
-      {symbol, _expiry, _strike, _right} -> symbol
-      _ -> nil
-    end
-  end
+  defp maybe_transition(%{resume_pending?: true} = state, _snapshot), do: state
 
   defp maybe_transition(%{position_open?: false} = state, snapshot) do
     now = DateTime.utc_now()
