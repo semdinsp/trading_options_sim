@@ -420,8 +420,13 @@ defmodule TradingOptionsSim.Sim do
         %StrategyVersion{lifecycle_stage: "retired"} = version,
         "discovery"
       ) do
+    # Clear the reason with the stage: a stale "lifecycle_review" on a live
+    # version reads as retired in reports and lists it as changed every day.
     version
-    |> StrategyVersion.lifecycle_stage_changeset(%{"lifecycle_stage" => "discovery"})
+    |> StrategyVersion.lifecycle_stage_changeset(%{
+      "lifecycle_stage" => "discovery",
+      "retired_reason" => nil
+    })
     |> Repo.update()
   end
 
