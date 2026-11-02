@@ -706,6 +706,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       right: state.right,
       direction: state.direction,
       exchange: state.exchange,
+      sim_run_id: state.sim_run_id,
       position_open?: state.position_open?,
       entered_at: state.entered_at,
       min_hold_seconds: state.min_hold_seconds,
@@ -817,6 +818,14 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   def handle_info(:resume_from_db, state), do: {:noreply, state}
+
+  # EodCloser found an open run with an entry that no monitor holds (see
+  # EodCloser.adopt_orphaned_runs/2). A flat monitor re-reads its open
+  # run and takes it over; one holding a position ignores the request.
+  def handle_info(:adopt_open_run, %{position_open?: false} = state),
+    do: {:noreply, resume_from_db(%{state | resume_pending?: true})}
+
+  def handle_info(:adopt_open_run, state), do: {:noreply, state}
 
   def handle_info({:force_close_eod, reason}, state) do
     {:noreply, do_force_close(state, reason)}

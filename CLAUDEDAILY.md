@@ -664,6 +664,13 @@ Repo.all(from r in TradingOptionsSim.Sim.SimRun,
 - Anything left is a position `EodCloser` didn't flatten: report the
   version and symbol.
 - Positions on `overnight_hold: true` versions are expected to stay open.
+- `EodCloser` hands back, every minute, any open run with an entry that
+  no running monitor holds (e.g. after a monitor crashed mid-position):
+  to its own monitor, or by re-activating an active version once. Its
+  log says "held by no monitor", "has no monitor" or "will not be
+  closed automatically" (inactive version). A run left here after the
+  close is one it could not hand back: report it, and close it only
+  with the user's OK.
 
 Also check today's exit-reason mix (`eod_flatten`, `rule_exit`,
 `stop_loss`, `take_profit` …). A day of almost all `eod_flatten` exits

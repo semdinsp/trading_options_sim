@@ -31,11 +31,14 @@ defmodule TradingOptionsSim.EodCloser do
   use GenServer
   require Logger
 
-  alias TradingOptionsSim.ExchangeSessionCache
+  alias TradingOptionsSim.{ComboMonitor, ContractMonitor, ExchangeSessionCache, SimActivator}
   alias TradingOptionsSim.Sim
 
   @default_tick_interval_ms 60_000
   @default_close_before_ms 11 * 60 * 1000
+  # A run entered this recently may belong to a monitor whose snapshot
+  # was read just before the entry; leave it to the next tick.
+  @orphan_grace_seconds 120
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -50,20 +53,19 @@ defmodule TradingOptionsSim.EodCloser do
   @impl true
   def init(_opts) do
     schedule_next()
-    {:ok, %{}}
+    {:ok, %{reported_orphans: MapSet.new()}}
   end
 
   @impl true
   def handle_info(:tick, state) do
-    do_scan()
+    state = do_scan(state)
     schedule_next()
     {:noreply, state}
   end
 
   @impl true
   def handle_call(:run_once, _from, state) do
-    do_scan()
-    {:reply, :ok, state}
+    {:reply, :ok, do_scan(state)}
   end
 
   defp schedule_next do
@@ -77,17 +79,104 @@ defmodule TradingOptionsSim.EodCloser do
     Process.send_after(self(), :tick, interval)
   end
 
-  defp do_scan do
+  defp do_scan(state) do
     now = DateTime.utc_now()
+    monitors = running_monitors()
 
-    running_monitors()
-    |> Enum.each(fn {strategy_version_id, pid} ->
+    Enum.each(monitors, fn {strategy_version_id, pid} ->
       maybe_close_isolated(strategy_version_id, pid, now)
     end)
+
+    adopt_orphaned_runs(state, monitors, now)
   rescue
     error ->
       Logger.error("EodCloser: scan pass failed: #{inspect(error)}")
+      state
   end
+
+  # This module flattens positions by asking monitors, so an open run no
+  # monitor holds is never closed: on 2026-11-02 six monitors crashed
+  # mid-position and restarted flat, and their runs stayed open past the
+  # close. Each tick, every open run with an entry that no running
+  # monitor reports holding is handed back:
+  #   * to its own monitor if one is running (it re-reads the run and
+  #     takes it over, see ContractMonitor's :adopt_open_run clause);
+  #   * otherwise, for an active version, by re-activating it once, which
+  #     resumes open runs (SimActivator.activate/1);
+  #   * a run of an inactive version is logged once.
+  # A run still unheld after that is left for the close routine
+  # (CLAUDEDAILY.md C0) to report, not re-activated every minute.
+  # Once held, the next tick closes it like any other position.
+  defp adopt_orphaned_runs(state, monitors, now) do
+    held =
+      monitors
+      |> Enum.flat_map(fn {_version_id, pid} ->
+        case fetch_snapshot(pid) do
+          %{position_open?: true, sim_run_id: run_id} -> [run_id]
+          _ -> []
+        end
+      end)
+      |> MapSet.new()
+
+    orphans =
+      now
+      |> DateTime.add(-@orphan_grace_seconds, :second)
+      |> Sim.list_open_entered_runs()
+      |> Enum.reject(&MapSet.member?(held, &1.id))
+
+    active_ids = MapSet.new(Sim.list_active_strategy_versions(), & &1.id)
+
+    {reported, _reactivated} =
+      Enum.reduce(orphans, {state.reported_orphans, MapSet.new()}, fn run, acc ->
+        adopt(run, active_ids, acc)
+      end)
+
+    %{state | reported_orphans: reported}
+  end
+
+  defp adopt(run, active_ids, {reported, reactivated}) do
+    version_id = run.strategy_version_id
+
+    cond do
+      pid = orphan_monitor(run) ->
+        Logger.warning(
+          "EodCloser: open run #{run.id} (#{version_id} #{run.symbol}) is held by no monitor; " <>
+            "asking its monitor to take it over"
+        )
+
+        send(pid, :adopt_open_run)
+        {reported, reactivated}
+
+      MapSet.member?(reactivated, version_id) or MapSet.member?(reported, run.id) ->
+        {reported, reactivated}
+
+      MapSet.member?(active_ids, version_id) ->
+        Logger.warning(
+          "EodCloser: open run #{run.id} (#{version_id} #{run.symbol}) has no monitor; " <>
+            "re-activating its version to resume it"
+        )
+
+        SimActivator.activate(Sim.get_strategy_version!(version_id))
+        {MapSet.put(reported, run.id), MapSet.put(reactivated, version_id)}
+
+      true ->
+        Logger.error(
+          "EodCloser: open run #{run.id} (#{version_id} #{run.symbol}) belongs to an " <>
+            "inactive version and no monitor holds it; it will not be closed automatically"
+        )
+
+        {MapSet.put(reported, run.id), reactivated}
+    end
+  end
+
+  defp orphan_monitor(%{structure: nil} = run),
+    do:
+      ContractMonitor.whereis(
+        run.strategy_version_id,
+        {run.symbol, run.expiry, run.strike, run.right}
+      )
+
+  defp orphan_monitor(run), do: ComboMonitor.whereis(run.strategy_version_id, run.symbol)
 
   # MonitorRegistry is shared with TradingOptionsSim.Pricing.IBKRLive,
   # whose own keys are {:ibkr_live, occ_symbol} — also a 2-tuple, so a
