@@ -1,5 +1,9 @@
 defmodule TradingOptionsSimWeb.Api.StrategyVersionControllerTest do
-  use TradingOptionsSimWeb.ConnCase, async: true
+  # Not async: the activate tests start real ContractMonitors, and a
+  # monitor reads its open run from the database when it starts (so a
+  # supervisor restart resumes a held position). Those processes can
+  # only reach the sandbox in shared mode.
+  use TradingOptionsSimWeb.ConnCase, async: false
 
   alias TradingOptionsSim.Repo
   alias TradingOptionsSim.Sim

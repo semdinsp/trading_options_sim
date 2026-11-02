@@ -414,6 +414,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   @impl true
   def init(opts) do
+    opts = resume_from_db(opts)
     sim_run_id = Keyword.fetch!(opts, :sim_run_id)
     {symbol, expiry, strike, right} = Keyword.fetch!(opts, :contract_key)
     strategy_version = Keyword.fetch!(opts, :strategy_version)
@@ -499,6 +500,58 @@ defmodule TradingOptionsSim.ContractMonitor do
     }
 
     {:ok, state, {:continue, :start_ibkr_live}}
+  end
+
+  # The database, not the start opts, says whether this contract holds a
+  # position. The opts are fixed when SimActivator starts the monitor, so
+  # a supervisor restart after a crash replays them as they were then:
+  # the run the monitor held at activation (often long closed) and that
+  # moment's position flag. On 2026-11-02 a crash mid-position restarted
+  # 6 monitors flat, leaving their runs open with nothing to exit them;
+  # EodCloser skipped them because each monitor reported flat.
+  #
+  # An open run with an entry resumes, with its persisted levels. With
+  # none, a position flag that points at a closed run is stale and is
+  # dropped (the next entry opens a fresh run via ensure_open_run/1).
+  # Retried briefly: the crash that triggers a restart is often the
+  # database being briefly unavailable.
+  defp resume_from_db(opts, attempts_left \\ 5) do
+    version = Keyword.fetch!(opts, :strategy_version)
+    contract_key = Keyword.fetch!(opts, :contract_key)
+
+    case Sim.open_entered_run_for_contract(version.id, contract_key) do
+      %Sim.SimRun{} = run ->
+        Keyword.merge(opts,
+          sim_run_id: run.id,
+          position_open?: true,
+          entered_at: run.entry_at,
+          entry_price: run.entry_price,
+          stop_loss_price: run.stop_loss_price,
+          take_profit_price: run.take_profit_price
+        )
+
+      nil ->
+        if Keyword.get(opts, :position_open?, false) and
+             Sim.sim_run_closed?(Keyword.fetch!(opts, :sim_run_id)) do
+          Keyword.merge(opts,
+            position_open?: false,
+            entered_at: nil,
+            entry_price: nil,
+            stop_loss_price: nil,
+            take_profit_price: nil
+          )
+        else
+          opts
+        end
+    end
+  rescue
+    error in DBConnection.ConnectionError ->
+      if attempts_left > 1 do
+        Process.sleep(200)
+        resume_from_db(opts, attempts_left - 1)
+      else
+        reraise error, __STACKTRACE__
+      end
   end
 
   # Starting the shared IBKRLive listener is deliberately NOT done in

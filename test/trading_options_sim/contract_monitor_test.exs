@@ -2635,6 +2635,69 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       assert Decimal.gt?(run.stop_loss_price, Decimal.new("0.45"))
     end
+
+    # 2026-11-02: monitors crashed mid-position and their supervisor
+    # restarted them from the activation-time opts (flat), so the open
+    # runs were never exited.
+    test "a monitor restarted after a crash resumes its open position" do
+      trailing = %{"method" => "trailing", "trail_pct" => 10}
+      {pid, run} = enter("CRASH1", %{"exit_strategy" => trailing})
+      key = contract_key("CRASH1")
+      run = move(pid, "CRASH1", 160.0, run)
+      assert run.stop_loss_price
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+
+      new_pid = await_restart(run.strategy_version_id, key, pid)
+      assert ContractMonitor.snapshot(new_pid).position_open?
+
+      run = move(new_pid, "CRASH1", 150.0, run)
+      assert run.status == "closed"
+      assert run.exit_reason == "stop_loss"
+    end
+
+    test "a stale position flag pointing at a closed run starts flat" do
+      version = exit_version(%{})
+      key = contract_key("CRASH2")
+      {symbol, expiry, strike, right} = key
+
+      {:ok, closed} =
+        Sim.open_sim_run(version, %{
+          symbol: symbol,
+          expiry: expiry,
+          strike: strike,
+          right: right,
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, _} = Sim.close_run_without_entry(closed, "manual_no_entry")
+
+      {pid, _run} =
+        start_monitor(version, key,
+          sim_run_id: closed.id,
+          position_open?: true,
+          entry_price: Decimal.new("5.00")
+        )
+
+      refute ContractMonitor.snapshot(pid).position_open?
+    end
+
+    defp await_restart(version_id, key, old_pid, tries \\ 50) do
+      case ContractMonitor.whereis(version_id, key) do
+        pid when is_pid(pid) and pid != old_pid ->
+          pid
+
+        _ when tries > 0 ->
+          Process.sleep(20)
+          await_restart(version_id, key, old_pid, tries - 1)
+
+        _ ->
+          flunk("monitor was not restarted")
+      end
+    end
   end
 
   describe "signal subscriptions across reconnects" do
