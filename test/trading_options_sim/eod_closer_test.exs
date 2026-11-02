@@ -30,17 +30,26 @@ defmodule TradingOptionsSim.EodCloserTest do
     {symbol, "20271231", Decimal.new("150.00"), "C"}
   end
 
-  # `minutes_until_close` relative to right now, in UTC — deliberately
+  # `minutes_until_close` relative to right now — deliberately
   # time-relative (not a fixed clock time) so this test is correct
   # regardless of when it actually runs. Mirrors
-  # TradingLive.EodCloserTest's identical `seed_exchange_session/3`.
+  # TradingLive.EodCloserTest's `seed_exchange_session/3`.
+  #
+  # The session is set in a fixed-offset zone where it is about noon now.
+  # In plain UTC, a close less than two hours away wrapped past midnight
+  # whenever the suite ran after ~22:00 UTC: an end_time of 00:01 made a
+  # one-minute session that was already over, and "still enters outside
+  # the close window" failed every night.
   defp seed_exchange_session(exchange, minutes_until_close, opts \\ []) do
     now = DateTime.utc_now()
-    close_at = DateTime.add(now, minutes_until_close * 60, :second)
+    zone = noon_zone(now)
+
+    close_at =
+      now |> DateTime.add(minutes_until_close * 60, :second) |> DateTime.shift_zone!(zone)
 
     attrs = %{
       name: "EOD-test-#{exchange}",
-      timezone: "Etc/UTC",
+      timezone: zone,
       start_time: ~T[00:00:00],
       end_time: DateTime.to_time(close_at),
       days_of_week: [1, 2, 3, 4, 5, 6, 7],
@@ -58,6 +67,16 @@ defmodule TradingOptionsSim.EodCloserTest do
       |> Repo.insert()
 
     :ok
+  end
+
+  # A fixed-offset zone (UTC-11 .. UTC+12) whose local hour is near 12 at
+  # `now`. Etc/GMT signs are inverted: "Etc/GMT-5" is UTC+5.
+  defp noon_zone(now) do
+    case 12 - now.hour do
+      0 -> "Etc/UTC"
+      h when h > 0 -> "Etc/GMT-#{h}"
+      h -> "Etc/GMT+#{-h}"
+    end
   end
 
   # Starts the monitor already `position_open?: true` (same pattern
