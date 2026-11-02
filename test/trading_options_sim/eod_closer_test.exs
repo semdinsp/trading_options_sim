@@ -1,6 +1,8 @@
 defmodule TradingOptionsSim.EodCloserTest do
   use TradingOptionsSim.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias TradingOptionsSim.ContractMonitor
   alias TradingOptionsSim.EodCloser
   alias TradingOptionsSim.Sim
@@ -173,6 +175,113 @@ defmodule TradingOptionsSim.EodCloserTest do
   # expiry window (<= expiry_close_dte, 1) must be flat by that day's
   # close, overnight_hold or not -- holding it would carry it into
   # expiry day.
+  # 2026-11-02: monitors that crashed mid-position restarted flat, and
+  # their open runs stayed open past the close because this module only
+  # asks monitors to flatten.
+  describe "open runs no monitor holds" do
+    defp never_exiting_version,
+      do:
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 999_999},
+          "exit" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 999_999}
+        })
+
+    # An open run with an entry well outside the grace period.
+    defp entered_run(version, symbol) do
+      {:ok, run} =
+        Sim.open_sim_run(version, %{
+          symbol: symbol,
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      at = DateTime.add(DateTime.utc_now(), -600, :second)
+
+      {:ok, {_fill, run}} =
+        Sim.record_entry_fill(
+          run,
+          %{action: "buy", quantity: 1, fill_price: Decimal.new("5.00"), filled_at: at},
+          %{entry_at: at, entry_price: Decimal.new("5.00")}
+        )
+
+      run
+    end
+
+    test "a flat monitor takes over its contract's open run, which then closes at EOD" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 5)
+      version = never_exiting_version()
+
+      {:ok, flat_run} =
+        Sim.open_sim_run(version, %{
+          symbol: "EODORPH1",
+          expiry: "20271231",
+          strike: Decimal.new("150.00"),
+          right: "C",
+          multiplier: 100,
+          direction: "long"
+        })
+
+      {:ok, pid} =
+        start_supervised(
+          {ContractMonitor,
+           sim_run_id: flat_run.id,
+           contract_key: contract_key("EODORPH1"),
+           strategy_version: version,
+           direction: "long",
+           quantity: 1,
+           exchange: exchange}
+        )
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      run = entered_run(version, "EODORPH1")
+
+      log = capture_log(fn -> :ok = EodCloser.run_once() end)
+      assert log =~ "asking its monitor to take it over"
+      assert ContractMonitor.snapshot(pid).position_open?
+
+      message =
+        %{type: :price, symbol: "EODORPH1", source: :ibkr, data: %{last: 150.0}}
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:EODORPH1", message)
+      _ = ContractMonitor.snapshot(pid)
+
+      :ok = EodCloser.run_once()
+      _ = ContractMonitor.snapshot(pid)
+
+      closed = Sim.get_sim_run!(run.id)
+      assert closed.status == "closed"
+      assert closed.exit_reason == "eod_flatten"
+    end
+
+    test "an open run of an inactive version with no monitor is logged once" do
+      run = entered_run(never_exiting_version(), "EODORPH2")
+
+      first = capture_log(fn -> :ok = EodCloser.run_once() end)
+      second = capture_log(fn -> :ok = EodCloser.run_once() end)
+
+      assert first =~ "#{run.id}"
+      assert first =~ "will not be closed automatically"
+      refute second =~ "#{run.id}"
+      assert Sim.get_sim_run!(run.id).status == "open"
+    end
+
+    test "a run a monitor holds is left alone" do
+      exchange = "EOD-#{System.unique_integer([:positive])}"
+      :ok = seed_exchange_session(exchange, 120)
+      {_pid, run} = start_monitor_with_open_position(exchange, "EODORPH3")
+      at = DateTime.add(DateTime.utc_now(), -600, :second)
+      Repo.update_all(from(r in Sim.SimRun, where: r.id == ^run.id), set: [entry_at: at])
+
+      log = capture_log(fn -> :ok = EodCloser.run_once() end)
+      refute log =~ "#{run.id}"
+    end
+  end
+
   describe "expiry window" do
     defp et_date_plus(days) do
       DateTime.now!("America/New_York")

@@ -343,6 +343,7 @@ defmodule TradingOptionsSim.ComboMonitor do
       legs: state.legs,
       direction: state.direction,
       exchange: state.exchange,
+      sim_run_id: state.sim_run_id,
       position_open?: state.position_open?,
       entered_at: state.entered_at,
       min_hold_seconds: state.min_hold_seconds,
@@ -401,6 +402,12 @@ defmodule TradingOptionsSim.ComboMonitor do
     do: {:noreply, resume_from_db(state)}
 
   def handle_info(:resume_from_db, state), do: {:noreply, state}
+
+  # See ContractMonitor's :adopt_open_run clause.
+  def handle_info(:adopt_open_run, %{position_open?: false} = state),
+    do: {:noreply, resume_from_db(%{state | resume_pending?: true})}
+
+  def handle_info(:adopt_open_run, state), do: {:noreply, state}
 
   def handle_info({:force_close_eod, reason}, state),
     do: {:noreply, do_force_close(state, reason)}

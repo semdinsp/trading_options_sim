@@ -1403,6 +1403,20 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.one()
   end
 
+  @doc """
+  Open runs with an entry made before `entered_before`, oldest first.
+  `EodCloser` compares them with the runs its monitors hold to find
+  positions no monitor holds.
+  """
+  @spec list_open_entered_runs(DateTime.t()) :: [%SimRun{}]
+  def list_open_entered_runs(entered_before) do
+    SimRun
+    |> where([r], r.status == "open" and not is_nil(r.entry_at))
+    |> where([r], r.entry_at < ^entered_before)
+    |> order_by([r], asc: r.entry_at)
+    |> Repo.all()
+  end
+
   @doc "`true` when the run exists and is open (a deleted run is not)."
   @spec sim_run_open?(String.t()) :: boolean()
   def sim_run_open?(run_id) do
