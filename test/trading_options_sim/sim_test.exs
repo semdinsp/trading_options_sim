@@ -95,6 +95,17 @@ defmodule TradingOptionsSim.SimTest do
       assert unretired.lifecycle_stage == "discovery"
     end
 
+    test "retired -> discovery clears retired_reason" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, retired} = Sim.downgrade_strategy_version(version, "retired", "lifecycle_review")
+      assert retired.retired_reason == "lifecycle_review"
+
+      {:ok, unretired} = Sim.promote_strategy_version(retired, "discovery")
+      assert unretired.retired_reason == nil
+      assert Sim.get_strategy_version!(version.id).retired_reason == nil
+    end
+
     test "discovery -> discovery is an invalid transition" do
       strategy = strategy_fixture()
       version = version_fixture(strategy)
