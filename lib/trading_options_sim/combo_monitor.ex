@@ -109,6 +109,9 @@ defmodule TradingOptionsSim.ComboMonitor do
     take_profit_price: nil,
     entry_price: nil,
     exit_state: %{},
+    # True until resume_from_db/1 has read this symbol's open run; see
+    # ContractMonitor's resume_from_db/1. Nothing trades while it is set.
+    resume_pending?: true,
     signal_names: [],
     canonical_names: %{},
     last_signal_values: %{}
@@ -220,17 +223,85 @@ defmodule TradingOptionsSim.ComboMonitor do
       entry_confirm_seconds: ContractMonitor.param_seconds(version, "entry_confirm_seconds"),
       reentry_cooldown_seconds:
         ContractMonitor.param_seconds(version, "reentry_cooldown_seconds"),
-      last_exit_at: ContractMonitor.seed_last_exit_at(version, symbol),
       signal_names: signal_names,
       canonical_names: ContractMonitor.subscribe_to_signals(signal_names)
     }
 
-    {:ok, state, {:continue, :start_ibkr_live}}
+    {:ok, state, {:continue, :resume_from_db}}
+  end
+
+  # The same restart hazard as ContractMonitor (see its resume_from_db/1):
+  # a supervisor restart replays the activation-time opts, so a combo
+  # that crashed mid-position came back flat on a stale run. Read the
+  # symbol's open run after init/1 and retry on a timer if the database
+  # is unavailable. A run on other strikes than this monitor's legs is
+  # not resumed (its legs can't be priced here); it is logged instead.
+  @resume_retry_ms 1_000
+
+  defp resume_from_db(state) do
+    state
+    |> apply_open_run()
+    |> Map.merge(%{
+      last_exit_at: ContractMonitor.seed_last_exit_at(state.strategy_version, state.symbol),
+      resume_pending?: false
+    })
+  rescue
+    error in [DBConnection.ConnectionError, Postgrex.Error] ->
+      Logger.warning(
+        "ComboMonitor: #{state.symbol} could not read its open run, retrying: " <>
+          Exception.message(error)
+      )
+
+      Process.send_after(self(), :resume_from_db, @resume_retry_ms)
+      state
+  end
+
+  defp apply_open_run(state) do
+    case Sim.open_entered_combo_run(state.strategy_version.id, state.symbol) do
+      %Sim.SimRun{} = run ->
+        if run.expiry == state.expiry and run.right == state.right and
+             Decimal.equal?(run.strike, state.strike) do
+          %{
+            state
+            | sim_run_id: run.id,
+              position_open?: true,
+              entered_at: run.entry_at,
+              entry_price: run.entry_price,
+              stop_loss_price: run.stop_loss_price,
+              take_profit_price: run.take_profit_price
+          }
+        else
+          Logger.error(
+            "ComboMonitor: #{state.symbol} open run #{run.id} is on #{run.expiry} " <>
+              "#{run.strike}#{run.right}, not this monitor's legs; not resumed"
+          )
+
+          state
+        end
+
+      nil ->
+        if state.position_open? and not Sim.sim_run_open?(state.sim_run_id) do
+          %{
+            state
+            | position_open?: false,
+              entered_at: nil,
+              entry_price: nil,
+              stop_loss_price: nil,
+              take_profit_price: nil
+          }
+        else
+          state
+        end
+    end
+  end
+
+  @impl true
+  def handle_continue(:resume_from_db, state) do
+    {:noreply, resume_from_db(state), {:continue, :start_ibkr_live}}
   end
 
   # Not in init/1, for the DynamicSupervisor deadlock ContractMonitor's
   # own handle_continue/2 documents.
-  @impl true
   def handle_continue(:start_ibkr_live, %{pricing_backend: :ibkr_live} = state) do
     subscribed? =
       Enum.map(state.legs, fn leg ->
@@ -326,6 +397,11 @@ defmodule TradingOptionsSim.ComboMonitor do
     {:noreply, %{state | canonical_names: Map.merge(state.canonical_names, canonical_names)}}
   end
 
+  def handle_info(:resume_from_db, %{resume_pending?: true} = state),
+    do: {:noreply, resume_from_db(state)}
+
+  def handle_info(:resume_from_db, state), do: {:noreply, state}
+
   def handle_info({:force_close_eod, reason}, state),
     do: {:noreply, do_force_close(state, reason)}
 
@@ -336,6 +412,9 @@ defmodule TradingOptionsSim.ComboMonitor do
   def handle_info(_other, state), do: {:noreply, state}
 
   # --- evaluation -----------------------------------------------------------
+
+  # Until the open run is read, position_open? may be the stale opts flag.
+  defp evaluate(%{resume_pending?: true} = state, _spot), do: state
 
   defp evaluate(state, spot) do
     dte = ContractMonitor.days_to_expiry(state.expiry)
@@ -601,6 +680,7 @@ defmodule TradingOptionsSim.ComboMonitor do
 
   # --- forced closes -------------------------------------------------------
 
+  defp do_force_close(%{resume_pending?: true} = state, _reason), do: state
   defp do_force_close(%{position_open?: false} = state, _reason), do: state
 
   defp do_force_close(%{last_leg_prices: []} = state, _reason) do

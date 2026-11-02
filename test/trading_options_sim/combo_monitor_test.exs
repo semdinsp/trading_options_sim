@@ -265,6 +265,64 @@ defmodule TradingOptionsSim.ComboMonitorTest do
     end
   end
 
+  # 2026-11-02: monitors that crashed mid-position were restarted by their
+  # supervisor from the activation-time opts and came back flat.
+  describe "restart after a crash" do
+    test "resumes the open combo and exits that same run" do
+      version = version_fixture()
+      {pid, run} = start_combo(version, "CMB9")
+      tick(pid, "CMB9", 150.0)
+      assert entered(run.id).entry_at
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+
+      new_pid = await_restart(version.id, "CMB9", pid)
+      assert ContractMonitor.snapshot(new_pid).position_open?
+
+      tick(new_pid, "CMB9", 150.0)
+      assert length(fills(run.id, "entry")) == 2
+      :ok = ContractMonitor.force_close(new_pid, :manual)
+
+      run = entered(run.id)
+      assert run.status == "closed"
+      assert run.exit_reason == "manual"
+
+      assert Repo.aggregate(
+               from(r in SimRun, where: r.strategy_version_id == ^version.id),
+               :count
+             ) == 1
+    end
+
+    test "nothing trades while the open-run read is pending" do
+      version = version_fixture()
+      {pid, run} = start_combo(version, "CMB10")
+      :sys.replace_state(pid, &%{&1 | resume_pending?: true})
+
+      tick(pid, "CMB10", 150.0)
+      assert fills(run.id, "entry") == []
+
+      send(pid, :resume_from_db)
+      tick(pid, "CMB10", 150.0)
+      assert ContractMonitor.snapshot(pid).position_open?
+    end
+  end
+
+  defp await_restart(version_id, symbol, old_pid, tries \\ 50) do
+    case ComboMonitor.whereis(version_id, symbol) do
+      pid when is_pid(pid) and pid != old_pid ->
+        pid
+
+      _ when tries > 0 ->
+        Process.sleep(20)
+        await_restart(version_id, symbol, old_pid, tries - 1)
+
+      _ ->
+        flunk("combo monitor was not restarted")
+    end
+  end
+
   describe "promotion" do
     test "a combo is never exported to trading_live, even with valid risk controls" do
       version = version_fixture()

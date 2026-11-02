@@ -1388,6 +1388,21 @@ defmodule TradingOptionsSim.Sim do
     |> Repo.one()
   end
 
+  @doc """
+  The open multi-leg run that holds a position on `symbol` for a version
+  (the latest entry if there are several), or `nil`. `ComboMonitor`
+  reads it so a restarted monitor resumes the position it held.
+  """
+  @spec open_entered_combo_run(String.t(), String.t()) :: %SimRun{} | nil
+  def open_entered_combo_run(strategy_version_id, symbol) do
+    SimRun
+    |> where([r], r.strategy_version_id == ^strategy_version_id and r.status == "open")
+    |> where([r], not is_nil(r.entry_at) and not is_nil(r.structure) and r.symbol == ^symbol)
+    |> order_by([r], desc: r.entry_at)
+    |> limit(1)
+    |> Repo.one()
+  end
+
   @doc "`true` when the run exists and is open (a deleted run is not)."
   @spec sim_run_open?(String.t()) :: boolean()
   def sim_run_open?(run_id) do
