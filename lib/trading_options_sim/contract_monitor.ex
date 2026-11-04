@@ -1463,7 +1463,10 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     tighter? = tighter_stop?(stop, state.stop_loss_price, state.direction)
     stop_loss_price = if tighter?, do: stop, else: state.stop_loss_price
-    state = %{state | exit_state: Map.merge(state.exit_state, updates)}
+    exit_state = Map.merge(state.exit_state, updates)
+    # Marks a moved stop as live even inside stop_arm_seconds (stop_armed?/1).
+    exit_state = if tighter?, do: Map.put(exit_state, :stop_moved, true), else: exit_state
+    state = %{state | exit_state: exit_state}
 
     if tighter? or take_profit_price != state.take_profit_price do
       Sim.update_sim_run_risk_levels(state.sim_run_id, stop_loss_price, take_profit_price)
@@ -1785,10 +1788,14 @@ defmodule TradingOptionsSim.ContractMonitor do
   keeps the stop from firing for that long after entry, so a fill's own
   spread or a first noisy tick can't stop it out at once. Off by default:
   a stop is risk control, and an unarmed stop also ignores a real
-  collapse. The take-profit is never delayed. Read from the version at
+  collapse. Only the initial stop is held: once a ratchet or trailing
+  stop has moved it, it's live at once. The take-profit is never
+  delayed. Read from the version at
   check time rather than kept in the struct, so a code reload doesn't
   meet running monitors whose state lacks a new key.
   """
+  def stop_armed?(%{exit_state: %{stop_moved: true}}), do: true
+
   def stop_armed?(%{strategy_version: version, entered_at: %DateTime{} = entered_at}) do
     case param_seconds(version, "stop_arm_seconds") do
       0 -> true
@@ -1918,7 +1925,7 @@ defmodule TradingOptionsSim.ContractMonitor do
         # Once per entry: for "atr" this is a remote lookup.
         levels = risk_levels(state, price, snapshot)
 
-        case level_through_mark(state, levels, snapshot) do
+        case level_through_mark(state, price, levels, snapshot) do
           nil -> record_entry(state, snapshot, action, price, fill_basis, levels)
           {kind, level, mark} -> skip_level_through_mark(state, price, kind, level, mark)
         end
@@ -1929,7 +1936,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   # No entry whose stop or target the option's own price is already
-  # through.
+  # through, or within half the level's distance of.
   #
   # Both levels are set off the fill, which crosses part of the spread,
   # but checked against premium/1 (the option price, or the mid). When
@@ -1941,22 +1948,29 @@ defmodule TradingOptionsSim.ContractMonitor do
   # entered and stopped 23 times within 15 seconds (-$1,952), and an XLU
   # call 22 times. A target can loop the same way (a last print near the
   # ask over a tight target), booking a loss as a "take_profit".
-  # Delaying the stop (stop_arm_seconds) only slows such a loop when the
-  # quote is frozen; refusing the entry ends it. The entry is retried on
-  # every tick, so it goes ahead once the book tightens.
+  #
+  # The price must be at least halfway from the level back to the fill
+  # (past the midpoint of the two), not just a tick clear of it:
+  # otherwise prints alternating around the level let it in and stop it
+  # out over and over. Delaying the stop (stop_arm_seconds) only slows
+  # such a loop when the quote is frozen; refusing the entry ends it.
+  # The entry is retried on every tick, so it goes ahead once the book
+  # tightens.
   @doc false
-  def level_through_mark(state, {stop, take_profit, _context}, snapshot) do
+  def level_through_mark(state, price, {stop, take_profit, _context}, snapshot) do
     mark = premium(snapshot)
+    halfway = fn level -> Decimal.div(Decimal.add(level, price), 2) end
 
     cond do
       mark == nil ->
         nil
 
-      stop != nil and TradingCore.RiskControls.hit_stop_loss?(stop, mark, state.direction) ->
+      stop != nil and
+          TradingCore.RiskControls.hit_stop_loss?(halfway.(stop), mark, state.direction) ->
         {"stop", stop, mark}
 
       take_profit != nil and
-          TradingCore.RiskControls.hit_take_profit?(take_profit, mark, state.direction) ->
+          TradingCore.RiskControls.hit_take_profit?(halfway.(take_profit), mark, state.direction) ->
         {"take-profit", take_profit, mark}
 
       true ->
@@ -1981,7 +1995,7 @@ defmodule TradingOptionsSim.ContractMonitor do
 
       Logger.warning(
         "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
-          "entry skipped -- the option price #{Decimal.to_string(mark)} is already through the #{kind} " <>
+          "entry skipped -- the option price #{Decimal.to_string(mark)} is too close to the #{kind} " <>
           "#{Decimal.to_string(level)} a fill at #{Decimal.to_string(price)} would set (spread too wide " <>
           "for the #{kind}); retrying on each tick"
       )

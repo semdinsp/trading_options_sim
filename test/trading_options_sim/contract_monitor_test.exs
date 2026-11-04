@@ -1561,7 +1561,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
           %{
             "risk_controls" => %{
               "method" => "percent_of_entry",
-              "stop_loss_percent" => 15,
+              "stop_loss_percent" => 20,
               "take_profit_percent" => 25
             }
           }
@@ -1593,8 +1593,9 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open?
-      # Filled at 6.50 on the 5.00/7.00 book: the 15% stop is 5.525.
-      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.5250"))
+      # Filled at 6.50 on the 5.00/7.00 book: the 20% stop is 5.20, far
+      # enough below the 6.00 price for the entry guard to let it in.
+      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.200"))
 
       reprice = fn opt_price ->
         broadcast_option_greeks(occ_symbol, %{greeks | opt_price: opt_price})
@@ -1620,7 +1621,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     test "a price inside the live book still triggers the stop" do
       {pid, run, reprice} = enter_with_quote_and_stop("IBKRSTALE2", "IBKRSTALE2_OCC")
 
-      reprice.(5.20)
+      reprice.(5.10)
 
       refute ContractMonitor.snapshot(pid).position_open?
       assert Sim.get_sim_run!(run.id).exit_reason == "stop_loss"
@@ -1699,7 +1700,22 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.get_sim_run!(run.id).entry_at == nil
       assert Sim.list_sim_fills(Sim.get_sim_run!(run.id)) == []
       # Once, not on every tick.
-      assert length(Regex.scan(~r/already through the stop/, log)) == 1
+      assert length(Regex.scan(~r/too close to the stop/, log)) == 1
+    end
+
+    # The flicker case: a price only just clear of the stop would let the
+    # entry in and the next print stop it out.
+    test "no entry when the price is clear of the stop but not by half its distance" do
+      # Fill 6.50, 10% stop 5.85, midpoint 6.175; the 6.00 price is between.
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD5", "IBKRGUARD5_OCC", 10)
+
+      capture_log(fn ->
+        broadcast_underlying_price("IBKRGUARD5", 150.0)
+        sync(pid)
+      end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).entry_at == nil
     end
 
     test "the guarded entry goes ahead once the book tightens" do
@@ -1738,19 +1754,19 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
       refute ContractMonitor.snapshot(pid).position_open?
       assert Sim.get_sim_run!(run.id).entry_at == nil
-      assert log =~ "already through the take-profit"
+      assert log =~ "too close to the take-profit"
     end
 
     # Must not fire on healthy input: a stop the price is clear of enters.
     test "a stop clear of the option's price enters as before" do
-      {pid, run} = start_tight_stop_monitor("IBKRGUARD3", "IBKRGUARD3_OCC", 10)
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD3", "IBKRGUARD3_OCC", 20)
 
       broadcast_underlying_price("IBKRGUARD3", 150.0)
       sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open?
-      # Fill 6.50, 10% stop 5.85, below the 6.00 price.
-      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.850"))
+      # Fill 6.50, 20% stop 5.20; the 6.00 price is past the 5.85 midpoint.
+      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.200"))
     end
 
     test "a worked rule exit crosses only the configured spread fraction" do
@@ -2638,6 +2654,22 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Decimal.gt?(run.stop_loss_price, run.entry_price)
 
       run = move(pid, "TRAIL1", 150.0, run)
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert run.exit_reason == "stop_loss"
+    end
+
+    # stop_arm_seconds holds only the initial stop: a trail that has moved
+    # the stop up is live at once, so a winner can't give back what it locked.
+    test "a moved stop fires inside stop_arm_seconds" do
+      trailing = %{"method" => "trailing", "trail_pct" => 10}
+
+      {pid, run} =
+        enter("TRAIL3", %{"exit_strategy" => trailing, "stop_arm_seconds" => 3600})
+
+      run = move(pid, "TRAIL3", 160.0, run)
+      assert Decimal.gt?(run.stop_loss_price, run.entry_price)
+
+      run = move(pid, "TRAIL3", 150.0, run)
       refute ContractMonitor.snapshot(pid).position_open?
       assert run.exit_reason == "stop_loss"
     end
