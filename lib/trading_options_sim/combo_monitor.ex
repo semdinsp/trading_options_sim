@@ -803,7 +803,30 @@ defmodule TradingOptionsSim.ComboMonitor do
 
     with true <- Decimal.gt?(net, 0) || {:error, :no_credit},
          {:ok, risk} <- Combo.risk_at_entry(state.legs, net, state.multiplier, state.quantity) do
-      write_entry(state, snapshot, fills, net, risk)
+      # Once per entry: for "atr" this is a remote lookup.
+      levels = ContractMonitor.risk_levels(state, net, snapshot)
+      mark = decimal(snapshot["run_current_price"])
+
+      # The credit is sold toward the bid and the wings bought toward the
+      # ask, so it sits below the net leg price the stop is checked on;
+      # on wide legs that price is already at the stop and the combo would
+      # stop out on the next tick and re-enter, as single legs did on
+      # 2026-11-04. See ContractMonitor.entry_guard_hit/4.
+      case ContractMonitor.entry_guard_hit("short", net, levels, mark) do
+        nil ->
+          write_entry(state, snapshot, fills, net, risk, levels)
+
+        {kind, level} ->
+          ContractMonitor.log_entry_guard_skip(
+            "ComboMonitor: #{state.symbol} #{state.structure} #{state.expiry}",
+            net,
+            kind,
+            level,
+            mark
+          )
+
+          state
+      end
     else
       {:error, reason} ->
         Logger.warning(
@@ -814,10 +837,10 @@ defmodule TradingOptionsSim.ComboMonitor do
     end
   end
 
-  defp write_entry(state, snapshot, fills, net, risk) do
+  defp write_entry(state, snapshot, fills, net, risk, levels) do
     context = ContractMonitor.market_context()
     now = DateTime.utc_now()
-    {stop, target, risk_context} = ContractMonitor.risk_levels(state, net, snapshot)
+    {stop, target, risk_context} = levels
     {run, state} = ensure_open_run(state)
     snap = ContractMonitor.stamp(ContractMonitor.jsonify_snapshot(snapshot), context)
 
@@ -861,6 +884,8 @@ defmodule TradingOptionsSim.ComboMonitor do
            context: entry_context
          }) do
       {:ok, {_fills, run}} ->
+        ContractMonitor.clear_entry_guard_log()
+
         Logger.info(
           "ComboMonitor: #{state.symbol} #{state.structure} #{state.expiry} entered for a #{Decimal.to_string(net)} credit"
         )

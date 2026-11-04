@@ -454,8 +454,7 @@ are baselines.
 - `stop_arm_seconds`: the initial stop-loss can't fire until this long
   after entry; a stop a ratchet or trail has moved is live at once, and
   the take-profit is never delayed. Off by default, and single-leg only:
-  combo monitors ignore it, and the entry guard below doesn't cover
-  combos either. It doesn't stop the wide-spread loop below on its own:
+  combo monitors ignore it (the entry guard below covers both). It doesn't stop the wide-spread loop below on its own:
   with a frozen quote the stop fires as soon as it arms.
 
 **Wide spreads and tight stops.** The stop is set off the fill, which
@@ -467,7 +466,8 @@ the stop (and from the take-profit) back to the fill, logging "too close to the 
 (or "take-profit") once per blocked spell and then at most every 10
 minutes per contract, and retries on every tick. Before that, XLV and
 XLU defensive calls entered and stopped out within a second, 45 times in
-one day. A version that logs this often needs a wider stop, a
+one day. Combos get the same guard on their net credit against the net
+leg price their stops are checked on. A version that logs this often needs a wider stop, a
 tighter-book contract or a different pool.
 
 **Rule tree basics:**

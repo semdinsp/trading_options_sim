@@ -1960,28 +1960,37 @@ defmodule TradingOptionsSim.ContractMonitor do
   @entry_guard_margin Decimal.new("0.25")
 
   @doc false
-  def level_through_mark(state, price, {stop, take_profit, _context}, snapshot) do
+  def level_through_mark(state, price, levels, snapshot) do
     mark = premium(snapshot)
 
+    case entry_guard_hit(state.direction, price, levels, mark) do
+      nil -> nil
+      {kind, level} -> {kind, level, mark}
+    end
+  end
+
+  @doc """
+  The entry guard shared with `ComboMonitor`: `{kind, level}` when `mark`
+  (the price the levels will be checked on) is through the stop or the
+  take-profit a fill at `price` would set, or less than a quarter of the
+  way from that level back to `price`; nil otherwise. A combo passes its
+  net credit as `price` and its net leg price as `mark`, direction
+  "short".
+  """
+  def entry_guard_hit(_direction, _price, _levels, nil), do: nil
+
+  def entry_guard_hit(direction, price, {stop, take_profit, _context}, mark) do
     guard_level = fn level ->
       Decimal.add(level, Decimal.mult(Decimal.sub(price, level), @entry_guard_margin))
     end
 
     cond do
-      mark == nil ->
-        nil
-
-      stop != nil and
-          TradingCore.RiskControls.hit_stop_loss?(guard_level.(stop), mark, state.direction) ->
-        {"stop", stop, mark}
+      stop != nil and TradingCore.RiskControls.hit_stop_loss?(guard_level.(stop), mark, direction) ->
+        {"stop", stop}
 
       take_profit != nil and
-          TradingCore.RiskControls.hit_take_profit?(
-            guard_level.(take_profit),
-            mark,
-            state.direction
-          ) ->
-        {"take-profit", take_profit, mark}
+          TradingCore.RiskControls.hit_take_profit?(guard_level.(take_profit), mark, direction) ->
+        {"take-profit", take_profit}
 
       true ->
         nil
@@ -1997,6 +2006,19 @@ defmodule TradingOptionsSim.ContractMonitor do
   @level_through_mark_key :level_through_mark_logged_at
 
   defp skip_level_through_mark(state, price, kind, level, mark) do
+    log_entry_guard_skip(
+      "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right}",
+      price,
+      kind,
+      level,
+      mark
+    )
+
+    state
+  end
+
+  @doc false
+  def log_entry_guard_skip(label, price, kind, level, mark) do
     now = System.monotonic_time(:second)
     last = Process.get(@level_through_mark_key)
 
@@ -2004,15 +2026,17 @@ defmodule TradingOptionsSim.ContractMonitor do
       Process.put(@level_through_mark_key, now)
 
       Logger.warning(
-        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
-          "entry skipped -- the option price #{Decimal.to_string(mark)} is too close to the #{kind} " <>
+        "#{label} entry skipped -- the price #{Decimal.to_string(mark)} is too close to the #{kind} " <>
           "#{Decimal.to_string(level)} a fill at #{Decimal.to_string(price)} would set (spread too wide " <>
           "for the #{kind}); retrying on each tick"
       )
     end
 
-    state
+    :ok
   end
+
+  @doc false
+  def clear_entry_guard_log, do: Process.delete(@level_through_mark_key)
 
   # The shared market_context stamp (TradingCore.MarketContext v1),
   # built once per fill from local caches only (no remote call) and
@@ -2079,7 +2103,7 @@ defmodule TradingOptionsSim.ContractMonitor do
            }
          ) do
       {:ok, {_fill, run}} ->
-        Process.delete(@level_through_mark_key)
+        clear_entry_guard_log()
 
         Logger.info(
           "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} entered at #{Decimal.to_string(price)}"
