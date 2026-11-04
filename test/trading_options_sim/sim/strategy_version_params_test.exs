@@ -113,4 +113,13 @@ defmodule TradingOptionsSim.Sim.StrategyVersionParamsTest do
       assert [_] = StrategyVersion.params_errors(%{"exit_strategy" => bad}), inspect(bad)
     end
   end
+
+  test "stop_arm_seconds takes a non-negative integer" do
+    assert StrategyVersion.params_errors(%{"stop_arm_seconds" => 0}) == []
+    assert StrategyVersion.params_errors(%{"stop_arm_seconds" => 60}) == []
+
+    for bad <- [-1, 1.5, "60"] do
+      assert [_] = StrategyVersion.params_errors(%{"stop_arm_seconds" => bad}), inspect(bad)
+    end
+  end
 end

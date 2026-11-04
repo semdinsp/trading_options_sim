@@ -1333,7 +1333,12 @@ defmodule TradingOptionsSim.ContractMonitor do
 
       price ->
         cond do
-          TradingCore.RiskControls.hit_stop_loss?(state.stop_loss_price, price, state.direction) ->
+          stop_armed?(state) and
+              TradingCore.RiskControls.hit_stop_loss?(
+                state.stop_loss_price,
+                price,
+                state.direction
+              ) ->
             "stop_loss"
 
           TradingCore.RiskControls.hit_take_profit?(
@@ -1775,6 +1780,24 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   def min_hold_elapsed?(_state), do: true
 
+  @doc """
+  Whether the stop-loss is live yet. Opt-in `params["stop_arm_seconds"]`
+  keeps the stop from firing for that long after entry, so a fill's own
+  spread or a first noisy tick can't stop it out at once. Off by default:
+  a stop is risk control, and an unarmed stop also ignores a real
+  collapse. The take-profit is never delayed. Read from the version at
+  check time rather than kept in the struct, so a code reload doesn't
+  meet running monitors whose state lacks a new key.
+  """
+  def stop_armed?(%{strategy_version: version, entered_at: %DateTime{} = entered_at}) do
+    case param_seconds(version, "stop_arm_seconds") do
+      0 -> true
+      secs -> DateTime.diff(DateTime.utc_now(), entered_at, :second) >= secs
+    end
+  end
+
+  def stop_armed?(_state), do: true
+
   # params["min_hold_seconds"] on the strategy version. Anything that is
   # not a positive integer -- absent, nil, 0, a string, a float -- means
   # no gate, so a malformed value can never silently suppress an exit.
@@ -1891,9 +1914,63 @@ defmodule TradingOptionsSim.ContractMonitor do
     action = if state.direction == "short", do: "sell", else: "buy"
 
     case fill_price_for(state, snapshot, action, "entry") do
-      {:ok, price, fill_basis} -> record_entry(state, snapshot, action, price, fill_basis)
-      :no_price -> skip_unpriced(state, "entry")
+      {:ok, price, fill_basis} ->
+        case stop_through_mark(state, price, snapshot) do
+          nil -> record_entry(state, snapshot, action, price, fill_basis)
+          {stop, mark} -> skip_stop_through_mark(state, price, stop, mark)
+        end
+
+      :no_price ->
+        skip_unpriced(state, "entry")
     end
+  end
+
+  # No entry whose stop the option's own price is already through.
+  #
+  # The stop is set off the fill, which crosses part of the spread, but
+  # it is checked against premium/1 (the option price, or the mid). When
+  # the spread is wide relative to the stop distance, that price already
+  # sits through the stop at the moment of entry, so the run stops out
+  # on the next tick and, with the quote unchanged and no cooldown,
+  # re-enters straight away. 2026-11-04: an XLV 185C on a 5.90/6.90 book
+  # filled at 6.65 with a 10% stop at 5.985 while its price was 5.98; it
+  # entered and stopped 23 times within 15 seconds (-$1,952), and an XLU
+  # call 22 times. Delaying the stop (stop_arm_seconds) only slows such a
+  # loop when the quote is frozen; refusing the entry ends it. The entry
+  # is retried on every tick, so it goes ahead once the book tightens.
+  @doc false
+  def stop_through_mark(state, price, snapshot) do
+    {stop, _take_profit, _context} = risk_levels(state, price, snapshot)
+    mark = premium(snapshot)
+
+    if stop != nil and mark != nil and
+         TradingCore.RiskControls.hit_stop_loss?(stop, mark, state.direction),
+       do: {stop, mark},
+       else: nil
+  end
+
+  # Logged once per contract per 10 minutes: the check repeats on every
+  # tick while the book stays wide. The process dictionary rather than a
+  # struct field, so a code reload doesn't meet running monitors whose
+  # state lacks the key.
+  @stop_through_mark_log_every_s 600
+
+  defp skip_stop_through_mark(state, price, stop, mark) do
+    now = System.monotonic_time(:second)
+    last = Process.get(:stop_through_mark_logged_at)
+
+    if last == nil or now - last >= @stop_through_mark_log_every_s do
+      Process.put(:stop_through_mark_logged_at, now)
+
+      Logger.warning(
+        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+          "entry skipped -- the option price #{Decimal.to_string(mark)} is already through the stop " <>
+          "#{Decimal.to_string(stop)} a fill at #{Decimal.to_string(price)} would set (spread too wide " <>
+          "for the stop); retrying on each tick"
+      )
+    end
+
+    state
   end
 
   # The shared market_context stamp (TradingCore.MarketContext v1),
