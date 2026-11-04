@@ -2290,6 +2290,46 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "entry_guard_hit/4 (shared with ComboMonitor)" do
+    defp dd(s), do: Decimal.new(s)
+
+    defp guard(dir, price, stop, tp, mark),
+      do:
+        ContractMonitor.entry_guard_hit(
+          dir,
+          dd(price),
+          {stop && dd(stop), tp && dd(tp), %{}},
+          mark && dd(mark)
+        )
+
+    test "a long whose price is through, or within a quarter of, the stop is refused" do
+      # Fill 6.50, stop 5.85: guard level 6.0125.
+      assert {"stop", _} = guard("long", "6.50", "5.85", "7.80", "5.80")
+      assert {"stop", _} = guard("long", "6.50", "5.85", "7.80", "6.00")
+      assert guard("long", "6.50", "5.85", "7.80", "6.05") == nil
+    end
+
+    # Review example: a credit sold at 1.00 against a 1.12 net leg price,
+    # SL10 stop 1.10 (guard level 1.075).
+    test "a credit spread whose net price is at its stop is refused" do
+      assert {"stop", _} = guard("short", "1.00", "1.10", "0.50", "1.12")
+      assert {"stop", _} = guard("short", "1.00", "1.10", "0.50", "1.08")
+      assert guard("short", "1.00", "1.10", "0.50", "1.07") == nil
+    end
+
+    test "a target already reached at entry is refused too" do
+      # Short, credit 1.00, TP5 at 0.95: guard level 0.9625.
+      assert {"take-profit", _} = guard("short", "1.00", "1.50", "0.95", "0.96")
+      assert guard("short", "1.00", "1.50", "0.95", "0.97") == nil
+    end
+
+    # Must not fire on healthy input: no levels, or no price to check.
+    test "no levels or no mark never refuses" do
+      assert guard("long", "6.50", nil, nil, "1.00") == nil
+      assert guard("long", "6.50", "5.85", "7.80", nil) == nil
+    end
+  end
+
   describe "stop loss / take profit (params.risk_controls)" do
     @risk %{
       "method" => "percent_of_entry",
