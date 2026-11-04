@@ -1561,7 +1561,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
           %{
             "risk_controls" => %{
               "method" => "percent_of_entry",
-              "stop_loss_percent" => 20,
+              "stop_loss_percent" => 15,
               "take_profit_percent" => 25
             }
           }
@@ -1593,9 +1593,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open?
-      # Filled at 6.50 on the 5.00/7.00 book: the 20% stop is 5.20, far
-      # enough below the 6.00 price for the entry guard to let it in.
-      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.200"))
+      # Filled at 6.50 on the 5.00/7.00 book: the 15% stop is 5.525.
+      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.5250"))
 
       reprice = fn opt_price ->
         broadcast_option_greeks(occ_symbol, %{greeks | opt_price: opt_price})
@@ -1621,7 +1620,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     test "a price inside the live book still triggers the stop" do
       {pid, run, reprice} = enter_with_quote_and_stop("IBKRSTALE2", "IBKRSTALE2_OCC")
 
-      reprice.(5.10)
+      reprice.(5.20)
 
       refute ContractMonitor.snapshot(pid).position_open?
       assert Sim.get_sim_run!(run.id).exit_reason == "stop_loss"
@@ -1705,8 +1704,8 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
     # The flicker case: a price only just clear of the stop would let the
     # entry in and the next print stop it out.
-    test "no entry when the price is clear of the stop but not by half its distance" do
-      # Fill 6.50, 10% stop 5.85, midpoint 6.175; the 6.00 price is between.
+    test "no entry when the price is clear of the stop but not by a quarter of its distance" do
+      # Fill 6.50, 10% stop 5.85, guard level 6.0125; the 6.00 price is between.
       {pid, run} = start_tight_stop_monitor("IBKRGUARD5", "IBKRGUARD5_OCC", 10)
 
       capture_log(fn ->
@@ -1759,14 +1758,14 @@ defmodule TradingOptionsSim.ContractMonitorTest do
 
     # Must not fire on healthy input: a stop the price is clear of enters.
     test "a stop clear of the option's price enters as before" do
-      {pid, run} = start_tight_stop_monitor("IBKRGUARD3", "IBKRGUARD3_OCC", 20)
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD3", "IBKRGUARD3_OCC", 15)
 
       broadcast_underlying_price("IBKRGUARD3", 150.0)
       sync(pid)
 
       assert ContractMonitor.snapshot(pid).position_open?
-      # Fill 6.50, 20% stop 5.20; the 6.00 price is past the 5.85 midpoint.
-      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.200"))
+      # Fill 6.50, 15% stop 5.525; the 6.00 price is past the 5.769 guard level.
+      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.525"))
     end
 
     test "a worked rule exit crosses only the configured spread fraction" do

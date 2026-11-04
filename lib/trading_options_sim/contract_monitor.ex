@@ -1936,7 +1936,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   # No entry whose stop or target the option's own price is already
-  # through, or within half the level's distance of.
+  # through, or within a quarter of the level's distance of.
   #
   # Both levels are set off the fill, which crosses part of the spread,
   # but checked against premium/1 (the option price, or the mid). When
@@ -1949,28 +1949,38 @@ defmodule TradingOptionsSim.ContractMonitor do
   # call 22 times. A target can loop the same way (a last print near the
   # ask over a tight target), booking a loss as a "take_profit".
   #
-  # The price must be at least halfway from the level back to the fill
-  # (past the midpoint of the two), not just a tick clear of it:
-  # otherwise prints alternating around the level let it in and stop it
-  # out over and over. Delaying the stop (stop_arm_seconds) only slows
+  # The price must be at least a quarter of the way from the level back
+  # to the fill, not just a tick clear of it: otherwise prints
+  # alternating around the level let it in and stop it out over and
+  # over. A quarter, not half: on the 2026-11-04 replay it caught 50 of
+  # the 54 loop entries and no other trade (half blocked 6 more). Delaying the stop (stop_arm_seconds) only slows
   # such a loop when the quote is frozen; refusing the entry ends it.
   # The entry is retried on every tick, so it goes ahead once the book
   # tightens.
+  @entry_guard_margin Decimal.new("0.25")
+
   @doc false
   def level_through_mark(state, price, {stop, take_profit, _context}, snapshot) do
     mark = premium(snapshot)
-    halfway = fn level -> Decimal.div(Decimal.add(level, price), 2) end
+
+    guard_level = fn level ->
+      Decimal.add(level, Decimal.mult(Decimal.sub(price, level), @entry_guard_margin))
+    end
 
     cond do
       mark == nil ->
         nil
 
       stop != nil and
-          TradingCore.RiskControls.hit_stop_loss?(halfway.(stop), mark, state.direction) ->
+          TradingCore.RiskControls.hit_stop_loss?(guard_level.(stop), mark, state.direction) ->
         {"stop", stop, mark}
 
       take_profit != nil and
-          TradingCore.RiskControls.hit_take_profit?(halfway.(take_profit), mark, state.direction) ->
+          TradingCore.RiskControls.hit_take_profit?(
+            guard_level.(take_profit),
+            mark,
+            state.direction
+          ) ->
         {"take-profit", take_profit, mark}
 
       true ->
