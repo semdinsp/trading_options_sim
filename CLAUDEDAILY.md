@@ -4,12 +4,40 @@ The daily operating routine for `trading_options_sim`, the options
 paper-trading sim. It has two parts, run at different times:
 
 - **Market-open routine.** Check that the app came through the night
-  healthy, then fork new discovery strategies from what is working.
+  healthy, then do the three jobs below.
 - **Market-close routine.** Check that today's positions were flattened,
   every batch and rollup job finished, then post the day's summary.
 
 Modelled on `../trading_system/CLAUDEDAILY.md`, but much smaller: this
-app has two cron jobs, no deploy batches, and no shared position cap.
+app has two cron jobs, no deploy batches, no replay screen and no shared
+position cap.
+
+## The three jobs
+
+Everything else here is health checks and reporting around these:
+
+1. **Create new discovery strategies.** Every morning: forks of what is
+   working (M6), new ideas that aren't forks (M6c), and, on Mondays and
+   Wednesdays, the literature (M6b). Every one is activated at once.
+2. **Promote promising strategies to quarantine.** The 07:00 job does
+   most of this on trade count and P&L. This routine also promotes by
+   hand any discovery version with a per-session edge that the job's
+   20-trade floor misses (M5c).
+3. **Put the best in front of trading_live.** Rank quarantine on
+   per-session evidence, before and after costs, and keep a short,
+   tagged list of the versions that are ready for a live look (M5d).
+   Moving one to `test_portfolio`, which is what trading_live imports,
+   stays the user's call.
+
+Retiring is the 07:00 job's and LifecycleReview's job, not this
+routine's (M4).
+
+**Where the evidence is today (2026-11-04).** Of 102 discovery versions
+with at least 5 sessions, 1 has a per-session edge before costs and none
+after. Of 127 quarantine versions, 21 have one before costs and 2 after.
+The edge is in quarantine and the cost is the spread, so the work that
+pays most is (a) getting the 2 to trading_live and (b) forking the other
+19 to trade more cheaply (M6, source 1).
 
 **If asked to "run CLAUDEDAILY.md" without saying which routine, ask.**
 The open routine writes (forks, activations). The close routine only
@@ -61,9 +89,10 @@ so new forks are running at the open. **Run the close routine** after
    file in your scratchpad and run `Code.eval_string(File.read!(path))`.
    `epmd -names` lists the running nodes, and the web UI is on port 4013.
 
-2. **Read-only first.** Everything except the fork step (M6) and the
-   snapshot recovery (C2) is a query. Never write live data in a step
-   that doesn't say to.
+2. **Read-only first.** Everything is a query except: promotion to
+   quarantine (M5c), the live shortlist's tags and ratings (M5d), new
+   strategies (M6, M6b, M6c) and the snapshot recovery (C2). Never write
+   live data in a step that doesn't say to.
 
 3. **`../trading_core` must be on a clean `main`** before you compile
    or restart anything. It's a path dependency, so uncommitted work there
@@ -91,7 +120,9 @@ so new forks are running at the open. **Run the close routine** after
 
 ## Market-open routine
 
-Run M0–M7 in order. Two steps only run on some days:
+Order: M0 → M1 → M2 → M3 → M4 → M5 → (M5b) → M5c → M5d → M6 → M6c →
+(M6b) → M7. Promotion and the shortlist come before forking, so the
+forks start from today's evidence. Two steps only run on some days:
 - **M5b** (the weekly risk-control review): on the first trading day of
   each week, before forking in M6.
 - **M6b** (the literature review): every Monday and Wednesday, after M6.
@@ -179,9 +210,9 @@ Repo.all(from r in TradingOptionsSim.Sim.SimRun,
 Check for versions with `quarantine_started_at` or `retired_reason`
 set in the last 24 h, and list them in the summary.
 
-- **Never promote or downgrade a version by hand.** Only the 07:00
-  job's own gates move versions automatically. Anything else is the
-  user's call.
+- **Never downgrade a version by hand, and never promote one except
+  discovery → quarantine under M5c's bar.** Everything else
+  (`test_portfolio`, unretire, retire) is the user's call.
 - Gate values: discovery → quarantine needs ≥ 20 closed runs (with an
   entry) and realized P&L ≥ 0. Quarantine → retired needs ≥ 20
   quarantine trading days and a loss/win ratio > 2.0.
@@ -274,27 +305,35 @@ Compute the one-sided 90% bound yourself, `mean − 1.2816 × sd / √n_sessions
 is above zero; it is worth promoting only if the **net** bound is too.
 Report the touch bound alongside. `cost_share` is the share of the mid
 edge the costs take; `quote_fill_share` how much of the evidence had a
-real quote. Ignore any version with fewer than 10 sessions.
+real quote. Ignore any version with fewer than 10 sessions for
+promotion, and with fewer than 5 for anything.
 
-State of play on 2026-10-22 (84 versions with ≥ 30 trades and ≥ 10
-sessions): mid bound > 0 for 15, net for 4, touch for 0; where there was
-a mid edge, costs took a median 184% of it. The spread, not commission,
-is the cost here: 1-lot commission is ~0.001R on a 45-DTE premium. 84
-versions tested at 10% one-sided means ~8 false positives are expected
-by chance, so 15 is weak evidence.
+M5c, M5d and M6 all rank on these bounds, so compute them once:
 
-**Before anything is promoted to trading_live:**
-- Its hypothesis (signal, threshold, DTE, moneyness, exits) was fixed
-  before the evidence window, and the window it is judged on starts
-  after its creation date. Every fork here is a variant in a sweep;
-  its parent's numbers are in-sample for it.
-- Mid and net per-session bounds above zero on that window.
-- Not a duplicate: siblings that took the same trades (the XLE VWAP
-  Trend variants are one bet) and put forks of an equity breakdown
-  strategy already live count once. trading_live checks correlation
-  against what's live.
-- The export carries `session_evidence` (date, `n`, `r_mid`, `r_net`,
-  `r_touch`), which trading_live asked for as quarantine evidence.
+```elixir
+f = fn nil -> nil; %Decimal{} = d -> Decimal.to_float(d); x -> x end
+lb = fn m, s, n -> if n && n > 1 && m && s, do: f.(m) - 1.2816 * f.(s) / :math.sqrt(n) end
+rows =
+  for r <- Sim.full_universe_version_metrics(), (r.n_sessions || 0) >= 5 do
+    n = r.n_sessions
+    Map.merge(r, %{
+      lb_mid: lb.(r.mean_daily_r_mid, r.sd_daily_r_mid, n),
+      lb_net: lb.(r.mean_daily_r, r.sd_daily_r, n),
+      lb_touch: lb.(r.mean_daily_r_touch, r.sd_daily_r_touch, n)
+    })
+  end
+```
+
+The row's id is `strategy_version_id` and its name `strategy_name`.
+
+**Luck count.** At a 10% one-sided bound, about 10% of the versions you
+look at clear it by chance. Say how many cleared and how many luck
+alone would give. On 2026-11-04, 21 of 127 quarantine versions cleared
+the mid bound and 2 cleared net, against about 13 that luck alone
+would give. That is weak evidence, which is why M5d needs a version to
+stay on the list, not just appear once.
+The spread, not commission, is the cost here: 1-lot commission is
+~0.001R on a 45-DTE premium.
 
 The `/candidates` page shows the same rows with the nine gate letters
 (N S E D X C R G T). The gates are advisory and never block anything.
@@ -364,21 +403,140 @@ them.
    decided on fewer than ~30 trades per arm as provisional. Changing
    the default is the user's call: propose it, don't apply it.
 
+### M5c — Promote strong discovery versions to quarantine
+
+**This step writes.** The 07:00 job promotes on ≥ 20 closes and
+P&L ≥ 0, with no significance test. That lets in luck, and it holds back
+low-frequency versions with a real edge until they reach 20 trades.
+Promote by hand any **discovery** row from M5 that meets **all** of:
+
+- **Sample:** ≥ 10 sessions. No trade-count floor: this is what the
+  job misses.
+- **Edge:** mid and net per-session bounds > 0, `cost_margin > 0`, and
+  net `realized_pnl > 0`.
+- **Exits:** gate `X` passes (the edge isn't the stop or the flatten).
+- **Pool:** a `target_pool_id` (the call returns
+  `{:error, :no_target_pool}` otherwise).
+- **Not excluded:** controls (name contains "Control"), `Noise-Baseline`,
+  versions tagged `Experiment-Hold` or that are an arm of an A/B group
+  still running (see the A/B memory), and versions on a noise signal.
+  Promoting one arm of an experiment changes how it's judged mid-test.
+- **At most one per strategy per day,** the one with the best net bound,
+  and at most 3 a day. If more qualify, list the rest.
+
+```elixir
+v = Sim.get_strategy_version!(id)
+{:ok, v} = Sim.set_strategy_version_notes(v, (v.notes || "") <>
+  "\n\n#{Date.utc_today()} M5c manual promotion: #{n} sessions, #{c} closes, " <>
+  "session lcb90 mid #{m} / net #{ne} / touch #{t}, net P&L $#{p}.")
+{:ok, _} = Sim.promote_strategy_version(v, "quarantine")
+```
+
+`POST /api/v1/versions/:id/promote {"to": "quarantine"}` does the same.
+Promotion resets `quarantine_trading_days` to 0; the version keeps
+trading unchanged.
+
+Expect 0–2 a day. On 2026-11-04 none qualified (the best discovery
+version had 7 sessions). Nothing qualifying is a normal result: say so.
+
+### M5d — The live shortlist (put the best in front of trading_live)
+
+**This step writes tags and ratings only.** trading_live imports a
+version only from `test_portfolio`, through the "Promote
+trading_options_sim version id" box on its Strategy Monitor page.
+Moving a version to `test_portfolio` is the user's call. This step makes
+that call easy: a short, current, evidenced list.
+
+**A quarantine version is on the shortlist when all of these hold:**
+1. **Sample:** ≥ 10 sessions and ≥ 20 closes, counted from its creation
+   date (its parent's results are in-sample for it, since every fork
+   here is a variant in a sweep).
+2. **Edge:** mid and net per-session bounds > 0. Report touch too; a
+   touch bound > 0 is the strongest case.
+3. **Exits:** gate `X` passes.
+4. **Exportable:** `TradingOptionsSim.Sim.PromotionExport.build(id)`
+   returns `{:ok, _}`. It refuses versions with no `risk_controls`,
+   `atr` stops and combos. A refused version with an edge needs a
+   promotable fork (M6, source 1), not an exception.
+5. **Not a duplicate:** not a sibling of a `test_portfolio` or
+   live-linked version that takes the same trades (the XLE VWAP Trend
+   variants are one bet; so are the Slope Momentum Put forks). Of a
+   family, list only the best. trading_live also checks correlation
+   against what's live.
+6. **Stays:** it was on the list at the previous run too, or its net
+   bound is above 0.01R. A version that clears once by a hair is a
+   watch item, not a candidate.
+
+**Writes:**
+- Tag each version on the list `live-candidate` and rate it 5★
+  (`Sim.set_strategy_version_rating(v, 5)`; ratings are advisory and
+  change no behaviour). `/candidates` shows both; `/active_strategies`
+  shows the rating and `/strategy_versions` the tag. No version had a
+  rating before 2026-11-04, so a 5★ means this list unless the user
+  rates by hand.
+- Remove the tag from a version that has dropped off, clear its rating
+  (`Sim.set_strategy_version_rating(v, nil)`) if it is still the 5★ this
+  step set, and say why it dropped. There's no remove-by-name call:
+
+  ```elixir
+  v = Sim.get_strategy_version!(id)
+  Sim.put_strategy_version_tags(v, for(t <- v.tags, t.name != "live-candidate", do: t.id))
+  ```
+- Never change the stage. The `test_portfolio` versions and live-linked
+  ones are listed separately, with their bounds since promotion, so the
+  user can see whether live is getting what the sim promised.
+
+**Report each candidate** with: id, name, sessions, closes, the three
+bounds, net P&L, the luck count from M5, the family it stands for, and
+the two calls the user would make:
+
+```
+trading_options_sim:  POST /api/v1/versions/<id>/promote {"to": "test_portfolio"}
+trading_live:         Strategy Monitor → "Promote trading_options_sim version id" → <id>
+```
+
+The export carries `session_evidence` (date, `n`, `r_mid`, `r_net`,
+`r_touch`), which trading_live asked for as quarantine evidence.
+
+**Near misses** (mid bound > 0, net ≤ 0) go in the report too: they
+have an edge the costs take. They are M6's first fork source.
+
+On 2026-11-04 the shortlist would be one version: `01a10c03` "Lit: TICK
+Exhaustion Reversal Put [Confirm30]" (13 sessions, 28 closes, mid
++0.010, net +0.003, touch −0.002), which fails rule 6 on its first
+appearance. `01a151ed` "Regime: Chop Reversion Call [Exit: z>0.5]"
+clears both bounds but has only 6 sessions.
+
 ### M6 — Fork new discovery strategies
 
 **This step writes. Activate each new fork immediately**: this is
 paper trading, and the user doesn't need to approve each fork.
 
-**Which to fork:**
-- Roughly the top 20% by `lcb95` among rows with `n_closes ≥ 30` and
-  `cost_margin > 0`.
-- If nothing qualifies, fork fewer or none, and say why. Never fork to
-  fill a quota.
+**Which to fork,** in this order of sources (rows from M5, any stage
+but retired, ≥ 5 sessions):
+1. **Edge the costs take:** the M5d shortlist and its near misses (mid
+   bound > 0). Fork with **one cost-cutting change**: a contract with a
+   tighter book (closer to the money, a nearer expiry, a more liquid
+   pool member), fewer trades (`reentry_cooldown_seconds`,
+   `entry_confirm_seconds`), or a longer hold so each trade carries
+   more move per spread paid. Also fork an unexportable one (no
+   `risk_controls`, `atr` stops) into its promotable twin.
+2. **The best of the rest:** by net per-session mean, then `lcb95`,
+   with `cost_margin > 0`. Use the per-trade `lcb95` only to break ties.
+3. **Gate `X` failures with a mid edge:** fork with a rule exit, never
+   just a different stop.
+
+- Usually 3–10 forks a day. If nothing qualifies, fork fewer or none,
+  and say why. Never fork to fill a quota.
 - **Per-strategy cap:** at most 10% of a strategy's existing version
   count per day, rounded down, minimum 1. If a candidate is at its cap,
   move to the next one and note it.
+- **Don't repeat a fork.** Before creating one, check no active version
+  already has the same rules, leg config, pool and direction (forks of
+  forks often converge on the same change).
 - **Don't fork** retired versions, or versions whose edge comes from an
-  exit artefact (gate `X` failing).
+  exit artefact (gate `X` failing), except under source 3.
+- **The parent keeps trading as the control.** The fork's notes name it.
 
 **How to fork.** In this app a fork is a **new Strategy at version 1**
 with the parent recorded. The REST API and RPC call the same `Sim`
@@ -541,9 +699,13 @@ tighter-book contract or a different pool.
   - the one change made;
   - the expected edge against the ~0.4% round-trip cost;
   - which control it has to beat;
+  - the decision rule, written before it trades: judged at ≥ 10
+    sessions on the mid and net per-session bounds against that
+    control;
   - any signal caveats.
 
-  Write it so it still makes sense in 90 days.
+  Write it so it still makes sense in 90 days. Don't edit the
+  hypothesis or the rule once it trades; fork instead.
 - **Tags:**
   - always a batch tag, `options-discovery-<YYYY-MM-DD>`;
   - a family tag;
@@ -551,6 +713,46 @@ tighter-book contract or a different pool.
     `<tag>-parent` on the parent.
 - New experiment groups also go in the user's A/B experiments memory,
   with their compare-from date (normally the next trading day).
+
+### M6c — New ideas (every morning)
+
+**This step writes.** Forks only explore around what already exists.
+Create **2–5 new strategies a day** that aren't forks, under M6's rules
+(risk controls, notes with a decision rule, tags, immediate activation).
+Good sources, best first:
+
+1. **Carry what works to a new place.** A shortlist or near-miss idea
+   (M5d) on another pool member or sector ETF with a strike grid, or the
+   other right (a working put reversion as a call reversion on the
+   mirror signal). Prefer tight-book underlyings: the spread is the
+   cost (M5).
+2. **Signals nobody trades yet.** List trading_signal's definitions
+   (`GET http://localhost:4006/api/signal_definitions`, or the
+   trading-signal MCP tools) and drop the ones any active version
+   already references (`"definition:<uuid>"` in `rules`). Keep only
+   persistent, non-noise ones that are running now (see M6's signal
+   hygiene). A definition that isn't running fails closed and the new
+   strategy never trades.
+3. **The other side of a consistent loser.** A lineage that loses on a
+   steady mid bound below zero (not one stop wave) can seed a new
+   strategy taking the opposite trade. Build it as a **new strategy**
+   with the opposite right or the short side, never as a fork with a
+   flipped `direction`.
+4. **A defined-risk version of a working naked short,** as a credit
+   spread on the same pool and signal (compare against the naked
+   short, per M5). Combos never go to trading_live, so this is for
+   learning, not the shortlist.
+
+**How:** the M6 script with no `parent_version_id` and `generation: 1`,
+on a control's contract and pool so the control is the comparison.
+Name it `<Family>: <idea> [<detail>]`, tag it
+`options-discovery-<YYYY-MM-DD>` and `New-Idea-<YYYY-MM-DD>`, and say in
+the notes which source it came from. If an idea needs a signal that
+doesn't exist, draft a trading_signal prompt (as in M6b) instead of
+building a proxy.
+
+Never create to fill the quota: on a day with nothing good, create none
+and say why.
 
 ### M6b — Literature review (Mondays and Wednesdays)
 
@@ -644,11 +846,19 @@ Report, briefly:
 - **Overnight jobs:** each job's state; the snapshot count and `missed`.
 - **Leftovers:** positions EodCloser missed, if any.
 - **Lifecycle changes:** promoted / retired overnight.
-- **Leaderboard:** the top 5 and bottom 5 by `lcb95` (with `n_closes`), and
-  how each compares with its control.
-- **Forks created:**
-  - name, parent and the one change;
+- **Leaderboard:** the top 5 and bottom 5 by net per-session bound (with
+  sessions and closes), how each compares with its control, and the
+  luck count.
+- **Promotions to quarantine (M5c):** id, name and the numbers in the
+  note line, or "none qualified" with the closest miss.
+- **Live shortlist (M5d), first and in full:** each candidate with its
+  bounds, family and the two calls; versions added and dropped since the
+  last run; the near misses; and how the `test_portfolio` versions are
+  doing since promotion.
+- **Forks created (M6):**
+  - name, parent, the source (1–3) and the one change;
   - candidates skipped because of the per-strategy cap.
+- **New ideas (M6c):** name, source and the control it has to beat.
 - **Weekly risk-control review (M5b, first trading day of the week):**
   - fire rates and net per trade by setting;
   - the A/B results;
@@ -731,7 +941,7 @@ TradingOptionsSim.Sim.oban_pending_job_count()
 
 ### C4 — Did this morning's forks run?
 
-For each version created in M6 or M6b:
+For each version created in M6, M6b or M6c:
 - its monitors are running;
 - it isn't missing contracts (`activate` returned
   `unsubscribed_symbols`);
@@ -765,8 +975,11 @@ counts, and promotion/retirement. Don't expect them in tonight's numbers.
 
 - Never place a real order or touch `trading_live`. This app is paper
   only.
-- Never promote or downgrade a version by hand (API, MCP or `Sim`).
-  Lifecycle changes are the 07:00 job's or the user's.
+- Never promote a version by hand except discovery → quarantine under
+  M5c's bar, and never downgrade one by hand (API, MCP or `Sim`). Never
+  move a version to `test_portfolio`: that is the user's decision, and
+  it's what trading_live imports. Other lifecycle changes are the 07:00
+  job's or the user's.
 - Never broadcast on `TradingHub.PubSub` or `TradingSignal.PubSub` from
   this node. Subscribe only.
 - Never edit another app's code or data (`trading_signal` notes,
