@@ -1639,6 +1639,135 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.get_sim_run!(run.id).exit_reason == "stop_loss"
     end
 
+    # 2026-11-04: an XLV call on a 5.90/6.90 book filled at 6.65, its 10%
+    # stop (5.985) was above its own price (5.98), and it entered and
+    # stopped out within a second, over and over. Same 5.00/7.00 book
+    # here: fill 6.50, price 6.00, so a 5% stop (6.175) is already hit.
+    defp start_tight_stop_monitor(symbol, occ_symbol, stop_pct, tp_pct \\ 25, opt_price \\ 6.00) do
+      version =
+        version_fixture(
+          %{
+            "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+            "exit" => %{"signal" => "run_underlying_price", "op" => "lt", "value" => 0}
+          },
+          %{
+            "risk_controls" => %{
+              "method" => "percent_of_entry",
+              "stop_loss_percent" => stop_pct,
+              "take_profit_percent" => tp_pct
+            }
+          }
+        )
+
+      {pid, run} =
+        start_monitor(version, contract_key(symbol),
+          pricing_backend: :ibkr_live,
+          occ_symbol: occ_symbol
+        )
+
+      await_ibkr_live(occ_symbol)
+
+      broadcast_option_greeks(occ_symbol, %{
+        implied_vol: 0.30,
+        delta: 0.55,
+        opt_price: opt_price,
+        gamma: 0.02,
+        vega: 0.15,
+        theta: -0.03,
+        und_price: 150.0
+      })
+
+      broadcast_option_quote(occ_symbol, %{bid: 5.00, bid_size: 10})
+      broadcast_option_quote(occ_symbol, %{ask: 7.00, ask_size: 10})
+      sync(pid)
+
+      {pid, run}
+    end
+
+    test "no entry when the option's price is already through the stop the fill would set" do
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD1", "IBKRGUARD1_OCC", 5)
+
+      log =
+        capture_log(fn ->
+          broadcast_underlying_price("IBKRGUARD1", 150.0)
+          sync(pid)
+          broadcast_underlying_price("IBKRGUARD1", 150.0)
+          sync(pid)
+        end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).entry_at == nil
+      assert Sim.list_sim_fills(Sim.get_sim_run!(run.id)) == []
+      # Once, not on every tick.
+      assert length(Regex.scan(~r/too close to the stop/, log)) == 1
+    end
+
+    # The flicker case: a price only just clear of the stop would let the
+    # entry in and the next print stop it out.
+    test "no entry when the price is clear of the stop but not by a quarter of its distance" do
+      # Fill 6.50, 10% stop 5.85, guard level 6.0125; the 6.00 price is between.
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD5", "IBKRGUARD5_OCC", 10)
+
+      capture_log(fn ->
+        broadcast_underlying_price("IBKRGUARD5", 150.0)
+        sync(pid)
+      end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).entry_at == nil
+    end
+
+    test "the guarded entry goes ahead once the book tightens" do
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD2", "IBKRGUARD2_OCC", 5)
+
+      capture_log(fn ->
+        broadcast_underlying_price("IBKRGUARD2", 150.0)
+        sync(pid)
+      end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+
+      # 5.90/6.10: fill 6.05, 5% stop 5.7475, price 6.00 sits above it.
+      broadcast_option_quote("IBKRGUARD2_OCC", %{bid: 5.90, bid_size: 10})
+      broadcast_option_quote("IBKRGUARD2_OCC", %{ask: 6.10, ask_size: 10})
+      sync(pid)
+      broadcast_underlying_price("IBKRGUARD2", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).status == "open"
+      assert Sim.get_sim_run!(run.id).entry_at != nil
+    end
+
+    # A last print near the ask over a tight target: the run would exit
+    # as a "take_profit" on the next tick at a loss, and loop.
+    test "no entry when the option's price is already through the target the fill would set" do
+      # Fill 6.50 on 5.00/7.00, 5% target 6.825, price 6.90 inside the book.
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD4", "IBKRGUARD4_OCC", 15, 5, 6.90)
+
+      log =
+        capture_log(fn ->
+          broadcast_underlying_price("IBKRGUARD4", 150.0)
+          sync(pid)
+        end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).entry_at == nil
+      assert log =~ "too close to the take-profit"
+    end
+
+    # Must not fire on healthy input: a stop the price is clear of enters.
+    test "a stop clear of the option's price enters as before" do
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD3", "IBKRGUARD3_OCC", 15)
+
+      broadcast_underlying_price("IBKRGUARD3", 150.0)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      # Fill 6.50, 15% stop 5.525; the 6.00 price is past the 5.769 guard level.
+      assert Decimal.equal?(Sim.get_sim_run!(run.id).stop_loss_price, Decimal.new("5.525"))
+    end
+
     test "a worked rule exit crosses only the configured spread fraction" do
       {pid, run} = enter_with_quote("IBKRQ2", "IBKRQ2_OCC", [])
 
@@ -2161,6 +2290,46 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     end
   end
 
+  describe "entry_guard_hit/4 (shared with ComboMonitor)" do
+    defp dd(s), do: Decimal.new(s)
+
+    defp guard(dir, price, stop, tp, mark),
+      do:
+        ContractMonitor.entry_guard_hit(
+          dir,
+          dd(price),
+          {stop && dd(stop), tp && dd(tp), %{}},
+          mark && dd(mark)
+        )
+
+    test "a long whose price is through, or within a quarter of, the stop is refused" do
+      # Fill 6.50, stop 5.85: guard level 6.0125.
+      assert {"stop", _} = guard("long", "6.50", "5.85", "7.80", "5.80")
+      assert {"stop", _} = guard("long", "6.50", "5.85", "7.80", "6.00")
+      assert guard("long", "6.50", "5.85", "7.80", "6.05") == nil
+    end
+
+    # Review example: a credit sold at 1.00 against a 1.12 net leg price,
+    # SL10 stop 1.10 (guard level 1.075).
+    test "a credit spread whose net price is at its stop is refused" do
+      assert {"stop", _} = guard("short", "1.00", "1.10", "0.50", "1.12")
+      assert {"stop", _} = guard("short", "1.00", "1.10", "0.50", "1.08")
+      assert guard("short", "1.00", "1.10", "0.50", "1.07") == nil
+    end
+
+    test "a target already reached at entry is refused too" do
+      # Short, credit 1.00, TP5 at 0.95: guard level 0.9625.
+      assert {"take-profit", _} = guard("short", "1.00", "1.50", "0.95", "0.96")
+      assert guard("short", "1.00", "1.50", "0.95", "0.97") == nil
+    end
+
+    # Must not fire on healthy input: no levels, or no price to check.
+    test "no levels or no mark never refuses" do
+      assert guard("long", "6.50", nil, nil, "1.00") == nil
+      assert guard("long", "6.50", "5.85", "7.80", nil) == nil
+    end
+  end
+
   describe "stop loss / take profit (params.risk_controls)" do
     @risk %{
       "method" => "percent_of_entry",
@@ -2219,6 +2388,37 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     test "the stop fires even inside min_hold_seconds" do
       {_pid, run} =
         enter_then_move("SLTP3", %{"risk_controls" => @risk, "min_hold_seconds" => 3600}, 120.0)
+
+      assert run.exit_reason == "stop_loss"
+    end
+
+    test "stop_arm_seconds holds the stop until it has elapsed" do
+      {pid, run} =
+        enter_then_move(
+          "SLTPARM1",
+          %{"risk_controls" => @risk, "stop_arm_seconds" => 3600},
+          120.0
+        )
+
+      assert ContractMonitor.snapshot(pid).position_open?
+      assert run.status == "open"
+    end
+
+    test "stop_arm_seconds never delays the take-profit" do
+      {pid, run} =
+        enter_then_move(
+          "SLTPARM2",
+          %{"risk_controls" => @risk, "stop_arm_seconds" => 3600},
+          185.0
+        )
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert run.exit_reason == "take_profit"
+    end
+
+    test "stop_arm_seconds of 0 leaves the stop live at once" do
+      {_pid, run} =
+        enter_then_move("SLTPARM3", %{"risk_controls" => @risk, "stop_arm_seconds" => 0}, 120.0)
 
       assert run.exit_reason == "stop_loss"
     end
@@ -2493,6 +2693,22 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Decimal.gt?(run.stop_loss_price, run.entry_price)
 
       run = move(pid, "TRAIL1", 150.0, run)
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert run.exit_reason == "stop_loss"
+    end
+
+    # stop_arm_seconds holds only the initial stop: a trail that has moved
+    # the stop up is live at once, so a winner can't give back what it locked.
+    test "a moved stop fires inside stop_arm_seconds" do
+      trailing = %{"method" => "trailing", "trail_pct" => 10}
+
+      {pid, run} =
+        enter("TRAIL3", %{"exit_strategy" => trailing, "stop_arm_seconds" => 3600})
+
+      run = move(pid, "TRAIL3", 160.0, run)
+      assert Decimal.gt?(run.stop_loss_price, run.entry_price)
+
+      run = move(pid, "TRAIL3", 150.0, run)
       refute ContractMonitor.snapshot(pid).position_open?
       assert run.exit_reason == "stop_loss"
     end

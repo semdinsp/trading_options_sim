@@ -451,6 +451,24 @@ are baselines.
   tick before entering. Use it for flickery signals.
 - `reentry_cooldown_seconds`: no re-entry on a contract for this long
   after an exit. Use it against churn.
+- `stop_arm_seconds`: the initial stop-loss can't fire until this long
+  after entry; a stop a ratchet or trail has moved is live at once, and
+  the take-profit is never delayed. Off by default, and single-leg only:
+  combo monitors ignore it (the entry guard below covers both). It doesn't stop the wide-spread loop below on its own:
+  with a frozen quote the stop fires as soon as it arms.
+
+**Wide spreads and tight stops.** The stop is set off the fill, which
+crosses part of the spread, but it's checked against the option's price
+or mid. When the spread is wide compared with the stop distance, that
+price is already through the stop at entry. Since 2026-11-04 the monitor
+refuses an entry unless the price is at least a quarter of the way from
+the stop (and from the take-profit) back to the fill, logging "too close to the stop"
+(or "take-profit") once per blocked spell and then at most every 10
+minutes per contract, and retries on every tick. Before that, XLV and
+XLU defensive calls entered and stopped out within a second, 45 times in
+one day. Combos get the same guard on their net credit against the net
+leg price their stops are checked on. A version that logs this often needs a wider stop, a
+tighter-book contract or a different pool.
 
 **Rule tree basics:**
 - A rule is `{"entry": node, "exit": node}`. A leaf is

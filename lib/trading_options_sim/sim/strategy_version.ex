@@ -356,6 +356,10 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     * `"reentry_cooldown_seconds"`: a non-negative integer — no new entry
       on a contract until that long after its last exit. See
       `ContractMonitor.cooled_down?/2`.
+    * `"stop_arm_seconds"`: a non-negative integer — the stop-loss can't
+      fire until that long after entry (the take-profit is never
+      delayed). Single-leg versions only: `ComboMonitor` ignores it.
+      See `ContractMonitor.stop_armed?/1`.
   """
   @spec params_errors(map() | nil) :: [String.t()]
   def params_errors(params) when is_map(params) do
@@ -366,7 +370,8 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       seconds_errors(
         "reentry_cooldown_seconds",
         Map.get(params, "reentry_cooldown_seconds", :absent)
-      )
+      ) ++
+      seconds_errors("stop_arm_seconds", Map.get(params, "stop_arm_seconds", :absent))
   end
 
   def params_errors(_params), do: []
