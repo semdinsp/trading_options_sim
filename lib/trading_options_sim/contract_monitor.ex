@@ -1915,9 +1915,12 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     case fill_price_for(state, snapshot, action, "entry") do
       {:ok, price, fill_basis} ->
-        case stop_through_mark(state, price, snapshot) do
-          nil -> record_entry(state, snapshot, action, price, fill_basis)
-          {stop, mark} -> skip_stop_through_mark(state, price, stop, mark)
+        # Once per entry: for "atr" this is a remote lookup.
+        levels = risk_levels(state, price, snapshot)
+
+        case level_through_mark(state, levels, snapshot) do
+          nil -> record_entry(state, snapshot, action, price, fill_basis, levels)
+          {kind, level, mark} -> skip_level_through_mark(state, price, kind, level, mark)
         end
 
       :no_price ->
@@ -1925,48 +1928,62 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
-  # No entry whose stop the option's own price is already through.
+  # No entry whose stop or target the option's own price is already
+  # through.
   #
-  # The stop is set off the fill, which crosses part of the spread, but
-  # it is checked against premium/1 (the option price, or the mid). When
-  # the spread is wide relative to the stop distance, that price already
-  # sits through the stop at the moment of entry, so the run stops out
-  # on the next tick and, with the quote unchanged and no cooldown,
+  # Both levels are set off the fill, which crosses part of the spread,
+  # but checked against premium/1 (the option price, or the mid). When
+  # the spread is wide relative to the level's distance, that price
+  # already sits through it at the moment of entry, so the run exits on
+  # the next tick and, with the quote unchanged and no cooldown,
   # re-enters straight away. 2026-11-04: an XLV 185C on a 5.90/6.90 book
   # filled at 6.65 with a 10% stop at 5.985 while its price was 5.98; it
   # entered and stopped 23 times within 15 seconds (-$1,952), and an XLU
-  # call 22 times. Delaying the stop (stop_arm_seconds) only slows such a
-  # loop when the quote is frozen; refusing the entry ends it. The entry
-  # is retried on every tick, so it goes ahead once the book tightens.
+  # call 22 times. A target can loop the same way (a last print near the
+  # ask over a tight target), booking a loss as a "take_profit".
+  # Delaying the stop (stop_arm_seconds) only slows such a loop when the
+  # quote is frozen; refusing the entry ends it. The entry is retried on
+  # every tick, so it goes ahead once the book tightens.
   @doc false
-  def stop_through_mark(state, price, snapshot) do
-    {stop, _take_profit, _context} = risk_levels(state, price, snapshot)
+  def level_through_mark(state, {stop, take_profit, _context}, snapshot) do
     mark = premium(snapshot)
 
-    if stop != nil and mark != nil and
-         TradingCore.RiskControls.hit_stop_loss?(stop, mark, state.direction),
-       do: {stop, mark},
-       else: nil
+    cond do
+      mark == nil ->
+        nil
+
+      stop != nil and TradingCore.RiskControls.hit_stop_loss?(stop, mark, state.direction) ->
+        {"stop", stop, mark}
+
+      take_profit != nil and
+          TradingCore.RiskControls.hit_take_profit?(take_profit, mark, state.direction) ->
+        {"take-profit", take_profit, mark}
+
+      true ->
+        nil
+    end
   end
 
-  # Logged once per contract per 10 minutes: the check repeats on every
-  # tick while the book stays wide. The process dictionary rather than a
-  # struct field, so a code reload doesn't meet running monitors whose
-  # state lacks the key.
-  @stop_through_mark_log_every_s 600
+  # Logged once per blocked spell, then at most every 10 minutes while
+  # it lasts: the check repeats on every tick while the book stays wide.
+  # The key is cleared on a successful entry. The process dictionary
+  # (one process per contract) rather than a struct field, so a code
+  # reload doesn't meet running monitors whose state lacks the key.
+  @level_through_mark_log_every_s 600
+  @level_through_mark_key :level_through_mark_logged_at
 
-  defp skip_stop_through_mark(state, price, stop, mark) do
+  defp skip_level_through_mark(state, price, kind, level, mark) do
     now = System.monotonic_time(:second)
-    last = Process.get(:stop_through_mark_logged_at)
+    last = Process.get(@level_through_mark_key)
 
-    if last == nil or now - last >= @stop_through_mark_log_every_s do
-      Process.put(:stop_through_mark_logged_at, now)
+    if last == nil or now - last >= @level_through_mark_log_every_s do
+      Process.put(@level_through_mark_key, now)
 
       Logger.warning(
         "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
-          "entry skipped -- the option price #{Decimal.to_string(mark)} is already through the stop " <>
-          "#{Decimal.to_string(stop)} a fill at #{Decimal.to_string(price)} would set (spread too wide " <>
-          "for the stop); retrying on each tick"
+          "entry skipped -- the option price #{Decimal.to_string(mark)} is already through the #{kind} " <>
+          "#{Decimal.to_string(level)} a fill at #{Decimal.to_string(price)} would set (spread too wide " <>
+          "for the #{kind}); retrying on each tick"
       )
     end
 
@@ -2005,10 +2022,10 @@ defmodule TradingOptionsSim.ContractMonitor do
   def stamp(snapshot, nil), do: snapshot
   def stamp(snapshot, context), do: Map.put(snapshot, "market_context", context)
 
-  defp record_entry(state, snapshot, action, price, fill_basis) do
+  defp record_entry(state, snapshot, action, price, fill_basis, levels) do
     context = market_context()
     now = DateTime.utc_now()
-    {stop_loss_price, take_profit_price, risk_context} = risk_levels(state, price, snapshot)
+    {stop_loss_price, take_profit_price, risk_context} = levels
 
     {run, state} = ensure_open_run(state)
 
@@ -2038,6 +2055,8 @@ defmodule TradingOptionsSim.ContractMonitor do
            }
          ) do
       {:ok, {_fill, run}} ->
+        Process.delete(@level_through_mark_key)
+
         Logger.info(
           "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} entered at #{Decimal.to_string(price)}"
         )

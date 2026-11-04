@@ -1643,7 +1643,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
     # stop (5.985) was above its own price (5.98), and it entered and
     # stopped out within a second, over and over. Same 5.00/7.00 book
     # here: fill 6.50, price 6.00, so a 5% stop (6.175) is already hit.
-    defp start_tight_stop_monitor(symbol, occ_symbol, stop_pct) do
+    defp start_tight_stop_monitor(symbol, occ_symbol, stop_pct, tp_pct \\ 25, opt_price \\ 6.00) do
       version =
         version_fixture(
           %{
@@ -1654,7 +1654,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
             "risk_controls" => %{
               "method" => "percent_of_entry",
               "stop_loss_percent" => stop_pct,
-              "take_profit_percent" => 25
+              "take_profit_percent" => tp_pct
             }
           }
         )
@@ -1670,7 +1670,7 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       broadcast_option_greeks(occ_symbol, %{
         implied_vol: 0.30,
         delta: 0.55,
-        opt_price: 6.00,
+        opt_price: opt_price,
         gamma: 0.02,
         vega: 0.15,
         theta: -0.03,
@@ -1722,6 +1722,23 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert ContractMonitor.snapshot(pid).position_open?
       assert Sim.get_sim_run!(run.id).status == "open"
       assert Sim.get_sim_run!(run.id).entry_at != nil
+    end
+
+    # A last print near the ask over a tight target: the run would exit
+    # as a "take_profit" on the next tick at a loss, and loop.
+    test "no entry when the option's price is already through the target the fill would set" do
+      # Fill 6.50 on 5.00/7.00, 5% target 6.825, price 6.90 inside the book.
+      {pid, run} = start_tight_stop_monitor("IBKRGUARD4", "IBKRGUARD4_OCC", 15, 5, 6.90)
+
+      log =
+        capture_log(fn ->
+          broadcast_underlying_price("IBKRGUARD4", 150.0)
+          sync(pid)
+        end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.get_sim_run!(run.id).entry_at == nil
+      assert log =~ "already through the take-profit"
     end
 
     # Must not fire on healthy input: a stop the price is clear of enters.

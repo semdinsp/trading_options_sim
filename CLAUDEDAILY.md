@@ -462,8 +462,10 @@ are baselines.
 crosses part of the spread, but it's checked against the option's price
 or mid. When the spread is wide compared with the stop distance, that
 price is already through the stop at entry. Since 2026-11-04 the monitor
-refuses such an entry and logs "already through the stop" (at most once
-per 10 minutes per contract), and retries on every tick. Before that,
+refuses such an entry, and likewise one whose take-profit the price is
+already through, logging "already through the stop" (or "take-profit")
+once per blocked spell and then at most every 10 minutes per contract,
+and retries on every tick. Before that,
 XLV and XLU defensive calls entered and stopped out within a second, 45
 times in one day. A version that logs this often needs a wider stop, a
 tighter-book contract or a different pool.
