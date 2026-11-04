@@ -358,7 +358,8 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       `ContractMonitor.cooled_down?/2`.
     * `"stop_arm_seconds"`: a non-negative integer — the stop-loss can't
       fire until that long after entry (the take-profit is never
-      delayed). See `ContractMonitor.stop_armed?/1`.
+      delayed). Single-leg versions only: `ComboMonitor` ignores it.
+      See `ContractMonitor.stop_armed?/1`.
   """
   @spec params_errors(map() | nil) :: [String.t()]
   def params_errors(params) when is_map(params) do

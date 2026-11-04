@@ -452,7 +452,9 @@ are baselines.
 - `reentry_cooldown_seconds`: no re-entry on a contract for this long
   after an exit. Use it against churn.
 - `stop_arm_seconds`: the stop-loss can't fire until this long after
-  entry (the take-profit is never delayed). Off by default. It doesn't
+  entry (the take-profit is never delayed). Off by default, and
+  single-leg only: combo monitors ignore it, and the entry guard below
+  doesn't cover combos either. It doesn't
   stop the wide-spread loop below on its own: with a frozen quote the
   stop fires as soon as it arms.
 
