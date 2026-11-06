@@ -379,7 +379,9 @@ defmodule TradingOptionsSim.Sim do
   or `"discovery"` — the last only valid from `"retired"`, i.e.
   "unretire"). `discovery -> quarantine` requires a `target_pool_id` and
   sets `quarantine_started_at`/resets `quarantine_trading_days`, mirroring
-  `trading_system.promote_strategy_version/2`.
+  `trading_system.promote_strategy_version/2`. `quarantine -> test_portfolio`
+  sets `test_portfolio_at` (overwritten if the version is downgraded to
+  quarantine and promoted again).
   """
   @spec promote_strategy_version(StrategyVersion.t(), String.t()) ::
           {:ok, StrategyVersion.t()}
@@ -412,7 +414,10 @@ defmodule TradingOptionsSim.Sim do
         "test_portfolio"
       ) do
     version
-    |> StrategyVersion.lifecycle_stage_changeset(%{"lifecycle_stage" => "test_portfolio"})
+    |> StrategyVersion.lifecycle_stage_changeset(%{
+      "lifecycle_stage" => "test_portfolio",
+      "test_portfolio_at" => DateTime.utc_now() |> DateTime.truncate(:second)
+    })
     |> Repo.update()
   end
 
@@ -499,7 +504,7 @@ defmodule TradingOptionsSim.Sim do
       "live_strategy_app" => live_strategy_app,
       "live_strategy_id" => live_strategy_id,
       "live_strategy_active" => true,
-      "live_linked_at" => DateTime.utc_now()
+      "live_linked_at" => linked_at(version, live_strategy_app, live_strategy_id)
     })
     |> Repo.update()
   end
@@ -507,6 +512,23 @@ defmodule TradingOptionsSim.Sim do
   def link_live_strategy(%StrategyVersion{}, _live_strategy_app, _live_strategy_id) do
     {:error, :invalid_transition}
   end
+
+  # A repeat link to the same live record (trading_live re-links its
+  # strategies, e.g. on restart) keeps the original time, so
+  # `live_linked_at` means "first linked", not "last re-linked". A link to
+  # a different app or record starts a new link and takes the current time.
+  defp linked_at(
+         %StrategyVersion{
+           live_strategy_app: app,
+           live_strategy_id: id,
+           live_linked_at: %DateTime{} = at
+         },
+         app,
+         id
+       ),
+       do: at
+
+  defp linked_at(%StrategyVersion{}, _app, _id), do: DateTime.utc_now()
 
   @doc """
   Unlinks `version` from whichever `live_strategy_app` it was linked to

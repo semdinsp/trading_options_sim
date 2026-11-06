@@ -96,6 +96,10 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
 
     field :lifecycle_stage, :string, default: "discovery"
     field :quarantine_started_at, :utc_datetime
+    # When the version last entered test_portfolio (set by
+    # Sim.promote_strategy_version/2). Not `promoted_at`, which is the
+    # trading_system-import timestamp below and is never set here.
+    field :test_portfolio_at, :utc_datetime
     field :quarantine_trading_days, :integer, default: 0
     field :quarantine_last_counted_date, :date
     field :retired_reason, :string
@@ -286,6 +290,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
     |> cast(attrs, [
       :lifecycle_stage,
       :quarantine_started_at,
+      :test_portfolio_at,
       :quarantine_trading_days,
       :quarantine_last_counted_date,
       :retired_reason

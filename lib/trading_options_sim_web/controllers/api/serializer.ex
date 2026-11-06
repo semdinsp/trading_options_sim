@@ -63,6 +63,7 @@ defmodule TradingOptionsSimWeb.Api.Serializer do
       "option_leg_config" => version.option_leg_config,
       "lifecycle_stage" => version.lifecycle_stage,
       "quarantine_started_at" => str(version.quarantine_started_at),
+      "test_portfolio_at" => str(version.test_portfolio_at),
       "quarantine_trading_days" => version.quarantine_trading_days,
       "retired_reason" => version.retired_reason,
       "activated_at" => str(version.activated_at),

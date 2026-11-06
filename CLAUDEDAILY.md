@@ -484,7 +484,12 @@ that call easy: a short, current, evidenced list.
   ```
 - Never change the stage. The `test_portfolio` versions and live-linked
   ones are listed separately, with their bounds since promotion, so the
-  user can see whether live is getting what the sim promised.
+  user can see whether live is getting what the sim promised. "Since
+  promotion" means since `test_portfolio_at` (set when the version
+  entered test_portfolio; backfilled for older versions from their first
+  test_portfolio snapshot, so it's the end of that day). Not
+  `promoted_at`: that field is for imports from trading_system and is
+  always nil. `live_linked_at` is when trading_live first linked it.
 
 **Report each candidate** with: id, name, sessions, closes, the three
 bounds, net P&L, the luck count from M5, the family it stands for, and
