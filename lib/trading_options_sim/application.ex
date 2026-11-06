@@ -7,6 +7,9 @@ defmodule TradingOptionsSim.Application do
 
   @impl true
   def start(_type, _args) do
+    # Before any IBKRLive listener can start and look up a con_id.
+    TradingOptionsSim.Pricing.OptionContractId.init_slots()
+
     children =
       [
         TradingOptionsSimWeb.Telemetry,

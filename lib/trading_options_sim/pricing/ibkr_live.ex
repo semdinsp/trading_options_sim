@@ -57,6 +57,11 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   that code directly) simply cannot arise here, since this module IS
   the single owner trading_hub's tag identifies.
 
+  Before that subscribe, the contract is pinned to IBKR's `con_id` by
+  `TradingOptionsSim.Pricing.OptionContractId`, because a bare description
+  is ambiguous to TWS for some SPY/QQQ strikes. A contract that cannot be
+  pinned is not subscribed; see that module.
+
   `attach/1`/`detach/1` track how many `ContractMonitor`s currently
   depend on this listener (a plain integer, incremented on `attach/1`,
   decremented on `detach/1`) — when it reaches zero, this process
@@ -70,7 +75,7 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
 
   use GenServer
 
-  alias TradingOptionsSim.Pricing.ResubscribeBackoff
+  alias TradingOptionsSim.Pricing.{OptionContractId, ResubscribeBackoff}
   require Logger
 
   defstruct [
@@ -137,8 +142,14 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   into its own return value for exactly this reason). See `detach/1`'s
   own doc for the matching call.
   """
+  # attach/1 waits behind the listener's first lookup and subscribe
+  # (handle_continue(:subscribe, _)): a queue for a lookup slot, a resolve
+  # (up to 15 s on a miss) and the subscribe RPC (5 s). Every step is
+  # bounded, so this is a ceiling, not an expected wait.
+  @attach_timeout_ms 120_000
+
   @spec attach(pid()) :: {:ok, subscribed?: boolean()}
-  def attach(pid), do: GenServer.call(pid, :attach)
+  def attach(pid), do: GenServer.call(pid, :attach, @attach_timeout_ms)
 
   @doc """
   Releases one `ContractMonitor`'s dependency on this listener — call
@@ -204,12 +215,23 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     # call would deliver another duplicate {:nodeup, _}.
     :net_kernel.monitor_nodes(true)
 
-    subscribed? = subscribe_to_hub(occ_symbol, contract) == :ok
-
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{occ_symbol}")
 
-    state = %__MODULE__{occ_symbol: occ_symbol, contract: contract, subscribed?: subscribed?}
-    {:ok, ResubscribeBackoff.after_attempt(state)}
+    {:ok, %__MODULE__{occ_symbol: occ_symbol, contract: contract}, {:continue, :subscribe}}
+  end
+
+  # The con_id lookup takes ~160 ms (p90 ~330 ms, a miss 10 s), and init/1
+  # runs inside DynamicSupervisor.start_child, which serialises every
+  # listener start behind it: ~108 listeners at a node restart would wait
+  # 15-30 s in a row. Here start_child has already returned, so listeners
+  # look up in parallel (OptionContractId caps how many at once). attach/1
+  # still answers with the real result: it queues behind this continue.
+  @impl true
+  def handle_continue(:subscribe, state) do
+    {subscribed?, contract} = pin_and_subscribe(state.occ_symbol, state.contract)
+
+    {:noreply,
+     ResubscribeBackoff.after_attempt(%{state | subscribed?: subscribed?, contract: contract})}
   end
 
   @impl true
@@ -322,11 +344,41 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   # The hub refcounts by {symbol, caller}, so re-subscribing a caller
   # tag it already holds is a harmless no-op.
   defp resubscribe(state) do
+    {subscribed?, contract} = pin_and_subscribe(state.occ_symbol, state.contract)
+
     %{
       state
-      | subscribed?: subscribe_to_hub(state.occ_symbol, state.contract) == :ok,
+      | subscribed?: subscribed?,
+        contract: contract,
         resubscribe_count: state.resubscribe_count + 1
     }
+  end
+
+  # Subscribes only once the contract is pinned to its con_id (see
+  # OptionContractId). A failed pin is logged at error level and counts as
+  # a failed subscribe: `subscribed?: false`, which the strategy page
+  # already flags, and ResubscribeBackoff retries it. The pinned contract
+  # is returned so it is kept in state and later retries skip the lookup.
+  defp pin_and_subscribe(occ_symbol, contract) do
+    case OptionContractId.pin(contract) do
+      {:ok, pinned} ->
+        unless Map.has_key?(pinned, :contract_id) do
+          Logger.warning(
+            "IBKRLive: #{occ_symbol} is ambiguous on this trading_hub (no resolve/5 yet); " <>
+              "subscribing with multiplier only, contract: #{inspect(pinned)}"
+          )
+        end
+
+        {subscribe_to_hub(occ_symbol, pinned) == :ok, pinned}
+
+      {:error, reason} ->
+        Logger.error(
+          "IBKRLive: #{occ_symbol} not subscribed -- contract_id lookup failed: #{inspect(reason)}, " <>
+            "contract: #{inspect(contract)}"
+        )
+
+        {false, contract}
+    end
   end
 
   # The single place this process ever unsubscribes from trading_hub —
