@@ -74,6 +74,19 @@ defmodule TradingOptionsSim.SimTest do
 
       assert {:ok, promoted} = Sim.promote_strategy_version(version, "test_portfolio")
       assert promoted.lifecycle_stage == "test_portfolio"
+      refute is_nil(promoted.test_portfolio_at)
+    end
+
+    test "quarantine -> test_portfolio leaves promoted_at (the trading_system import field) alone" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      assert is_nil(version.test_portfolio_at)
+
+      {:ok, promoted} = Sim.promote_strategy_version(version, "test_portfolio")
+      assert is_nil(promoted.promoted_at)
+      assert Sim.get_strategy_version!(version.id).test_portfolio_at == promoted.test_portfolio_at
     end
 
     test "fails from discovery" do
@@ -175,6 +188,48 @@ defmodule TradingOptionsSim.SimTest do
       assert linked.live_strategy_id == live_strategy_id
       assert linked.live_strategy_active == true
       refute is_nil(linked.live_linked_at)
+    end
+
+    test "re-linking the same live record keeps the first live_linked_at" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      {:ok, version} = Sim.promote_strategy_version(version, "test_portfolio")
+      live_strategy_id = Ecto.UUID.generate()
+      first_at = ~U[2026-10-01 14:00:00.000000Z]
+
+      {:ok, linked} = Sim.link_live_strategy(version, "trading_live", live_strategy_id)
+
+      {:ok, linked} =
+        linked
+        |> Ecto.Changeset.change(live_linked_at: first_at)
+        |> TradingOptionsSim.Repo.update()
+
+      assert {:ok, relinked} = Sim.link_live_strategy(linked, "trading_live", live_strategy_id)
+      assert relinked.live_linked_at == first_at
+      assert relinked.live_strategy_active == true
+    end
+
+    test "linking a different live record takes a new live_linked_at" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      {:ok, version} = Sim.promote_strategy_version(version, "test_portfolio")
+      first_at = ~U[2026-10-01 14:00:00.000000Z]
+
+      {:ok, linked} = Sim.link_live_strategy(version, "trading_live", Ecto.UUID.generate())
+
+      {:ok, linked} =
+        linked
+        |> Ecto.Changeset.change(live_linked_at: first_at)
+        |> TradingOptionsSim.Repo.update()
+
+      new_id = Ecto.UUID.generate()
+      assert {:ok, relinked} = Sim.link_live_strategy(linked, "trading_live", new_id)
+      assert relinked.live_strategy_id == new_id
+      assert DateTime.compare(relinked.live_linked_at, first_at) == :gt
     end
 
     test "fails from discovery" do
