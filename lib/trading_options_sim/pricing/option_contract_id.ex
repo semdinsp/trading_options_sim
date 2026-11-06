@@ -36,6 +36,13 @@ defmodule TradingOptionsSim.Pricing.OptionContractId do
 
   @resolver TradingHub.IBKR.ContractResolver
 
+  # At most this many lookups in flight at once across all listeners. The
+  # hub resolves in parallel, but TWS paces requests (~50 msgs/s per
+  # connection); a node restart has ~108 listeners, which should not all
+  # fire together.
+  @max_concurrent 20
+  @slots_key {__MODULE__, :slots}
+
   @typedoc "Calls `module.fun(args)` on trading_hub and returns its result."
   @type hub_call :: (module(), atom(), list(), timeout() -> term())
 
@@ -53,10 +60,46 @@ defmodule TradingOptionsSim.Pricing.OptionContractId do
 
   def pin(%{contract_id: id} = contract, _hub_call) when is_integer(id), do: {:ok, contract}
 
-  def pin(
-        %{underlying_symbol: symbol, expiry: expiry, strike: strike, right: right} = contract,
-        hub_call
-      ) do
+  def pin(%{underlying_symbol: _, expiry: _, strike: _, right: _} = contract, hub_call) do
+    with_slot(fn -> resolve(contract, hub_call) end)
+  end
+
+  def pin(contract, _hub_call), do: {:error, {:incomplete_contract, contract}}
+
+  @doc "Creates the shared lookup-slot counter. Called once from `Application.start/2`."
+  def init_slots, do: :persistent_term.put(@slots_key, :counters.new(1, [:atomics]))
+
+  # No counter (init_slots/0 not called) means no cap rather than a crash.
+  defp with_slot(fun) do
+    case :persistent_term.get(@slots_key, nil) do
+      nil ->
+        fun.()
+
+      slots ->
+        acquire(slots)
+
+        try do
+          fun.()
+        after
+          :counters.sub(slots, 1, 1)
+        end
+    end
+  end
+
+  defp acquire(slots) do
+    :counters.add(slots, 1, 1)
+
+    if :counters.get(slots, 1) > @max_concurrent do
+      :counters.sub(slots, 1, 1)
+      Process.sleep(25 + :rand.uniform(50))
+      acquire(slots)
+    end
+  end
+
+  defp resolve(
+         %{underlying_symbol: symbol, expiry: expiry, strike: strike, right: right} = contract,
+         hub_call
+       ) do
     narrowed = Map.merge(contract, %{multiplier: @multiplier, trading_class: symbol})
     base = [symbol, expiry, strike, right]
 
@@ -84,8 +127,6 @@ defmodule TradingOptionsSim.Pricing.OptionContractId do
       end
     end
   end
-
-  def pin(contract, _hub_call), do: {:error, {:incomplete_contract, contract}}
 
   # Asked each time rather than cached, so a hub that gains resolve/5
   # (PR #166 deployed) is used from the next subscribe without a restart

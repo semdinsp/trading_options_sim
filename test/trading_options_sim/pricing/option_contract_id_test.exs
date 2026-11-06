@@ -82,6 +82,32 @@ defmodule TradingOptionsSim.Pricing.OptionContractIdTest do
     assert {:error, {:incomplete_contract, _}} = OptionContractId.pin(%{sec_type: "OPT"}, no_hub)
   end
 
+  test "no more than 20 lookups are in flight at once" do
+    {:ok, peak} = Agent.start_link(fn -> {0, 0} end)
+
+    slow_hub = fn
+      :erlang, :function_exported, _, _ ->
+        true
+
+      _, :resolve, _, _ ->
+        Agent.update(peak, fn {now, max} -> {now + 1, max(max, now + 1)} end)
+        Process.sleep(30)
+        Agent.update(peak, fn {now, max} -> {now - 1, max} end)
+        {:ok, 1}
+    end
+
+    1..60
+    |> Task.async_stream(fn _ -> OptionContractId.pin(contract(), slow_hub) end,
+      max_concurrency: 60,
+      timeout: 10_000
+    )
+    |> Enum.each(fn {:ok, result} -> assert {:ok, %{contract_id: 1}} = result end)
+
+    {_now, max} = Agent.get(peak, & &1)
+    assert max <= 20
+    assert max > 1
+  end
+
   test "an unreachable hub is an error, not a crash" do
     assert {:error, _} = OptionContractId.pin(contract())
   end

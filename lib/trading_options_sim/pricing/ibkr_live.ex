@@ -142,8 +142,14 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   into its own return value for exactly this reason). See `detach/1`'s
   own doc for the matching call.
   """
+  # attach/1 waits behind the listener's first lookup and subscribe
+  # (handle_continue(:subscribe, _)): a queue for a lookup slot, a resolve
+  # (up to 15 s on a miss) and the subscribe RPC (5 s). Every step is
+  # bounded, so this is a ceiling, not an expected wait.
+  @attach_timeout_ms 120_000
+
   @spec attach(pid()) :: {:ok, subscribed?: boolean()}
-  def attach(pid), do: GenServer.call(pid, :attach)
+  def attach(pid), do: GenServer.call(pid, :attach, @attach_timeout_ms)
 
   @doc """
   Releases one `ContractMonitor`'s dependency on this listener — call
@@ -209,12 +215,23 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
     # call would deliver another duplicate {:nodeup, _}.
     :net_kernel.monitor_nodes(true)
 
-    {subscribed?, contract} = pin_and_subscribe(occ_symbol, contract)
-
     Phoenix.PubSub.subscribe(TradingOptionsSim.PubSub, "prices:#{occ_symbol}")
 
-    state = %__MODULE__{occ_symbol: occ_symbol, contract: contract, subscribed?: subscribed?}
-    {:ok, ResubscribeBackoff.after_attempt(state)}
+    {:ok, %__MODULE__{occ_symbol: occ_symbol, contract: contract}, {:continue, :subscribe}}
+  end
+
+  # The con_id lookup takes ~160 ms (p90 ~330 ms, a miss 10 s), and init/1
+  # runs inside DynamicSupervisor.start_child, which serialises every
+  # listener start behind it: ~108 listeners at a node restart would wait
+  # 15-30 s in a row. Here start_child has already returned, so listeners
+  # look up in parallel (OptionContractId caps how many at once). attach/1
+  # still answers with the real result: it queues behind this continue.
+  @impl true
+  def handle_continue(:subscribe, state) do
+    {subscribed?, contract} = pin_and_subscribe(state.occ_symbol, state.contract)
+
+    {:noreply,
+     ResubscribeBackoff.after_attempt(%{state | subscribed?: subscribed?, contract: contract})}
   end
 
   @impl true
