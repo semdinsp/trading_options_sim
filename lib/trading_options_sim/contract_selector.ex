@@ -72,6 +72,7 @@ defmodule TradingOptionsSim.ContractSelector do
   """
 
   alias TradingCore.Options.ContractSelection
+  alias TradingOptionsSim.ContractListingCache
 
   @type contract :: %{expiry: String.t(), strike: Decimal.t(), right: String.t()}
 
@@ -100,7 +101,7 @@ defmodule TradingOptionsSim.ContractSelector do
   def resolve(symbol, %{"strike_selection" => "atm_offset"} = config, today) do
     with {:ok, spot} <- spot_price(symbol),
          {:ok, candidates} <- ContractSelection.candidates(symbol, config, spot, today) do
-      first_listed(candidates, symbol, &resolve_via_hub/4)
+      first_listed(candidates, symbol, ContractListingCache.cached(&resolve_via_hub/4))
     end
   end
 
@@ -164,7 +165,13 @@ defmodule TradingOptionsSim.ContractSelector do
     with {:ok, spot} <- spot_price(symbol),
          {:ok, expiries} <- ContractSelection.expiry_candidates(config, today) do
       templates = TradingOptionsSim.Combo.templates(symbol, config["multi_leg"], spot)
-      first_listed_combo(expiries, templates, symbol, &resolve_via_hub/4)
+
+      first_listed_combo(
+        expiries,
+        templates,
+        symbol,
+        ContractListingCache.cached(&resolve_via_hub/4)
+      )
     end
   end
 
