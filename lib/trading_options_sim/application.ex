@@ -83,7 +83,10 @@ defmodule TradingOptionsSim.Application do
         # check, EodCloser force-closes open positions near session
         # close. Ported near-verbatim from trading_live's identical pair.
         TradingOptionsSim.ExchangeSessionCache,
-        TradingOptionsSim.EodCloser
+        TradingOptionsSim.EodCloser,
+        # Before the reactivator: its activations probe contracts through
+        # ContractSelector, which reads this cache.
+        TradingOptionsSim.ContractListingCache
       ] ++
         reactivator_child() ++
         [
