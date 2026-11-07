@@ -250,6 +250,30 @@ defmodule TradingOptionsSim.Sim.QuarantineEligibilityTest do
       assert retired.retired_reason == "failed_quarantine"
     end
 
+    test "deactivates an active version as it retires it, so it stops trading" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      {:ok, version} = Sim.mark_activated(version)
+
+      {:ok, version} =
+        version
+        |> Ecto.Changeset.change(quarantine_trading_days: 20)
+        |> TradingOptionsSim.Repo.update()
+
+      traded_on_days_fixture(version)
+      closed_run_fixture(version, Decimal.new("-100.00"))
+      closed_run_fixture(version, Decimal.new("10.00"))
+
+      assert version.id in Enum.map(Sim.list_active_strategy_versions(), & &1.id)
+
+      {:ok, [retired]} = Sim.auto_retire_failing_quarantine_versions()
+
+      assert retired.lifecycle_stage == "retired"
+      assert %DateTime{} = retired.deactivated_at
+    end
+
     test "does not retire a version below the trading-days floor even with a bad loss ratio" do
       strategy = strategy_fixture()
       pool = target_pool_fixture()

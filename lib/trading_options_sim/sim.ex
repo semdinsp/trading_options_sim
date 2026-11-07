@@ -745,6 +745,15 @@ defmodule TradingOptionsSim.Sim do
 
     retired =
       Enum.map(failing_ids, fn version_id ->
+        # Stop the monitors first (flattening any open position), as
+        # LifecycleReview.retire/1 does: downgrade_strategy_version/3 only
+        # changes the stage. Without this, 01a11669-f009 (retired at 07:00
+        # on 2026-11-06) kept trading all day, and the restart that
+        # evening left two of its positions open with no monitor, since
+        # the reactivator skips retired versions.
+        {:ok, _count} =
+          TradingOptionsSim.SimActivator.deactivate(get_strategy_version!(version_id))
+
         version = get_strategy_version!(version_id)
 
         {:ok, retired_version} =
