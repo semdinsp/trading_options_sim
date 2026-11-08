@@ -1895,13 +1895,18 @@ defmodule TradingOptionsSim.Sim do
   population in one call (matching that page's own `@fetch_limit: 5000`
   "just fetch everything" approach at its scale) needs no pagination
   here either.
+
+  `stages` defaults to the candidate stages. Pass other lifecycle stages
+  (e.g. `["test_portfolio"]`) to keep evaluating versions on the same
+  metrics and `CandidateGates` after promotion, since they keep paper
+  trading there. The row shape is the same for every stage.
   """
-  @spec full_universe_version_metrics() :: [map()]
-  def full_universe_version_metrics do
+  @spec full_universe_version_metrics([String.t()]) :: [map()]
+  def full_universe_version_metrics(stages \\ @candidate_lifecycle_stages) do
     versions =
       StrategyVersion
       |> where([v], is_nil(v.deleted_at))
-      |> where([v], v.lifecycle_stage in @candidate_lifecycle_stages)
+      |> where([v], v.lifecycle_stage in ^stages)
       |> preload([:strategy, :tags, :target_pool])
       |> Repo.all()
 

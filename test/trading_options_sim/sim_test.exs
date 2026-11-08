@@ -1322,6 +1322,24 @@ defmodule TradingOptionsSim.SimTest do
              |> Enum.any?(&(&1.strategy_version_id == version.id))
     end
 
+    test "returns test_portfolio versions only when that stage is requested" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{version: 1, target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      {:ok, version} = Sim.promote_strategy_version(version, "test_portfolio")
+
+      refute Sim.full_universe_version_metrics()
+             |> Enum.any?(&(&1.strategy_version_id == version.id))
+
+      assert [row] =
+               Sim.full_universe_version_metrics(["test_portfolio"])
+               |> Enum.filter(&(&1.strategy_version_id == version.id))
+
+      assert row.lifecycle_stage == "test_portfolio"
+      assert is_map(TradingOptionsSim.CandidateGates.evaluate(row))
+    end
+
     test "builds an exit_reason_histogram across closed runs" do
       strategy = strategy_fixture()
       version = version_fixture(strategy, %{version: 1})
