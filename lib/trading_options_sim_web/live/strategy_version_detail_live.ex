@@ -37,10 +37,14 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
 
   alias TradingOptionsSim.Combo
   alias TradingOptionsSim.ContractMonitor
+  alias TradingOptionsSim.CandidateGates
   alias TradingOptionsSim.Sim
   alias TradingOptionsSim.SimActivator
 
   @refresh_ms :timer.seconds(2)
+  # Gate metrics run several aggregate queries and only move when a trade
+  # closes, so they refresh far less often than the 2s live view.
+  @gates_refresh_ms :timer.seconds(60)
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -277,6 +281,30 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
     |> assign(:is_active?, is_active?)
     |> assign(:recent_fills, Sim.list_recent_fills_for_version(version))
     |> assign(:total_fill_count, Sim.count_fills_for_version(version))
+    |> maybe_assign_gates(version)
+  end
+
+  # Recomputes on first load, when the stage changes (the tenure gate
+  # depends on it) and otherwise at most every @gates_refresh_ms.
+  defp maybe_assign_gates(socket, version) do
+    now = System.monotonic_time(:millisecond)
+    %{assigns: assigns} = socket
+
+    stale? =
+      Map.get(assigns, :gates_stage) != version.lifecycle_stage or
+        now - Map.get(assigns, :gates_loaded_at, now - @gates_refresh_ms) >= @gates_refresh_ms
+
+    if stale? do
+      row = Sim.version_metrics(version.id)
+
+      socket
+      |> assign(:gate_row, row)
+      |> assign(:gates, row && CandidateGates.evaluate(row))
+      |> assign(:gates_stage, version.lifecycle_stage)
+      |> assign(:gates_loaded_at, now)
+    else
+      socket
+    end
   end
 
   # Always derives this member's state from ONE live read
@@ -541,6 +569,77 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
   defp direction_class("short"), do: "border-short/40 text-short"
   defp direction_class(_other), do: "border-base-content/20 text-base-content/60"
 
+  attr :gates, :map, required: true
+  attr :row, :map, required: true
+
+  defp gate_panel(assigns) do
+    assigns =
+      assigns
+      |> assign(:failed, Enum.filter(CandidateGates.gate_order(), &(assigns.gates[&1] == :fail)))
+      |> assign(:candidate?, CandidateGates.candidate?(assigns.gates))
+
+    ~H"""
+    <div id="gate-panel" class="border border-base-300 bg-base-100 p-3">
+      <div class="flex items-baseline gap-3 flex-wrap mb-2">
+        <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50">
+          Gates
+        </div>
+        <span :if={@candidate?} id="gate-summary" class="text-xs font-data text-success">
+          Passes every computed gate
+        </span>
+        <span :if={not @candidate?} id="gate-summary" class="text-xs font-data text-error">
+          Fails {length(@failed)}: {Enum.map_join(@failed, ", ", &gate_short_name/1)}
+        </span>
+        <span class="text-[11px] font-data text-base-content/50 tabular-nums">
+          {@row.n_closes} scored trades · {@row.n_sessions} sessions · lcb95 {format_lcb(@row.lcb95)} R · net {format_pnl(
+            @row.realized_pnl
+          )}
+        </span>
+      </div>
+      <div class="flex flex-wrap gap-1.5">
+        <span
+          :for={gate <- CandidateGates.gate_order()}
+          id={"gate-#{gate}"}
+          data-verdict={@gates[gate]}
+          class={[
+            "inline-flex items-center gap-1 px-1.5 py-0.5 border text-[11px] font-data",
+            gate_chip_class(@gates[gate])
+          ]}
+          title={"#{CandidateGates.gate_description(gate)} — #{gate_verdict_label(@gates[gate])}"}
+        >
+          <span class="font-bold">{CandidateGates.gate_letter(gate)}</span>
+          {gate_short_name(gate)}
+          <span class="opacity-70">{gate_verdict_label(@gates[gate])}</span>
+        </span>
+      </div>
+    </div>
+    """
+  end
+
+  defp gate_chip_class(:pass), do: "border-success/40 text-success bg-success/10"
+  defp gate_chip_class(:fail), do: "border-error/40 text-error bg-error/10"
+  defp gate_chip_class(_other), do: "border-base-content/15 text-base-content/40"
+
+  defp gate_verdict_label(:pass), do: "pass"
+  defp gate_verdict_label(:fail), do: "fail"
+  defp gate_verdict_label(:not_applicable), do: "n/a"
+  defp gate_verdict_label(:not_computed), do: "not enough data"
+
+  defp gate_short_name(gate) do
+    gate |> CandidateGates.gate_description() |> String.split(":") |> hd()
+  end
+
+  defp format_lcb(nil), do: "—"
+  defp format_lcb(lcb) when is_float(lcb), do: :erlang.float_to_binary(lcb, decimals: 4)
+
+  defp format_pnl(nil), do: "—"
+
+  defp format_pnl(%Decimal{} = pnl) do
+    rounded = Decimal.round(pnl, 0)
+    sign = if Decimal.negative?(rounded), do: "−$", else: "$"
+    sign <> (rounded |> Decimal.abs() |> Decimal.to_string())
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -623,6 +722,8 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLive do
       </div>
 
       <div class="flex-1 overflow-y-auto flex flex-col gap-3">
+        <.gate_panel :if={@gates} gates={@gates} row={@gate_row} />
+
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div class="border border-warning/40 bg-base-100 p-3">
             <div class="font-data text-[11px] uppercase tracking-wider text-base-content/50 mb-1">

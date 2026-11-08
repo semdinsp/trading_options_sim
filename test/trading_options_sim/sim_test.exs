@@ -1340,6 +1340,26 @@ defmodule TradingOptionsSim.SimTest do
       assert is_map(TradingOptionsSim.CandidateGates.evaluate(row))
     end
 
+    test "version_metrics/1 returns one version's row at any stage, nil once deleted" do
+      strategy = strategy_fixture()
+      pool = target_pool_fixture()
+      version = version_fixture(strategy, %{version: 1, target_pool_id: pool.id})
+      {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+      {:ok, version} = Sim.promote_strategy_version(version, "test_portfolio")
+
+      assert %{strategy_version_id: id, lifecycle_stage: "test_portfolio", n_closes: 0} =
+               Sim.version_metrics(version.id)
+
+      assert id == version.id
+
+      {:ok, _} =
+        version
+        |> Ecto.Changeset.change(deleted_at: DateTime.utc_now() |> DateTime.truncate(:second))
+        |> Repo.update()
+
+      assert Sim.version_metrics(version.id) == nil
+    end
+
     test "builds an exit_reason_histogram across closed runs" do
       strategy = strategy_fixture()
       version = version_fixture(strategy, %{version: 1})
