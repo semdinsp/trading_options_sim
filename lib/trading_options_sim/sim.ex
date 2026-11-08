@@ -1910,6 +1910,25 @@ defmodule TradingOptionsSim.Sim do
       |> preload([:strategy, :tags, :target_pool])
       |> Repo.all()
 
+    version_metrics_rows(versions)
+  end
+
+  @doc """
+  The `full_universe_version_metrics/1` row for one version, whatever its
+  lifecycle stage, so the version detail page can show its gates without
+  computing every other version's row. `nil` for a deleted version.
+  """
+  @spec version_metrics(Ecto.UUID.t()) :: map() | nil
+  def version_metrics(version_id) do
+    StrategyVersion
+    |> where([v], v.id == ^version_id and is_nil(v.deleted_at))
+    |> preload([:strategy, :tags, :target_pool])
+    |> Repo.all()
+    |> version_metrics_rows()
+    |> List.first()
+  end
+
+  defp version_metrics_rows(versions) do
     version_ids = Enum.map(versions, & &1.id)
     stats_by_id = expectancy_r_stats_by_version(version_ids)
     commission_by_id = avg_commission_by_version(version_ids)

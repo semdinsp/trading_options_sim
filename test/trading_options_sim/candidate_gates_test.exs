@@ -37,6 +37,14 @@ defmodule TradingOptionsSim.CandidateGatesTest do
     end
   end
 
+  describe "gate_description/1" do
+    test "every gate has a description" do
+      for gate <- CandidateGates.gate_order() do
+        assert CandidateGates.gate_description(gate) =~ ":"
+      end
+    end
+  end
+
   describe "sample_floor (N)" do
     test "passes at exactly 30" do
       gates = CandidateGates.evaluate(base_row(%{n_closes: 30}), @now)
@@ -203,6 +211,20 @@ defmodule TradingOptionsSim.CandidateGatesTest do
     test "fails below 20 days" do
       gates = CandidateGates.evaluate(base_row(%{quarantine_trading_days: 19}), @now)
       assert gates.quarantine_tenure == :fail
+    end
+
+    test "is not applicable once a version is past quarantine" do
+      for stage <- ~w(test_portfolio retired) do
+        row = base_row(%{lifecycle_stage: stage, quarantine_trading_days: 1})
+        assert CandidateGates.evaluate(row, @now).quarantine_tenure == :not_applicable
+      end
+    end
+
+    test "still applies to discovery and quarantine versions" do
+      for stage <- ~w(discovery quarantine) do
+        row = base_row(%{lifecycle_stage: stage, quarantine_trading_days: 1})
+        assert CandidateGates.evaluate(row, @now).quarantine_tenure == :fail
+      end
     end
 
     test "fails (not exempt) when quarantine_trading_days is nil" do

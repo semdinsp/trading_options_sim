@@ -66,6 +66,22 @@ defmodule TradingOptionsSim.CandidateGates do
   @spec gate_letter(atom()) :: String.t()
   def gate_letter(gate), do: Map.fetch!(@gate_letters, gate)
 
+  @gate_descriptions %{
+    sample_floor: "Sample: at least #{@sample_floor} scored trades",
+    statistical: "Statistical: 95% lower bound on expectancy above 0 R",
+    economic: "Economic: expectancy clears round-trip commission",
+    dollars_agree: "Dollars: net realized P&L is positive",
+    exit_logic: "Exit logic: under 70% of exits forced (EOD flatten, expiry, stop, target)",
+    churn: "Churn: excluded trades under 20% of the total",
+    recency: "Recency: traded within the last #{@recency_day_limit} calendar days",
+    regime_concentration: "Regime: no single regime contributes over half the P&L",
+    quarantine_tenure: "Tenure: at least #{@quarantine_tenure_days} trading days in quarantine"
+  }
+
+  @doc "One-line, human-readable statement of what `gate` checks."
+  @spec gate_description(atom()) :: String.t()
+  def gate_description(gate), do: Map.fetch!(@gate_descriptions, gate)
+
   @doc "Every gate's verdict for `row`, as `%{gate_atom => verdict}` — see each private gate function for its own threshold/reasoning."
   @spec evaluate(map(), DateTime.t()) :: %{atom() => verdict()}
   def evaluate(row, now \\ DateTime.utc_now()) do
@@ -255,6 +271,11 @@ defmodule TradingOptionsSim.CandidateGates do
   # before promotion, regardless of how good the stats look. Fails (not
   # :not_applicable) for a discovery-stage row too — no evidence yet
   # reads as "not a candidate yet," not "exempt from this gate."
+  # A version past quarantine stops counting days at promotion, so the
+  # tenure gate says nothing about it.
+  defp quarantine_tenure(%{lifecycle_stage: stage}) when stage in ~w(test_portfolio retired),
+    do: :not_applicable
+
   defp quarantine_tenure(%{quarantine_trading_days: days})
        when is_integer(days) and days >= @quarantine_tenure_days,
        do: :pass
