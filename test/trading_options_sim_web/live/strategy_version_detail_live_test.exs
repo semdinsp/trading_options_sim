@@ -104,6 +104,23 @@ defmodule TradingOptionsSimWeb.StrategyVersionDetailLiveTest do
     assert html =~ "discovery"
   end
 
+  test "shows the gate panel, with tenure not applicable in the test portfolio", %{conn: conn} do
+    pool = pool_fixture("AAPL")
+    version = version_fixture(strategy_fixture(), %{target_pool_id: pool.id})
+    {:ok, version} = Sim.promote_strategy_version(version, "quarantine")
+
+    {:ok, view, _html} = live(conn, ~p"/strategy_versions/#{version.id}")
+    assert has_element?(view, "#gate-panel")
+    assert has_element?(view, "#gate-sample_floor[data-verdict=fail]")
+    assert has_element?(view, "#gate-quarantine_tenure[data-verdict=fail]")
+
+    {:ok, version} =
+      Sim.promote_strategy_version(Sim.get_strategy_version!(version.id), "test_portfolio")
+
+    {:ok, view, _html} = live(conn, ~p"/strategy_versions/#{version.id}")
+    assert has_element?(view, "#gate-quarantine_tenure[data-verdict=not_applicable]")
+  end
+
   test "shows a copy-UUID button for the version's own id", %{conn: conn} do
     strategy = strategy_fixture()
     version = version_fixture(strategy)
