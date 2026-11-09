@@ -51,3 +51,6 @@ npm-debug.log
 
 # Dev/prod log files written by Logger's :default_handler (config/dev.exs).
 /log/
+
+# Local DB dumps and data snapshots (DbBackup, one-off fixes). Can be large.
+/priv/backups/
