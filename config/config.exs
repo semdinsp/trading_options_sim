@@ -28,6 +28,10 @@ config :trading_options_sim, Oban,
        # incident this timing avoids: checking Date.utc_today() at
        # 07:00 UTC finds a day that hasn't traded yet).
        {"0 7 * * *", TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker},
+       # 13:00 UTC weekdays — before the US open in both EDT (13:30) and
+       # EST (14:30) — moves flat monitors off contracts inside their
+       # expiry window so they trade a fresh one from the open.
+       {"0 13 * * 1-5", TradingOptionsSim.Sim.Workers.ContractRollWorker},
        # 21:00 UTC — 1 hour after the US options market's 4pm ET close
        # during EDT (drifts to 5pm ET during EST — a fixed UTC time, not
        # derived from any ExchangeSession, same simplicity trade-off
