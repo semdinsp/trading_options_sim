@@ -920,6 +920,85 @@ defmodule TradingOptionsSim.SimActivatorTest do
       assert is_nil(Sim.get_strategy_version!(version.id).deactivated_at)
     end
 
+    test "params roll_at_dte rolls a flat monitor before its expiry window" do
+      pool = pool_fixture(["ROLL8"])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          params: %{"roll_at_dte" => 30}
+        })
+
+      stale_run = run_on(version, "ROLL8", et_expiry(25))
+      {:ok, [_pid], []} = SimActivator.activate(version)
+
+      assert {:rolled, ["ROLL8"]} = SimActivator.roll_expiring(version)
+      assert %{exit_reason: "manual_no_entry"} = Sim.get_sim_run!(stale_run.id)
+      assert [%{expiry: "20271231"}] = Sim.list_open_sim_runs(version)
+    end
+
+    # Must NOT fire on healthy input: without the param, or with the
+    # contract still further out than roll_at_dte, nothing rolls.
+    test "roll_at_dte leaves a contract further out than it, and versions without it, alone" do
+      pool = pool_fixture(["ROLL9", "ROLL10"])
+
+      with_param =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          params: %{"roll_at_dte" => 30}
+        })
+
+      run_on(with_param, "ROLL9", et_expiry(40))
+      run_on(with_param, "ROLL10", et_expiry(40))
+      {:ok, _pids, []} = SimActivator.activate(with_param)
+      assert SimActivator.roll_expiring(with_param) == :none
+
+      pool2 = pool_fixture(["ROLL11"])
+
+      without =
+        version_fixture(%{target_pool_id: pool2.id, option_leg_config: fixed_leg_config()})
+
+      run_on(without, "ROLL11", et_expiry(25))
+      {:ok, [_pid], []} = SimActivator.activate(without)
+      assert SimActivator.roll_expiring(without) == :none
+    end
+
+    test "roll_at_dte never rolls a monitor already on the pinned contract" do
+      pool = pool_fixture(["ROLL12"])
+      near = Map.put(fixed_leg_config(), "fixed_expiry", et_expiry(20))
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: near,
+          params: %{"roll_at_dte" => 30}
+        })
+
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      assert SimActivator.roll_expiring(version) == :none
+      assert ContractMonitor.monitors_for_version(version.id) == [{"ROLL12", pid}]
+    end
+
+    test "roll_at_dte leaves a monitor holding a position alone" do
+      pool = pool_fixture(["ROLL13"])
+
+      version =
+        version_fixture(%{
+          target_pool_id: pool.id,
+          option_leg_config: fixed_leg_config(),
+          params: %{"roll_at_dte" => 30}
+        })
+
+      version |> run_on("ROLL13", et_expiry(25)) |> enter()
+      {:ok, [pid], []} = SimActivator.activate(version)
+
+      assert SimActivator.roll_expiring(version) == :none
+      assert ContractMonitor.monitors_for_version(version.id) == [{"ROLL13", pid}]
+    end
+
     test "roll_expiring_contracts/0 reports only the versions it acted on" do
       pool = pool_fixture(["ROLL8"])
       version = version_fixture(%{target_pool_id: pool.id, option_leg_config: fixed_leg_config()})
