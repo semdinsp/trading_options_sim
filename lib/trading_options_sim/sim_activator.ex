@@ -190,6 +190,134 @@ defmodule TradingOptionsSim.SimActivator do
     {:ok, terminated_count}
   end
 
+  @doc """
+  Moves every flat monitor whose contract has reached its expiry window
+  onto a freshly resolved contract, across all active single-leg
+  versions. Run each weekday morning by `ContractRollWorker`.
+
+  Why it exists: a monitor keeps its contract for life. After an exit
+  it opens the next run on the same contract (`ensure_open_run/1`), and
+  a restart resumes the open run's contract. Nothing ever re-resolved
+  the expiry, so a 45-DTE version kept trading one contract until it
+  was inside its expiry window, then never entered again; after the
+  expiry date its IBKR listener retried a contract IBKR no longer lists
+  and logged "contract_id lookup failed: :not_found" on every retry.
+  Seen 2026-11-16: two fixed-expiry VRP versions ten days past expiry,
+  and six 45-DTE monitors four days from theirs.
+
+  Returns one `{version_id, outcome}` per version it acted on; see
+  `roll_expiring/1` for the outcomes.
+  """
+  @spec roll_expiring_contracts() :: [{String.t(), term()}]
+  def roll_expiring_contracts do
+    Sim.list_active_strategy_versions()
+    |> Enum.reject(&Combo.combo?(&1.option_leg_config))
+    |> Enum.map(&{&1.id, roll_expiring(&1)})
+    |> Enum.reject(fn {_id, outcome} -> outcome == :none end)
+  end
+
+  @doc """
+  Rolls `version`'s flat monitors that are inside their expiry window
+  (`days_to_expiry <= expiry_close_dte`, 1 by default; a flat monitor
+  there never enters again, see `ContractMonitor`).
+
+  - `:none` -- nothing to roll.
+  - `{:rolled, symbols}` -- each stale monitor was stopped (its open
+    no-entry run closed as `"manual_no_entry"`, a non-trade) and the
+    symbol re-resolved from the leg config, as a fresh activation would.
+  - `{:deactivated, count}` -- the leg config pins an expiry
+    (`fixed_expiry`) that is itself inside the window, so re-resolving
+    would only return the dead contract again. Once every monitor is
+    flat the version is deactivated, which logs it once and stops the
+    retries.
+  - `:waiting` -- that pinned-expiry case while some monitor still holds
+    a position; `EodCloser` closes those in the expiry window, and the
+    next morning's run deactivates.
+
+  A monitor holding a position is never touched.
+  """
+  @spec roll_expiring(StrategyVersion.t()) ::
+          :none | :waiting | {:rolled, [String.t()]} | {:deactivated, non_neg_integer()}
+  def roll_expiring(%StrategyVersion{} = version) do
+    monitors =
+      version.id
+      |> ContractMonitor.monitors_for_version()
+      |> Enum.map(fn {symbol, pid} -> {symbol, pid, safe_snapshot(pid)} end)
+
+    stale = Enum.filter(monitors, fn {_symbol, _pid, snap} -> flat_and_expiring?(snap) end)
+
+    cond do
+      stale == [] ->
+        :none
+
+      pinned_expiry_spent?(version.option_leg_config) ->
+        if length(stale) == length(monitors) do
+          Logger.warning(
+            "SimActivator: deactivating #{version.id} -- its fixed_expiry " <>
+              "#{version.option_leg_config["fixed_expiry"]} is spent, so it can't get a tradeable contract"
+          )
+
+          {:ok, count} = deactivate(version)
+          {:deactivated, count}
+        else
+          :waiting
+        end
+
+      true ->
+        {:rolled, Enum.flat_map(stale, &roll_monitor(version, &1))}
+    end
+  end
+
+  defp roll_monitor(version, {symbol, pid, snap}) do
+    stop_monitor(pid, Sim.list_open_sim_runs(version))
+
+    member =
+      version.target_pool_id
+      |> Sim.get_target_pool!()
+      |> Map.fetch!(:target_pool_members)
+      |> Enum.find(&(&1.symbol == symbol))
+
+    if member do
+      result = start_single_leg_member(version, member)
+
+      Logger.info(
+        "SimActivator: rolled #{version.id} #{symbol} off #{snap.expiry} " <>
+          "#{Decimal.to_string(snap.strike)}#{snap.right}: #{inspect(roll_result(result))}"
+      )
+
+      [symbol]
+    else
+      # The symbol left the pool: stopping the monitor was the whole job.
+      []
+    end
+  end
+
+  defp roll_result(pid) when is_pid(pid) do
+    case safe_snapshot(pid) do
+      %{} = snap -> "#{snap.expiry} #{Decimal.to_string(snap.strike)}#{snap.right}"
+      nil -> :started
+    end
+  end
+
+  defp roll_result(other), do: other
+
+  defp flat_and_expiring?(%{position_open?: false, expiry: expiry, expiry_close_dte: cutoff})
+       when is_binary(expiry) and is_integer(cutoff),
+       do: ContractMonitor.days_to_expiry(expiry) <= cutoff
+
+  defp flat_and_expiring?(_snapshot), do: false
+
+  # A config that names its expiry, rather than choosing one by DTE, and
+  # whose named expiry is inside the expiry window or past it.
+  defp pinned_expiry_spent?(%{"expiry_selection" => "dte_target"}), do: false
+
+  defp pinned_expiry_spent?(%{"fixed_expiry" => expiry}) when is_binary(expiry),
+    do:
+      ContractMonitor.days_to_expiry(expiry) <=
+        ContractMonitor.execution_defaults().expiry_close_dte
+
+  defp pinned_expiry_spent?(_config), do: false
+
   defp release_underlyings(%StrategyVersion{target_pool_id: nil}), do: :ok
 
   defp release_underlyings(%StrategyVersion{} = version) do
