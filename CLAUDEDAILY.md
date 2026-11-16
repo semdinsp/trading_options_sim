@@ -9,7 +9,7 @@ paper-trading sim. It has two parts, run at different times:
   every batch and rollup job finished, then post the day's summary.
 
 Modelled on `../trading_system/CLAUDEDAILY.md`, but much smaller: this
-app has two cron jobs, no deploy batches, no replay screen and no shared
+app has three cron jobs, no deploy batches, no replay screen and no shared
 position cap.
 
 ## The three jobs
@@ -53,6 +53,7 @@ stops matching the app, fix the file in the same PR.
 | Time | What runs | Notes |
 |---|---|---|
 | 07:00 | `QuarantineEligibilityWorker` (Oban cron) | Counts yesterday's quarantine days, auto-promotes discovery → quarantine, auto-retires failing quarantine versions. |
+| 13:00 (weekdays) | `ContractRollWorker` (Oban cron) | Moves flat monitors whose contract is inside its expiry window (DTE ≤ 1) onto a fresh contract; deactivates a version whose pinned `fixed_expiry` is spent. |
 | 13:30 | US options market opens (EDT; 14:30 during EST) | |
 | ~19:49 | `EodCloser` flattens open positions | 11 min before each exchange's close. Versions with `overnight_hold: true` are exempt. |
 | 20:00 | Market closes (EDT; 21:00 during EST) | |
@@ -174,6 +175,7 @@ Repo.all(from j in Oban.Job, where: j.inserted_at > ago(36, "hour"),
 Expect, all `completed`:
 - yesterday's 21:00 `PerformanceSnapshotWorker`
 - today's 07:00 `QuarantineEligibilityWorker`
+- today's 13:00 `ContractRollWorker` (weekdays; if the routine runs before 13:00, yesterday's). Its log line says how many monitors it rolled and which versions it deactivated.
 
 | You see | Meaning | Do |
 |---|---|---|

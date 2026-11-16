@@ -3151,6 +3151,7 @@ defmodule TradingOptionsSim.Sim do
 
   @cron_workers [
     TradingOptionsSim.Sim.Workers.QuarantineEligibilityWorker,
+    TradingOptionsSim.Sim.Workers.ContractRollWorker,
     TradingOptionsSim.Sim.Workers.PerformanceSnapshotWorker
   ]
 
