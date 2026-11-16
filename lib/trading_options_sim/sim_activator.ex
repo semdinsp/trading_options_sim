@@ -234,6 +234,10 @@ defmodule TradingOptionsSim.SimActivator do
     a position; `EodCloser` closes those in the expiry window, and the
     next morning's run deactivates.
 
+  A version can roll earlier with `params["roll_at_dte"]`: a flat
+  monitor whose contract is that many days or fewer from expiry is
+  rolled too (see `roll_at_dte/1` for when it's honored).
+
   A monitor holding a position is never touched.
   """
   @spec roll_expiring(StrategyVersion.t()) ::
@@ -244,7 +248,12 @@ defmodule TradingOptionsSim.SimActivator do
       |> ContractMonitor.monitors_for_version()
       |> Enum.map(fn {symbol, pid} -> {symbol, pid, safe_snapshot(pid)} end)
 
-    stale = Enum.filter(monitors, fn {_symbol, _pid, snap} -> flat_and_expiring?(snap) end)
+    roll_at = roll_at_dte(version)
+
+    stale =
+      Enum.filter(monitors, fn {_symbol, _pid, snap} ->
+        flat_and_expiring?(snap) or flat_and_due?(snap, roll_at, version.option_leg_config)
+      end)
 
     cond do
       stale == [] ->
@@ -306,6 +315,41 @@ defmodule TradingOptionsSim.SimActivator do
        do: ContractMonitor.days_to_expiry(expiry) <= cutoff
 
   defp flat_and_expiring?(_snapshot), do: false
+
+  # params["roll_at_dte"]: roll a flat monitor earlier than the expiry
+  # window, once its contract is this many days or fewer from expiry
+  # (the contract-drift A/B, 2026-11-16: a 45-DTE monitor otherwise
+  # trades one contract down to 1 DTE). Honored only where re-resolving
+  # gives a contract further out: for dte_target configs when
+  # roll_at_dte < dte_target, for fixed configs only off a contract other
+  # than the pinned one. Otherwise it would roll onto the same contract
+  # every morning.
+  defp roll_at_dte(%StrategyVersion{params: %{"roll_at_dte" => n}, option_leg_config: config})
+       when is_integer(n) and n > 0 do
+    case config do
+      %{"expiry_selection" => "dte_target", "dte_target" => target}
+      when is_integer(target) and n < target ->
+        n
+
+      %{"fixed_expiry" => expiry} when is_binary(expiry) ->
+        n
+
+      _ ->
+        nil
+    end
+  end
+
+  defp roll_at_dte(_version), do: nil
+
+  defp flat_and_due?(_snapshot, nil, _config), do: false
+
+  defp flat_and_due?(%{expiry: expiry}, _roll_at, %{"fixed_expiry" => expiry}), do: false
+
+  defp flat_and_due?(%{position_open?: false, expiry: expiry}, roll_at, _config)
+       when is_binary(expiry),
+       do: ContractMonitor.days_to_expiry(expiry) <= roll_at
+
+  defp flat_and_due?(_snapshot, _roll_at, _config), do: false
 
   # A config that names its expiry, rather than choosing one by DTE, and
   # whose named expiry is inside the expiry window or past it.
