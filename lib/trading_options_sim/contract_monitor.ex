@@ -284,6 +284,9 @@ defmodule TradingOptionsSim.ContractMonitor do
     exit_state: %{},
     # Same warn-once shape for the staleness gate in evaluate_ibkr_live/2.
     stale_warned?: false,
+    # :stale / :underlying_gap while IBKR's model price can't be trusted
+    # for an entry (price_source/3); nil otherwise. Exits are unaffected.
+    entry_blocked_reason: nil,
     # True until resume_from_db/1 has read this contract's open run and
     # last exit from the database. Nothing trades while it is set.
     resume_pending?: true,
@@ -970,15 +973,33 @@ defmodule TradingOptionsSim.ContractMonitor do
             now = DateTime.utc_now()
             state = %{state | option_tick_at: tick[:at], quote_at: quote_received_at(tick)}
 
-            if fresh?(tick, now) do
-              tick = drop_stale_quote(tick, now)
-              snapshot = build_ibkr_live_snapshot(tick, spot, signal_values(state))
+            fresh? = fresh?(tick, now)
+            tick = drop_stale_quote(tick, now)
+            values = signal_values(state)
+            source = price_source(tick, fresh?, values["run_poly_last"])
 
-              %{state | stale_warned?: false, evaluated_at: now}
-              |> Map.put(:last_snapshot, snapshot)
-              |> maybe_transition_before_expiry(snapshot, dte)
-            else
-              warn_stale(state, tick[:at])
+            cond do
+              fresh? ->
+                snapshot = build_ibkr_live_snapshot(tick, spot, values, source)
+
+                %{state | stale_warned?: false, evaluated_at: now}
+                |> note_price_source(source)
+                |> Map.put(:last_snapshot, snapshot)
+                |> maybe_transition_before_expiry(snapshot, dte)
+
+              # A stale model with a fresh quote: exits keep running on
+              # the quote mid, entries stay blocked (trading_live PR #393).
+              source == {:quote_mid, :stale} and state.position_open? ->
+                snapshot = build_ibkr_live_snapshot(tick, spot, values, source)
+
+                state
+                |> warn_stale(tick[:at])
+                |> Map.put(:evaluated_at, now)
+                |> Map.put(:last_snapshot, snapshot)
+                |> maybe_transition_before_expiry(snapshot, dte)
+
+              true ->
+                warn_stale(state, tick[:at])
             end
         end
     end
@@ -1053,12 +1074,105 @@ defmodule TradingOptionsSim.ContractMonitor do
   def drop_stale_quote(%{quote: %{}} = tick, _now), do: %{tick | quote: nil}
   def drop_stale_quote(tick, _now), do: tick
 
+  # When IBKR's model price can't be trusted, mark at the quote mid.
+  #
+  # IBKR can keep sending model computations with fresh timestamps that
+  # were computed off a frozen underlying. On 2026-11-18 the SPY Jan-15
+  # 735 put's model ticks carried und_price 734.33 from about 14:52 to
+  # 17:20 UTC while SPY traded near 730. opt_price sat about 1.00 under
+  # the bid, and 73 sim entries that day had an und_price more than 0.3%
+  # from Polygon's last trade (-$1,523 net). Timestamps can't catch
+  # that, so the und_price is compared with the live underlying.
+  #
+  # Matches trading_live's OptionTicks.price_source/3 (its PR #393), so
+  # run_current_price and what's derived from it (run_lambda,
+  # run_premium_daily_vol) agree between the apps:
+  #
+  #   * {:quote_mid, :stale}: the model is stale (fresh?/2 false) and
+  #     there is a usable quote. Exits run on the mid; entries blocked.
+  #   * {:quote_mid, :outside_quote}: the model price is outside
+  #     [bid, ask]. Only the mark moves; entries are allowed, since the
+  #     sim found this on 72% of quoted entries on 2026-11-18.
+  #   * {:quote_mid | :model, :underlying_gap}: und_price is more than
+  #     0.3% from the live underlying. Entries blocked, with or without a
+  #     quote to mark at.
+  #   * {:model, nil}: use opt_price.
+  #
+  # `tick` must already have been through drop_stale_quote/2. A usable
+  # quote is bid > 0 and ask >= bid. A nil live underlying (Polygon
+  # stale or absent) skips the gap test.
+  @underlying_gap_pct 0.003
+
+  @doc false
+  def price_source(tick, fresh?, live_underlying) do
+    quote = Map.get(tick, :quote)
+    book? = usable_book?(quote)
+
+    cond do
+      book? and not fresh? -> {:quote_mid, :stale}
+      true -> off_book_source(tick, quote, book?, num(live_underlying))
+    end
+  end
+
+  defp off_book_source(tick, quote, book?, live) do
+    price = num(Map.get(tick, :price))
+    und = num(Map.get(tick, :underlying_price))
+
+    cond do
+      book? and is_float(price) and (price < num(quote.bid) or price > num(quote.ask)) ->
+        {:quote_mid, :outside_quote}
+
+      is_float(und) and is_float(live) and live > 0 and abs(und - live) / live > @underlying_gap_pct ->
+        {if(book?, do: :quote_mid, else: :model), :underlying_gap}
+
+      true ->
+        {:model, nil}
+    end
+  end
+
+  defp usable_book?(%{bid: bid, ask: ask}) do
+    bid = num(bid)
+    ask = num(ask)
+    is_float(bid) and is_float(ask) and bid > 0 and ask >= bid
+  end
+
+  defp usable_book?(_quote), do: false
+
+  @doc false
+  def mark_price(%{quote: %{bid: bid, ask: ask}}, {:quote_mid, _reason}),
+    do: Float.round((num(bid) + num(ask)) / 2, 4)
+
+  def mark_price(tick, _source), do: Map.get(tick, :price)
+
+  # Entries are blocked on a stale model or an underlying gap, never on
+  # an off-book price alone. Logged once per episode.
+  @doc false
+  def entry_blocking?({_, reason}), do: reason in [:stale, :underlying_gap]
+
+  defp note_price_source(state, {_, reason} = source) do
+    blocked = if entry_blocking?(source), do: reason
+
+    if blocked && Map.get(state, :entry_blocked_reason) != blocked do
+      Logger.info(
+        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+          "model price untrusted (#{blocked}); marking at the quote mid when there is one, entries blocked"
+      )
+    end
+
+    Map.put(state, :entry_blocked_reason, blocked)
+  end
+
+  defp num(n) when is_float(n), do: n
+  defp num(n) when is_integer(n), do: n * 1.0
+  defp num(%Decimal{} = d), do: Decimal.to_float(d)
+  defp num(_other), do: nil
+
   defp warn_stale(%{stale_warned?: true} = state, _at), do: state
 
   defp warn_stale(state, at) do
     Logger.warning(
       "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
-        "IBKR option data is stale (last tick at #{inspect(at)}); not evaluating until it refreshes"
+        "IBKR option data is stale (last tick at #{inspect(at)}); no entries until it refreshes (an open position exits on a fresh quote mid)"
     )
 
     %{state | stale_warned?: true}
@@ -1091,12 +1205,13 @@ defmodule TradingOptionsSim.ContractMonitor do
   # it's the more internally-consistent number for run_underlying_price.
   # Falls back to the stock tick's spot only if IBKR didn't send
   # und_price on this particular computation.
-  defp build_ibkr_live_snapshot(tick, spot, signal_values) do
+  defp build_ibkr_live_snapshot(tick, spot, signal_values, source) do
     quote_values = quote_values(Map.get(tick, :quote))
+    price = mark_price(tick, source)
 
     signal_values
     |> Map.merge(%{
-      "run_current_price" => tick.price,
+      "run_current_price" => price,
       "run_underlying_price" => tick.underlying_price || spot,
       "run_delta" => tick.delta,
       "run_gamma" => tick.gamma,
@@ -1107,7 +1222,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     |> Map.merge(quote_values)
     |> Map.merge(
       derived_values(
-        tick.price,
+        price,
         tick.underlying_price || spot,
         tick.delta,
         tick.theta,
@@ -1286,7 +1401,8 @@ defmodule TradingOptionsSim.ContractMonitor do
     now = DateTime.utc_now()
     state = track_entry_rule(state, RuleEngine.evaluate(state.entry_rule, snapshot), now)
 
-    if state.entry_true_since != nil and session_open?(state) and
+    if state.entry_true_since != nil and is_nil(Map.get(state, :entry_blocked_reason)) and
+         session_open?(state) and
          not closing_soon?(state) and entry_delay_elapsed?(state, now) and
          entry_confirmed?(state, now) and cooled_down?(state, now) do
       submit_entry(state, snapshot)
