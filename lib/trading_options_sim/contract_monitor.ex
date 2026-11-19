@@ -1122,7 +1122,8 @@ defmodule TradingOptionsSim.ContractMonitor do
       book? and is_float(price) and (price < num(quote.bid) or price > num(quote.ask)) ->
         {:quote_mid, :outside_quote}
 
-      is_float(und) and is_float(live) and live > 0 and abs(und - live) / live > @underlying_gap_pct ->
+      is_float(und) and is_float(live) and live > 0 and
+          abs(und - live) / live > @underlying_gap_pct ->
         {if(book?, do: :quote_mid, else: :model), :underlying_gap}
 
       true ->
@@ -1153,7 +1154,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     blocked = if entry_blocking?(source), do: reason
 
     if blocked && Map.get(state, :entry_blocked_reason) != blocked do
-      Logger.info(
+      Logger.warning(
         "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
           "model price untrusted (#{blocked}); marking at the quote mid when there is one, entries blocked"
       )

@@ -3024,4 +3024,195 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.get_sim_run!(run.id).status == "open"
     end
   end
+
+  # trading_live PR #393 parity (2026-11-18): IBKR sent SPY Jan-15 735P
+  # model ticks computed off a frozen underlying (und_price 734.33, SPY
+  # ~730.3) all morning, so opt_price sat ~1.00 under the bid.
+  describe "price_source/3 (mark at the quote mid when the model can't be trusted)" do
+    defp tick(price, und, quote) do
+      %{price: price, underlying_price: und, quote: quote}
+    end
+
+    @book %{bid: 5.0, ask: 5.5}
+
+    test "a healthy model inside the book is used as is" do
+      assert ContractMonitor.price_source(tick(5.2, 730.0, @book), true, 730.3) == {:model, nil}
+    end
+
+    # The gate must not fire on healthy input: a small und gap is normal.
+    test "an und_price within 0.3% of the live underlying is not a gap" do
+      assert ContractMonitor.price_source(tick(5.2, 730.0, @book), true, 731.5) == {:model, nil}
+    end
+
+    test "a model price outside the book marks at the mid without blocking entries" do
+      source = ContractMonitor.price_source(tick(4.2, 730.0, @book), true, 730.0)
+      assert source == {:quote_mid, :outside_quote}
+      refute ContractMonitor.entry_blocking?(source)
+      assert ContractMonitor.mark_price(tick(4.2, 730.0, @book), source) == 5.25
+    end
+
+    test "an und_price more than 0.3% off marks at the mid and blocks entries" do
+      source = ContractMonitor.price_source(tick(5.2, 734.33, @book), true, 730.3)
+      assert source == {:quote_mid, :underlying_gap}
+      assert ContractMonitor.entry_blocking?(source)
+    end
+
+    test "an und gap with no usable quote keeps the model price but still blocks entries" do
+      for quote <- [nil, %{bid: 0.0, ask: 5.5}, %{bid: 5.6, ask: 5.5}] do
+        source = ContractMonitor.price_source(tick(5.2, 734.33, quote), true, 730.3)
+        assert source == {:model, :underlying_gap}
+        assert ContractMonitor.entry_blocking?(source)
+        assert ContractMonitor.mark_price(tick(5.2, 734.33, quote), source) == 5.2
+      end
+    end
+
+    test "a stale model with a usable quote marks at the mid" do
+      assert ContractMonitor.price_source(tick(5.2, 730.0, @book), false, 730.0) ==
+               {:quote_mid, :stale}
+    end
+
+    test "a stale model with no quote is left to the staleness gate" do
+      assert ContractMonitor.price_source(tick(5.2, 730.0, nil), false, 730.0) == {:model, nil}
+    end
+
+    test "no live underlying skips the gap test" do
+      assert ContractMonitor.price_source(tick(5.2, 734.33, @book), true, nil) == {:model, nil}
+    end
+
+    test "a locked book (ask == bid) is usable, as in trading_live" do
+      assert ContractMonitor.price_source(tick(4.0, 730.0, %{bid: 5.0, ask: 5.0}), true, 730.0) ==
+               {:quote_mid, :outside_quote}
+    end
+  end
+
+  describe "mid marking on the :ibkr_live backend" do
+    defp polygon_trade(symbol, last) do
+      :ok = TradingOptionsSim.PolygonRelay.watch(symbol)
+
+      msg =
+        %{
+          type: :price,
+          source: :polygon,
+          symbol: symbol,
+          data: %{last: Decimal.new(last)},
+          metadata: %{source: "polygon.io", data_type: :ws_trade}
+        }
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(
+        TradingHub.PubSub,
+        TradingContract.Topics.prices_polygon(symbol),
+        msg
+      )
+
+      _ = TradingOptionsSim.PolygonRelay.watching()
+    end
+
+    test "an off-book model price enters, with run_current_price at the quote mid" do
+      {pid, run} = start_live("MID1", "MID1_OCC")
+      broadcast_aged("MID1_OCC", %{bid: 6.50, bid_size: 10}, 0)
+      broadcast_aged("MID1_OCC", %{ask: 7.00, ask_size: 10}, 0)
+      broadcast_aged("MID1_OCC", @greeks, 0)
+      sync(pid)
+      broadcast_underlying_price("MID1", 150.0)
+      sync(pid)
+
+      [fill] = Sim.list_sim_fills(run)
+      assert fill.pricing_snapshot["run_current_price"] == 6.75
+      assert fill.pricing_snapshot["fill_basis"] == "quote"
+    end
+
+    test "an und_price more than 0.3% from Polygon's last trade blocks the entry" do
+      {pid, run} = start_live("GAP1", "GAP1_OCC")
+      polygon_trade("GAP1", "149.00")
+      broadcast_aged("GAP1_OCC", @greeks, 0)
+      sync(pid)
+
+      log =
+        capture_log(fn ->
+          broadcast_underlying_price("GAP1", 149.0)
+          sync(pid)
+          broadcast_underlying_price("GAP1", 149.0)
+          sync(pid)
+        end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+      assert length(Regex.scan(~r/model price untrusted \(underlying_gap\)/, log)) == 1
+    end
+
+    test "entries resume once the und_price agrees with Polygon again" do
+      {pid, run} = start_live("GAP2", "GAP2_OCC")
+      polygon_trade("GAP2", "149.00")
+      broadcast_aged("GAP2_OCC", @greeks, 0)
+      sync(pid)
+
+      capture_log(fn ->
+        broadcast_underlying_price("GAP2", 149.0)
+        sync(pid)
+      end)
+
+      assert Sim.list_sim_fills(run) == []
+
+      broadcast_aged("GAP2_OCC", %{@greeks | und_price: 149.1}, 0)
+      sync(pid)
+      broadcast_underlying_price("GAP2", 149.0)
+      sync(pid)
+
+      assert [_fill] = Sim.list_sim_fills(run)
+    end
+
+    test "a stale model with a fresh quote still exits an open position on the mid" do
+      version =
+        version_fixture(%{
+          "entry" => %{"signal" => "run_underlying_price", "op" => "gt", "value" => 100},
+          "exit" => %{"signal" => "run_current_price", "op" => "gt", "value" => 8}
+        })
+
+      {pid, run} =
+        start_monitor(version, contract_key("STALEX"),
+          pricing_backend: :ibkr_live,
+          occ_symbol: "STALEX_OCC"
+        )
+
+      await_ibkr_live("STALEX_OCC")
+      broadcast_aged_typed("STALEX_OCC", :model_option, @greeks, 0)
+      sync(pid)
+      broadcast_underlying_price("STALEX", 150.0)
+      sync(pid)
+      assert ContractMonitor.snapshot(pid).position_open?
+
+      # The model goes stale (older than 3x the limit); a fresh quote keeps arriving.
+      broadcast_aged_typed("STALEX_OCC", :model_option, @greeks, 200_000)
+      broadcast_aged("STALEX_OCC", %{bid: 9.00, bid_size: 10}, 0)
+      broadcast_aged("STALEX_OCC", %{ask: 9.50, ask_size: 10}, 0)
+      sync(pid)
+
+      capture_log(fn ->
+        broadcast_underlying_price("STALEX", 150.0)
+        sync(pid)
+      end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      fills = Sim.list_sim_fills(run)
+      assert length(fills) == 2
+      assert List.last(fills).pricing_snapshot["run_current_price"] == 9.25
+    end
+
+    test "a stale model with a fresh quote does not enter" do
+      {pid, run} = start_live("STALEN", "STALEN_OCC")
+      broadcast_aged_typed("STALEN_OCC", :model_option, @greeks, 200_000)
+      broadcast_aged("STALEN_OCC", %{bid: 5.50, bid_size: 10}, 0)
+      broadcast_aged("STALEN_OCC", %{ask: 6.50, ask_size: 10}, 0)
+      sync(pid)
+
+      capture_log(fn ->
+        broadcast_underlying_price("STALEN", 150.0)
+        sync(pid)
+      end)
+
+      refute ContractMonitor.snapshot(pid).position_open?
+      assert Sim.list_sim_fills(run) == []
+    end
+  end
 end
