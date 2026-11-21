@@ -721,7 +721,9 @@ defmodule TradingOptionsSim.ContractMonitor do
       evaluated_at: state.evaluated_at,
       option_tick_at: state.option_tick_at,
       quote_at: state.quote_at,
-      max_tick_age_ms: max_tick_age_ms()
+      max_tick_age_ms: max_tick_age_ms(),
+      entry_blocked_reason: Map.get(state, :entry_blocked_reason),
+      entry_skips: Map.get(state, :entry_skips, %{})
     }
 
     {:reply, reply, state}
@@ -1102,6 +1104,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   # quote is bid > 0 and ask >= bid. A nil live underlying (Polygon
   # stale or absent) skips the gap test.
   @underlying_gap_pct 0.003
+  @blocked_warn_interval_ms 60_000
 
   @doc false
   def price_source(tick, fresh?, live_underlying) do
@@ -1146,22 +1149,80 @@ defmodule TradingOptionsSim.ContractMonitor do
   def mark_price(tick, _source), do: Map.get(tick, :price)
 
   # Entries are blocked on a stale model or an underlying gap, never on
-  # an off-book price alone. Logged once per episode.
+  # an off-book price alone. Logged when the block starts, at most once
+  # a minute per monitor: on 2026-11-19 the block switched on and off
+  # often enough to log about 41k warnings (over 1,000 on one CRWV
+  # monitor), since an off-book model price returns :outside_quote
+  # before the gap test runs (off_book_source/4), so a monitor with a
+  # large gap alternates between blocked and not as the model price
+  # moves in and out of the quote.
   @doc false
   def entry_blocking?({_, reason}), do: reason in [:stale, :underlying_gap]
 
   defp note_price_source(state, {_, reason} = source) do
     blocked = if entry_blocking?(source), do: reason
 
-    if blocked && Map.get(state, :entry_blocked_reason) != blocked do
-      Logger.warning(
-        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
-          "model price untrusted (#{blocked}); marking at the quote mid when there is one, entries blocked"
-      )
-    end
+    now = System.monotonic_time(:millisecond)
+    warned_at = Map.get(state, :blocked_warned_at)
+
+    state =
+      if blocked && Map.get(state, :entry_blocked_reason) != blocked &&
+           (is_nil(warned_at) or now - warned_at >= @blocked_warn_interval_ms) do
+        Logger.warning(
+          "ContractMonitor: #{contract_label(state)} " <>
+            "model price untrusted (#{blocked}); marking at the quote mid when there is one, entries blocked " <>
+            "(entries skipped so far: #{inspect(Map.get(state, :entry_skips, %{}))})"
+        )
+
+        Map.put(state, :blocked_warned_at, now)
+      else
+        state
+      end
 
     Map.put(state, :entry_blocked_reason, blocked)
   end
+
+  # Counts entries the price-source block held back, without changing
+  # whether anything trades. One count per entry signal (entry_true_since
+  # episode), not per tick: `reason` counts episodes that were ready to
+  # enter but blocked, and :entered_after_block counts how many of those
+  # entered later in the same episode once the block lifted. The rest
+  # were skipped outright. Read with snapshot/1 over RPC; resets when the
+  # monitor restarts. Map.get/put so a hot reload doesn't crash running
+  # monitors whose struct predates these fields.
+  defp note_entry_skip(state, reason, snapshot) do
+    if Map.get(state, :entry_skipped_since) == state.entry_true_since do
+      state
+    else
+      Logger.info(
+        "ContractMonitor: #{contract_label(state)} entry skipped (#{reason}); " <>
+          "und_price #{inspect(snapshot["run_underlying_price"])}, live #{inspect(snapshot["run_poly_last"])}"
+      )
+
+      state
+      |> Map.put(:entry_skipped_since, state.entry_true_since)
+      |> Map.update(:entry_skips, %{reason => 1}, &Map.update(&1, reason, 1, fn n -> n + 1 end))
+    end
+  end
+
+  defp note_entry_after_block(state) do
+    since = Map.get(state, :entry_skipped_since)
+
+    if since != nil and since == state.entry_true_since do
+      state
+      |> Map.put(:entry_skipped_since, nil)
+      |> Map.update(
+        :entry_skips,
+        %{entered_after_block: 1},
+        &Map.update(&1, :entered_after_block, 1, fn n -> n + 1 end)
+      )
+    else
+      state
+    end
+  end
+
+  defp contract_label(state),
+    do: "#{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right}"
 
   defp num(n) when is_float(n), do: n
   defp num(n) when is_integer(n), do: n * 1.0
@@ -1402,13 +1463,15 @@ defmodule TradingOptionsSim.ContractMonitor do
     now = DateTime.utc_now()
     state = track_entry_rule(state, RuleEngine.evaluate(state.entry_rule, snapshot), now)
 
-    if state.entry_true_since != nil and is_nil(Map.get(state, :entry_blocked_reason)) and
-         session_open?(state) and
-         not closing_soon?(state) and entry_delay_elapsed?(state, now) and
-         entry_confirmed?(state, now) and cooled_down?(state, now) do
-      submit_entry(state, snapshot)
-    else
-      state
+    ready? =
+      state.entry_true_since != nil and session_open?(state) and
+        not closing_soon?(state) and entry_delay_elapsed?(state, now) and
+        entry_confirmed?(state, now) and cooled_down?(state, now)
+
+    case {ready?, Map.get(state, :entry_blocked_reason)} do
+      {true, nil} -> state |> note_entry_after_block() |> submit_entry(snapshot)
+      {true, reason} -> note_entry_skip(state, reason, snapshot)
+      _ -> state
     end
   end
 

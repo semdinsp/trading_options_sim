@@ -3160,6 +3160,43 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       sync(pid)
 
       assert [_fill] = Sim.list_sim_fills(run)
+      assert ContractMonitor.snapshot(pid).entry_skips == %{underlying_gap: 1, entered_after_block: 1}
+    end
+
+    test "a blocked entry is counted once per entry signal, not per tick" do
+      {pid, _run} = start_live("GAP3", "GAP3_OCC")
+      polygon_trade("GAP3", "149.00")
+      broadcast_aged("GAP3_OCC", @greeks, 0)
+      sync(pid)
+
+      capture_log(fn ->
+        for _ <- 1..3 do
+          broadcast_underlying_price("GAP3", 149.0)
+          sync(pid)
+        end
+      end)
+
+      snap = ContractMonitor.snapshot(pid)
+      assert snap.entry_blocked_reason == :underlying_gap
+      assert snap.entry_skips == %{underlying_gap: 1}
+    end
+
+    test "the block warning is logged at most once a minute when the block flickers" do
+      {pid, _run} = start_live("GAP4", "GAP4_OCC")
+      polygon_trade("GAP4", "149.00")
+
+      log =
+        capture_log(fn ->
+          for und <- [150.0, 149.1, 150.0, 149.1, 150.0] do
+            broadcast_aged("GAP4_OCC", %{@greeks | und_price: und}, 0)
+            sync(pid)
+            broadcast_underlying_price("GAP4", 149.0)
+            sync(pid)
+          end
+        end)
+
+      assert ContractMonitor.snapshot(pid).entry_blocked_reason == :underlying_gap
+      assert length(Regex.scan(~r/model price untrusted \(underlying_gap\)/, log)) == 1
     end
 
     test "a stale model with a fresh quote still exits an open position on the mid" do
