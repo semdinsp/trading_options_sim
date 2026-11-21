@@ -161,6 +161,47 @@ defmodule TradingOptionsSim.SimTest do
       assert downgraded.lifecycle_stage == "quarantine"
     end
 
+    test "retiring an active version by hand deactivates it" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+
+      assert version.id in Enum.map(Sim.list_active_strategy_versions(), & &1.id)
+
+      {:ok, retired} = Sim.downgrade_strategy_version(version, "retired")
+
+      assert retired.lifecycle_stage == "retired"
+      assert %DateTime{} = retired.deactivated_at
+      refute is_nil(retired.activated_at)
+      assert Sim.get_strategy_version!(version.id).deactivated_at == retired.deactivated_at
+    end
+
+    test "retiring an already-deactivated version keeps its deactivated_at" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+      {:ok, version} = Sim.mark_activated(version)
+      earlier = ~U[2026-11-01 12:00:00Z]
+
+      {:ok, version} =
+        version
+        |> Ecto.Changeset.change(deactivated_at: earlier)
+        |> TradingOptionsSim.Repo.update()
+
+      {:ok, retired} = Sim.downgrade_strategy_version(version, "retired")
+
+      assert retired.deactivated_at == earlier
+    end
+
+    test "retiring a never-activated version leaves it unactivated" do
+      strategy = strategy_fixture()
+      version = version_fixture(strategy)
+
+      {:ok, retired} = Sim.downgrade_strategy_version(version, "retired")
+
+      assert is_nil(retired.activated_at)
+      assert is_nil(retired.deactivated_at)
+    end
+
     test "retired -> quarantine is an invalid transition" do
       strategy = strategy_fixture()
       version = version_fixture(strategy)
@@ -655,14 +696,18 @@ defmodule TradingOptionsSim.SimTest do
       refute deactivated_version.id in active_ids
     end
 
-    # downgrade_strategy_version/3 only flips lifecycle_stage — it does
-    # not itself deactivate — so a version retired without first being
-    # deactivated would otherwise still look "active" here.
+    # A retired row left with deactivated_at nil (retired before
+    # downgrade_strategy_version/3 deactivated, as three were until
+    # 2026-11-20) must still not count as active.
     test "excludes a retired version even if never explicitly deactivated" do
       strategy = strategy_fixture()
       version = version_fixture(strategy)
       {:ok, version} = Sim.mark_activated(version)
-      {:ok, retired} = Sim.downgrade_strategy_version(version, "retired")
+
+      {:ok, retired} =
+        version
+        |> Ecto.Changeset.change(lifecycle_stage: "retired")
+        |> TradingOptionsSim.Repo.update()
 
       refute is_nil(retired.activated_at)
       assert is_nil(retired.deactivated_at)

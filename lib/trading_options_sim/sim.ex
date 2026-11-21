@@ -445,6 +445,13 @@ defmodule TradingOptionsSim.Sim do
   or `"quarantine"` from `"test_portfolio"`). `reason` is one of
   `StrategyVersion.retired_reasons/0`, only meaningful for a `"retired"`
   transition.
+
+  Retiring an active version deactivates it first
+  (`SimActivator.deactivate/1`: stops its monitors, flattening any open
+  position), so a retired version never keeps trading. Every caller gets
+  this: the Retire buttons, the API `downgrade` endpoint, the MCP
+  `downgrade_version` tool, the quarantine job and `LifecycleReview`.
+  A version that is already deactivated keeps its `deactivated_at`.
   """
   @spec downgrade_strategy_version(StrategyVersion.t(), String.t(), String.t()) ::
           {:ok, StrategyVersion.t()}
@@ -458,6 +465,8 @@ defmodule TradingOptionsSim.Sim do
         reason
       )
       when stage in ["discovery", "quarantine", "test_portfolio"] do
+    version = deactivate_if_active(version)
+
     version
     |> StrategyVersion.lifecycle_stage_changeset(%{
       "lifecycle_stage" => "retired",
@@ -479,6 +488,24 @@ defmodule TradingOptionsSim.Sim do
   def downgrade_strategy_version(%StrategyVersion{}, to, _reason)
       when to in ["quarantine", "retired"] do
     {:error, :invalid_transition}
+  end
+
+  # Manual retirement (Retire buttons, API, MCP) used to change only the
+  # stage, leaving the version's monitors trading until someone
+  # deactivated it by hand. Reads activation from the database, since a
+  # caller may pass a stale struct. Also deactivates a version marked
+  # deactivated that still has running monitors, as the quarantine job
+  # and LifecycleReview did when they called deactivate unconditionally.
+  defp deactivate_if_active(%StrategyVersion{id: id} = version) do
+    current = get_strategy_version!(id)
+    active? = current.activated_at && is_nil(current.deactivated_at)
+
+    if active? || TradingOptionsSim.ContractMonitor.monitors_for_version(id) != [] do
+      {:ok, _count} = TradingOptionsSim.SimActivator.deactivate(current)
+      get_strategy_version!(id)
+    else
+      %{version | activated_at: current.activated_at, deactivated_at: current.deactivated_at}
+    end
   end
 
   @doc """
@@ -745,15 +772,12 @@ defmodule TradingOptionsSim.Sim do
 
     retired =
       Enum.map(failing_ids, fn version_id ->
-        # Stop the monitors first (flattening any open position), as
-        # LifecycleReview.retire/1 does: downgrade_strategy_version/3 only
-        # changes the stage. Without this, 01a11669-f009 (retired at 07:00
-        # on 2026-11-06) kept trading all day, and the restart that
-        # evening left two of its positions open with no monitor, since
-        # the reactivator skips retired versions.
-        {:ok, _count} =
-          TradingOptionsSim.SimActivator.deactivate(get_strategy_version!(version_id))
-
+        # downgrade_strategy_version/3 deactivates the version first
+        # (stopping its monitors and flattening any open position).
+        # Before #165, 01a11669-f009 (retired at 07:00 on 2026-11-06) kept
+        # trading all day, and the restart that evening left two of its
+        # positions open with no monitor, since the reactivator skips
+        # retired versions.
         version = get_strategy_version!(version_id)
 
         {:ok, retired_version} =
