@@ -158,11 +158,9 @@ defmodule TradingOptionsSim.LifecycleReview do
 
   defp apply_action(%{action: :retire} = a), do: retire(a.version)
 
-  # Stop the monitors first (flattening any open position), then retire:
-  # downgrade_strategy_version/3 only changes the stage.
+  # downgrade_strategy_version/3 stops the monitors first (flattening
+  # any open position), then retires.
   defp retire(version) do
-    {:ok, _count} = SimActivator.deactivate(Sim.get_strategy_version!(version.id))
-
     case Sim.downgrade_strategy_version(
            Sim.get_strategy_version!(version.id),
            "retired",
