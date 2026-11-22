@@ -25,6 +25,14 @@ defmodule TradingOptionsSim.LifecycleReview do
   "lifecycle_review"`), with or without a fork. A quarantine loser with no
   profitable regime is retired by `Sim`'s job 3 instead.
 
+  Kept for a regime edge (2026-11-21, shared rule with trading_system
+  and trading_live): before anything else, a loser with a proven edge in
+  one regime (`TradingOptionsSim.RegimeEdge` via `Sim.regime_edge/1`: a
+  `regime_label` bucket with 20+ closes over 10+ sessions whose
+  Bonferroni-corrected, session-clustered lower bound on mean R is above
+  0) is left alone, with action `:kept_for_regime_edge` and the edge in
+  `regime_edge`. Neither forked nor retired.
+
   Retired rather than deactivated since 2026-10-08 (user decision): a
   deactivated loser stayed on /candidates and in the leaderboards though
   nobody would revisit it. Retirement keeps every run and is reversible
@@ -44,7 +52,7 @@ defmodule TradingOptionsSim.LifecycleReview do
   require Logger
   import Ecto.Query
 
-  alias TradingOptionsSim.{Repo, Sim, SimActivator}
+  alias TradingOptionsSim.{RegimeEdge, Repo, Sim, SimActivator}
   alias TradingOptionsSim.Sim.{SimRun, Strategy, StrategyVersion}
 
   @min_trades 30
@@ -59,9 +67,9 @@ defmodule TradingOptionsSim.LifecycleReview do
 
   @doc """
   Reviews every loser and returns the planned (or taken) actions:
-  `[%{version_id, name, stage, action, cell, stats}]`, where `action` is
-  `:fork_and_retire`, `:retire`, or (dry run) the same atom
-  marked as not applied. `opts[:mode]` overrides the configured mode.
+  `[%{version_id, name, stage, action, cell, stats, regime_edge}]`, where
+  `action` is `:kept_for_regime_edge`, `:fork_and_retire` or `:retire`,
+  and `applied` says whether it was carried out (false on a dry run). `opts[:mode]` overrides the configured mode.
   """
   @spec run(keyword()) :: [map()]
   def run(opts \\ []) do
@@ -72,13 +80,23 @@ defmodule TradingOptionsSim.LifecycleReview do
         Application.get_env(:trading_options_sim, :lifecycle_review_mode, :dry_run)
       )
 
-    actions = Enum.map(losers(), &plan/1)
+    losers = losers()
+    edges = Sim.regime_edge(Enum.map(losers, fn {v, _name, _stats} -> v.id end))
+    actions = Enum.map(losers, &plan(&1, Map.get(edges, elem(&1, 0).id)))
 
     if mode == :apply, do: Enum.each(actions, &apply_action/1)
 
+    for %{action: :kept_for_regime_edge} = a <- actions do
+      Logger.info(
+        "LifecycleReview: kept_for_regime_edge #{a.version_id} (#{a.name}): " <>
+          RegimeEdge.describe(hd(a.regime_edge.edges))
+      )
+    end
+
     Logger.info(
       "LifecycleReview (#{mode}): #{Enum.count(actions, &(&1.action == :fork_and_retire))} regime forks, " <>
-        "#{length(actions)} retirements"
+        "#{Enum.count(actions, &(&1.action != :kept_for_regime_edge))} retirements, " <>
+        "#{Enum.count(actions, &(&1.action == :kept_for_regime_edge))} kept for a regime edge"
     )
 
     Enum.map(actions, &Map.put(&1, :applied, mode == :apply))
@@ -134,11 +152,15 @@ defmodule TradingOptionsSim.LifecycleReview do
     |> Enum.map(fn {v, name} -> {v, name, stats[v.id]} end)
   end
 
-  defp plan({version, name, stats}) do
+  defp plan({version, name, stats}, edge) do
     cell = Sim.best_regime_cell(version.id)
 
     action =
-      if cell != nil and not regime_gated?(version), do: :fork_and_retire, else: :retire
+      cond do
+        match?(%{has_edge: true}, edge) -> :kept_for_regime_edge
+        cell != nil and not regime_gated?(version) -> :fork_and_retire
+        true -> :retire
+      end
 
     %{
       version_id: version.id,
@@ -147,6 +169,7 @@ defmodule TradingOptionsSim.LifecycleReview do
       action: action,
       cell: cell,
       stats: stats,
+      regime_edge: edge,
       version: version
     }
   end
@@ -157,6 +180,7 @@ defmodule TradingOptionsSim.LifecycleReview do
   end
 
   defp apply_action(%{action: :retire} = a), do: retire(a.version)
+  defp apply_action(%{action: :kept_for_regime_edge}), do: :ok
 
   # downgrade_strategy_version/3 stops the monitors first (flattening
   # any open position), then retires.
