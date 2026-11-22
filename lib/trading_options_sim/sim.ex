@@ -8,7 +8,7 @@ defmodule TradingOptionsSim.Sim do
 
   require Logger
 
-  alias TradingOptionsSim.Repo
+  alias TradingOptionsSim.{RegimeEdge, Repo}
 
   alias TradingOptionsSim.Sim.{
     ApiToken,
@@ -769,6 +769,21 @@ defmodule TradingOptionsSim.Sim do
         enough_trading_days_to_retire?(version_id) and quarantine_failing?(version_id) and
           is_nil(best_regime_cell(version_id))
       end)
+
+    # A version with a proven edge in one regime (RegimeEdge: corrected
+    # session-clustered lower bound > 0) is kept, not retired. Shared rule
+    # with trading_system and trading_live, 2026-11-21.
+    edges = regime_edge(failing_ids)
+
+    {kept, failing_ids} =
+      Enum.split_with(failing_ids, &match?(%{has_edge: true}, Map.get(edges, &1)))
+
+    for id <- kept do
+      Logger.info(
+        "Quarantine job 3: kept_for_regime_edge #{id}: " <>
+          RegimeEdge.describe(hd(edges[id].edges))
+      )
+    end
 
     retired =
       Enum.map(failing_ids, fn version_id ->
@@ -2293,6 +2308,105 @@ defmodule TradingOptionsSim.Sim do
       lcb90: lcb,
       realized_pnl_net: row.realized_pnl_net,
       win_rate: row.wins / row.n
+    }
+  end
+
+  @doc """
+  The regime-edge test (`TradingOptionsSim.RegimeEdge`) for each of
+  `version_ids`, over each version's whole life. Computed on demand,
+  never stored: the numbers move daily.
+
+  Population and R are the metrics' own (`scored/1`, `r_multiple/1`):
+  net P&L over premium at risk, churn and excluded runs out. A session
+  is the UTC ENTRY date (trading_system's grain for this test; the
+  regime label is also stamped at entry).
+
+  Returns `%{version_id => %{version_id, has_edge, label_basis: "entry",
+  r_basis: "net", window: %{start, end}, overall, k, edges, buckets}}`.
+  `overall` is the same per-session statistic over every regime. A
+  version with no scored runs is absent.
+  """
+  @spec regime_edge([String.t()]) :: %{String.t() => map()}
+  def regime_edge([]), do: %{}
+
+  def regime_edge(version_ids) do
+    SimRun
+    |> where([r], r.strategy_version_id in ^version_ids)
+    |> scored()
+    |> group_by([r], [
+      r.strategy_version_id,
+      fragment("COALESCE(?->>'regime_label', 'uncategorized')", r.context),
+      fragment("(? AT TIME ZONE 'UTC')::date", r.entry_at)
+    ])
+    |> select([r], %{
+      strategy_version_id: r.strategy_version_id,
+      regime_label: fragment("COALESCE(?->>'regime_label', 'uncategorized')", r.context),
+      day: fragment("(? AT TIME ZONE 'UTC')::date", r.entry_at),
+      n: count(r.id),
+      mean_r: avg(r_multiple(r))
+    })
+    |> Repo.all()
+    |> Enum.group_by(& &1.strategy_version_id)
+    |> Map.new(fn {version_id, rows} -> {version_id, regime_edge_row(version_id, rows)} end)
+  end
+
+  defp regime_edge_row(version_id, rows) do
+    result =
+      rows
+      |> Enum.group_by(& &1.regime_label)
+      |> Enum.map(fn {label, days} -> session_stats(days) |> Map.put(:regime_label, label) end)
+      |> RegimeEdge.evaluate()
+
+    overall =
+      rows
+      |> Enum.group_by(& &1.day)
+      |> Enum.map(fn {_day, rs} ->
+        n = rs |> Enum.map(& &1.n) |> Enum.sum()
+        %{n: n, mean_r: Enum.reduce(rs, 0.0, &(&2 + to_float(&1.mean_r) * &1.n)) / n}
+      end)
+      |> session_stats()
+
+    days = Enum.map(rows, & &1.day)
+
+    %{
+      version_id: version_id,
+      has_edge: result.has_edge,
+      label_basis: "entry",
+      r_basis: "net",
+      window: %{start: Enum.min(days, Date), end: Enum.max(days, Date)},
+      overall: overall,
+      k: result.k,
+      edges: result.edges,
+      buckets: result.buckets
+    }
+  end
+
+  @doc "The ids among `version_ids` with a regime edge (see `regime_edge/1`)."
+  @spec regime_edge_version_ids([String.t()]) :: MapSet.t(String.t())
+  def regime_edge_version_ids(version_ids) do
+    version_ids
+    |> regime_edge()
+    |> Enum.filter(fn {_id, r} -> r.has_edge end)
+    |> MapSet.new(fn {id, _r} -> id end)
+  end
+
+  # Per-session rows (`%{n, mean_r}`) -> closes, sessions, and the mean
+  # and sample sd of the session means.
+  defp session_stats(days) do
+    means = Enum.map(days, &to_float(&1.mean_r))
+    s = length(means)
+    mean = Enum.sum(means) / s
+
+    sd =
+      if s >= 2,
+        do: :math.sqrt(Enum.reduce(means, 0.0, &(&2 + (&1 - mean) ** 2)) / (s - 1)),
+        else: nil
+
+    %{
+      n_closes: days |> Enum.map(& &1.n) |> Enum.sum(),
+      n_sessions: s,
+      mean_session_r: mean,
+      sd_session_r: sd
     }
   end
 

@@ -9,7 +9,14 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "strategies:read"]
-       when action in [:index, :show, :metrics, :promotion_export, :expectancy_by_regime]
+       when action in [
+              :index,
+              :show,
+              :metrics,
+              :promotion_export,
+              :expectancy_by_regime,
+              :regime_edge
+            ]
 
   plug TradingOptionsSimWeb.ApiAuthPlug,
        [scope: "strategies:write"]
@@ -120,6 +127,39 @@ defmodule TradingOptionsSimWeb.Api.StrategyVersionController do
 
       {:error, :invalid_stage} ->
         conn |> put_status(:unprocessable_entity) |> json(%{"error" => "invalid_stage"})
+    end
+  end
+
+  @doc """
+  GET /api/v1/versions/:id/regime_edge
+
+  `Sim.regime_edge/1` for one version: whether it has a proven edge in
+  one regime (the rule shared with trading_system and trading_live; see
+  `TradingOptionsSim.RegimeEdge`), computed on demand over its whole
+  life. trading_live reads it at promotion review. A version with no
+  scored runs gets `has_edge: false` and empty lists. 404 for an
+  unknown id.
+  """
+  def regime_edge(conn, %{"id" => id}) do
+    with {:ok, uuid} <- Ecto.UUID.cast(id),
+         %TradingOptionsSim.Sim.StrategyVersion{} <-
+           TradingOptionsSim.Repo.get(TradingOptionsSim.Sim.StrategyVersion, uuid) do
+      result =
+        Map.get(Sim.regime_edge([uuid]), uuid, %{
+          version_id: uuid,
+          has_edge: false,
+          label_basis: "entry",
+          r_basis: "net",
+          window: nil,
+          overall: nil,
+          k: 0,
+          edges: [],
+          buckets: []
+        })
+
+      json(conn, result)
+    else
+      _ -> conn |> put_status(:not_found) |> json(%{"error" => "not_found"})
     end
   end
 
