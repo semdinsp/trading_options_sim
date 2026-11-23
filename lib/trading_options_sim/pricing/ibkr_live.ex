@@ -45,7 +45,7 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
 
   On `init/1`, subscribes for real via
   `TradingHub.MarketData.Manager.subscribe_symbol/3` (over
-  `IbPortfolio.HubClient.call_hub/5`), using `occ_symbol` itself as the
+  `IbPortfolio.HubClient.call_hub/5`), using `caller_tag/1` (`"trading_options_sim:<occ_symbol>"`) as the
   `caller` tag — this is what makes this shared-per-contract listener
   safe even when trading_hub's own subscription refcounting is keyed by
   `{symbol, caller}` and not per-`ContractMonitor`: every
@@ -404,8 +404,22 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
 
   def terminate(_reason, _state), do: :ok
 
-  @doc false
-  def caller_tag(occ_symbol), do: occ_symbol
+  @doc """
+  The caller tag this listener subscribes under on trading_hub:
+  `"trading_options_sim:<occ_symbol>"`. Still one tag per contract (this
+  process is the contract's only owner), but prefixed with the app name so
+  trading_hub's line report can say who holds the line. Until 2026-11-23
+  the tag was the bare OCC symbol, which the hub reported as "untagged".
+  """
+  def caller_tag(occ_symbol), do: "trading_options_sim:" <> occ_symbol
+
+  @doc """
+  The pre-2026-11-23 tag (the bare OCC symbol). Released after every
+  successful subscribe under `caller_tag/1`, so a line subscribed by an
+  older build is handed over to the new tag instead of leaking. Releasing
+  a tag the hub doesn't hold is a no-op there.
+  """
+  def legacy_caller_tag(occ_symbol), do: occ_symbol
 
   # Every failure log includes the contract map that was sent, so a
   # rejected or failed subscribe can be diagnosed from the log alone.
@@ -418,6 +432,9 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
            5_000
          ) do
       {:ok, :ok} ->
+        # New tag first, then release the old one: the hub's refcount
+        # never reaches zero in between, so the line stays up.
+        unsubscribe_from_hub(occ_symbol, legacy_caller_tag(occ_symbol))
         :ok
 
       {:ok, {:error, reason}} ->
@@ -457,12 +474,12 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   # differently; a leaked subscription from a genuinely dropped node is
   # an accepted, already-documented risk, not one this call can fully
   # close on its own).
-  defp unsubscribe_from_hub(occ_symbol) do
+  defp unsubscribe_from_hub(occ_symbol, tag \\ nil) do
     case IbPortfolio.HubClient.call_hub(
            TradingOptionsSim.HubClient,
            TradingHub.MarketData.Manager,
            :unsubscribe_symbol,
-           [occ_symbol, caller_tag(occ_symbol)],
+           [occ_symbol, tag || caller_tag(occ_symbol)],
            5_000
          ) do
       {:ok, _result} ->
