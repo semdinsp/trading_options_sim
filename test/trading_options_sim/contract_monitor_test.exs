@@ -3079,6 +3079,36 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert ContractMonitor.price_source(tick(5.2, 734.33, @book), true, nil) == {:model, nil}
     end
 
+    # trading_live PR #405 (2026-11-23): IBKR froze the SPY chain's model
+    # at und_price 723.84 with SPY ~726.40. The gap must win over an
+    # off-book price, or the reason flips as the model crosses the bid.
+    test "an underlying gap wins over an off-book model price" do
+      t = tick(18.42, 723.84, %{bid: 18.70, ask: 18.95})
+      source = ContractMonitor.price_source(t, true, 726.40)
+      assert source == {:quote_mid, :underlying_gap}
+      assert ContractMonitor.entry_blocking?(source)
+      assert ContractMonitor.mark_price(t, source) == 18.825
+
+      inside = tick(18.42, 723.84, %{bid: 18.30, ask: 18.60})
+      assert ContractMonitor.price_source(inside, true, 726.40) == {:quote_mid, :underlying_gap}
+    end
+
+    test "without a gap, the 11-23 ticks classify as before" do
+      assert ContractMonitor.price_source(
+               tick(18.42, 723.84, %{bid: 18.70, ask: 18.95}),
+               true,
+               724.0
+             ) ==
+               {:quote_mid, :outside_quote}
+
+      assert ContractMonitor.price_source(
+               tick(18.42, 723.84, %{bid: 18.30, ask: 18.60}),
+               true,
+               724.0
+             ) ==
+               {:model, nil}
+    end
+
     test "a locked book (ask == bid) is usable, as in trading_live" do
       assert ContractMonitor.price_source(tick(4.0, 730.0, %{bid: 5.0, ask: 5.0}), true, 730.0) ==
                {:quote_mid, :outside_quote}
@@ -3141,6 +3171,28 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert length(Regex.scan(~r/model price untrusted \(underlying_gap\)/, log)) == 1
     end
 
+    # trading_live PR #405: a frozen model that is both off the
+    # underlying and below the bid must block the entry, not slip through
+    # as :outside_quote.
+    test "a frozen model below the bid with an und gap blocks the entry" do
+      {pid, run} = start_live("GAP5", "GAP5_OCC")
+      polygon_trade("GAP5", "726.40")
+      broadcast_aged("GAP5_OCC", %{bid: 11.55, bid_size: 10}, 0)
+      broadcast_aged("GAP5_OCC", %{ask: 11.75, ask_size: 10}, 0)
+      broadcast_aged("GAP5_OCC", %{@greeks | opt_price: 11.5, und_price: 723.84}, 0)
+      sync(pid)
+
+      capture_log(fn ->
+        broadcast_underlying_price("GAP5", 726.40)
+        sync(pid)
+      end)
+
+      snap = ContractMonitor.snapshot(pid)
+      refute snap.position_open?
+      assert snap.entry_blocked_reason == :underlying_gap
+      assert Sim.list_sim_fills(run) == []
+    end
+
     test "entries resume once the und_price agrees with Polygon again" do
       {pid, run} = start_live("GAP2", "GAP2_OCC")
       polygon_trade("GAP2", "149.00")
@@ -3160,7 +3212,11 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       sync(pid)
 
       assert [_fill] = Sim.list_sim_fills(run)
-      assert ContractMonitor.snapshot(pid).entry_skips == %{underlying_gap: 1, entered_after_block: 1}
+
+      assert ContractMonitor.snapshot(pid).entry_skips == %{
+               underlying_gap: 1,
+               entered_after_block: 1
+             }
     end
 
     test "a blocked entry is counted once per entry signal, not per tick" do
