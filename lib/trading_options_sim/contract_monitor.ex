@@ -1092,12 +1092,14 @@ defmodule TradingOptionsSim.ContractMonitor do
   #
   #   * {:quote_mid, :stale}: the model is stale (fresh?/2 false) and
   #     there is a usable quote. Exits run on the mid; entries blocked.
-  #   * {:quote_mid, :outside_quote}: the model price is outside
-  #     [bid, ask]. Only the mark moves; entries are allowed, since the
-  #     sim found this on 72% of quoted entries on 2026-11-18.
   #   * {:quote_mid | :model, :underlying_gap}: und_price is more than
   #     0.3% from the live underlying. Entries blocked, with or without a
-  #     quote to mark at.
+  #     quote to mark at. Takes precedence over :outside_quote (trading_live
+  #     PR #405).
+  #   * {:quote_mid, :outside_quote}: the model price is outside
+  #     [bid, ask] and the und_price agrees with the live underlying. Only
+  #     the mark moves; entries are allowed, since the sim found this on
+  #     72% of quoted entries on 2026-11-18.
   #   * {:model, nil}: use opt_price.
   #
   # `tick` must already have been through drop_stale_quote/2. A usable
@@ -1121,13 +1123,19 @@ defmodule TradingOptionsSim.ContractMonitor do
     price = num(Map.get(tick, :price))
     und = num(Map.get(tick, :underlying_price))
 
+    # The gap test runs first so an underlying gap always wins: checked
+    # second, a frozen model price drifting in and out of the book
+    # flipped the reason between :underlying_gap (blocks entries) and
+    # :outside_quote (doesn't) every few seconds. trading_live let a live
+    # SPY 715P entry through on one such flip on 2026-11-23 and fixed the
+    # order in its PR #405; this matches it.
     cond do
-      book? and is_float(price) and (price < num(quote.bid) or price > num(quote.ask)) ->
-        {:quote_mid, :outside_quote}
-
       is_float(und) and is_float(live) and live > 0 and
           abs(und - live) / live > @underlying_gap_pct ->
         {if(book?, do: :quote_mid, else: :model), :underlying_gap}
+
+      book? and is_float(price) and (price < num(quote.bid) or price > num(quote.ask)) ->
+        {:quote_mid, :outside_quote}
 
       true ->
         {:model, nil}
@@ -1152,10 +1160,9 @@ defmodule TradingOptionsSim.ContractMonitor do
   # an off-book price alone. Logged when the block starts, at most once
   # a minute per monitor: on 2026-11-19 the block switched on and off
   # often enough to log about 41k warnings (over 1,000 on one CRWV
-  # monitor), since an off-book model price returns :outside_quote
-  # before the gap test runs (off_book_source/4), so a monitor with a
-  # large gap alternates between blocked and not as the model price
-  # moves in and out of the quote.
+  # monitor), because :outside_quote was then tested before the gap.
+  # The gap now wins (off_book_source/4), but the limit stays for a
+  # und_price that moves back and forth across the 0.3% line.
   @doc false
   def entry_blocking?({_, reason}), do: reason in [:stale, :underlying_gap]
 
