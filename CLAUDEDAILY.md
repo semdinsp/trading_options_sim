@@ -53,7 +53,7 @@ stops matching the app, fix the file in the same PR.
 | Time | What runs | Notes |
 |---|---|---|
 | 07:00 | `QuarantineEligibilityWorker` (Oban cron) | Counts yesterday's quarantine days, auto-promotes discovery → quarantine, auto-retires failing quarantine versions. |
-| 13:00 (weekdays) | `ContractRollWorker` (Oban cron) | Moves flat monitors whose contract is inside its expiry window (DTE ≤ 1) onto a fresh contract; deactivates a version whose pinned `fixed_expiry` is spent. |
+| 13:00 (weekdays) | `ContractRollWorker` (Oban cron) | Moves flat monitors whose contract is inside its expiry window (DTE ≤ 1), or whose `atm_offset` strike has drifted 2+ strike-grid steps from today's target (since 2026-11-23, to share IBKR lines), onto a fresh contract; deactivates a version whose pinned `fixed_expiry` is spent. |
 | 13:30 | US options market opens (EDT; 14:30 during EST) | |
 | ~19:49 | `EodCloser` flattens open positions | 11 min before each exchange's close. Versions with `overnight_hold: true` are exempt. |
 | 20:00 | Market closes (EDT; 21:00 during EST) | |
