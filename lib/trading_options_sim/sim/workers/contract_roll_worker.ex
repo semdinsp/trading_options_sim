@@ -2,8 +2,10 @@ defmodule TradingOptionsSim.Sim.Workers.ContractRollWorker do
   @moduledoc """
   Cron-scheduled, weekdays at 13:00 UTC (see `config.exs`): before the
   US open in both EDT (13:30 UTC) and EST (14:30 UTC). Moves flat
-  monitors whose contract has reached its expiry window onto a fresh
-  contract, and deactivates versions whose pinned expiry is spent. See
+  monitors whose contract has reached its expiry window, or whose
+  `atm_offset` strike has drifted from today's target (see
+  `SimActivator.flat_and_drifted?/2`), onto a fresh contract, and
+  deactivates versions whose pinned expiry is spent. See
   `TradingOptionsSim.SimActivator.roll_expiring_contracts/0`.
 
   Before the open, so a rolled monitor trades its new contract from the

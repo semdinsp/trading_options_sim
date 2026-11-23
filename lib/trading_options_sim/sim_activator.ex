@@ -238,6 +238,10 @@ defmodule TradingOptionsSim.SimActivator do
   monitor whose contract is that many days or fewer from expiry is
   rolled too (see `roll_at_dte/1` for when it's honored).
 
+  A flat `atm_offset` monitor whose strike has drifted
+  `recentre_steps/0` grid steps or more from today's target is rolled
+  too, onto a freshly resolved contract (see `flat_and_drifted?/2`).
+
   A monitor holding a position is never touched.
   """
   @spec roll_expiring(StrategyVersion.t()) ::
@@ -252,7 +256,8 @@ defmodule TradingOptionsSim.SimActivator do
 
     stale =
       Enum.filter(monitors, fn {_symbol, _pid, snap} ->
-        flat_and_expiring?(snap) or flat_and_due?(snap, roll_at, version.option_leg_config)
+        flat_and_expiring?(snap) or flat_and_due?(snap, roll_at, version.option_leg_config) or
+          flat_and_drifted?(snap, version.option_leg_config)
       end)
 
     cond do
@@ -350,6 +355,50 @@ defmodule TradingOptionsSim.SimActivator do
        do: ContractMonitor.days_to_expiry(expiry) <= roll_at
 
   defp flat_and_due?(_snapshot, _roll_at, _config), do: false
+
+  @doc """
+  Whether a flat monitor's strike has drifted at least `recentre_steps/0`
+  strike-grid steps from where an `atm_offset` config would put it today
+  (`spot + strike_offset`, the grid from
+  `TradingCore.Options.ContractSelection.strike_increment/2`). The spot is
+  the monitor's last `run_underlying_price`; with none, it doesn't roll.
+
+  Why (2026-11-23): a monitor kept its activation-day strike for life, so
+  weeks of activations left SPY on 42 IBKR option lines and QQQ on 34,
+  most held by one or two monitors, while trading_hub ran short of
+  lines. Re-centring flat monitors each morning puts monitors with the
+  same leg config back on one shared contract (one line), and matches
+  trading_live, which picks the ATM strike at entry. Fixed-strike
+  configs and monitors holding a position are never re-centred.
+  """
+  @spec flat_and_drifted?(map() | nil, map()) :: boolean()
+  def flat_and_drifted?(
+        %{position_open?: false, symbol: symbol, strike: strike} = snap,
+        %{"strike_selection" => "atm_offset"} = config
+      )
+      when not is_nil(strike) do
+    with spot when is_number(spot) and spot > 0 <- snapshot_spot(snap),
+         offset when is_number(offset) <- Map.get(config, "strike_offset", 0) do
+      increment = TradingCore.Options.ContractSelection.strike_increment(symbol, spot)
+      drift = abs(to_float(strike) - (spot + offset))
+      drift >= recentre_steps() * increment
+    else
+      _ -> false
+    end
+  end
+
+  def flat_and_drifted?(_snapshot, _config), do: false
+
+  @doc "Grid steps of drift before a flat monitor is re-centred (config `:recentre_steps`, default 2)."
+  def recentre_steps, do: Application.get_env(:trading_options_sim, :recentre_steps, 2)
+
+  defp snapshot_spot(%{last_snapshot: %{"run_underlying_price" => spot}}) when is_number(spot),
+    do: spot
+
+  defp snapshot_spot(_snap), do: nil
+
+  defp to_float(%Decimal{} = d), do: Decimal.to_float(d)
+  defp to_float(n) when is_number(n), do: n * 1.0
 
   # A config that names its expiry, rather than choosing one by DTE, and
   # whose named expiry is inside the expiry window or past it.
