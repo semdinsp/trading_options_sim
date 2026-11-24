@@ -662,10 +662,25 @@ tighter-book contract or a different pool.
 
 **Signal hygiene:**
 - **Never use a `trading_signal` definition classified as noise**:
-  SPY/QQQ/VIX derivatives, the SPY/QQQ wavelet derivatives and
-  accelerations, raw VIX, SPY IV rank, QQQ volume z, XLE signed volume.
-  Prefer the persistent ones: wavelet levels, VWAP deviation, self-z
-  scores, NYSE TICK, `run_poly_*`.
+  QQQ/VIX derivatives, the SPY/QQQ wavelet derivatives and
+  accelerations, short-horizon changes or crossings of raw VIX, SPY IV
+  rank, QQQ volume z, XLE signed volume. Prefer the persistent ones:
+  wavelet levels, VWAP deviation, self-z scores, NYSE TICK, `run_poly_*`.
+- **Two exceptions** (trading_signal "CAVEATS FIRST" notes, item 2,
+  2026-11-23):
+  - **Raw VIX (`ibkr_vix_vix`, `1612bf63`): the level is OK as a gate.**
+    Only its short-horizon changes are noise. The level carries
+    information: mean |1-minute SPY return| rises from 1.5 to 6.4 bps
+    from the lowest to the highest VIX bucket (2026-09-21..11-20). Use it
+    as a level/regime gate (e.g. VIX > 22), never for entry timing off
+    its changes or crossings.
+  - **SPY derivative (`massive_spy_derivative`, `fc6b3f93`): redundant
+    with the 5-minute return, not independent evidence.** It is ≈
+    0.000244 × the trailing 5-minute SPY return in bps (corr 0.996 at
+    VIX > 22; −0.002 ≈ −8.2 bps), and a threshold on it picks the same
+    minutes as the same threshold on `run_poly_ret_5m_bps` (Jaccard
+    0.96). Build on `run_poly_ret_5m_bps` directly, and never pair the
+    two in one rule as if they were separate signals.
 - Don't use Kyle's lambda as a filter until trading_core's unit
   rescale lands: most readings currently round to 0.
 - Before relying on a definition, read its `notes` (the "CAVEATS FIRST"
@@ -687,7 +702,7 @@ tighter-book contract or a different pool.
   is persistent only if it sits clearly above that null. Example: the
   SPY derivative (`fc6b3f93`) has a lag-1 autocorrelation of 0.79,
   which looks persistent but is at the 17.6th percentile of its null,
-  so it stays noise. It also means its sign is just the trailing
+  so it is not independent persistence. Its sign is just the trailing
   5-minute return (`run_poly_ret_5m_bps`), so a sign rule on it adds
   nothing. Its magnitude can still carry information: its bottom decile
   is followed by about +5 bps over 60 minutes, a mean-reversion effect
