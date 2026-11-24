@@ -418,4 +418,48 @@ defmodule TradingOptionsSim.SimReactivatorTest do
 
     GenServer.stop(pid)
   end
+
+  describe "hub line sweep after a pass" do
+    setup do
+      prev = Application.get_env(:trading_options_sim, :hub_line_sweep_delay_ms)
+      on_exit(fn ->
+        if is_nil(prev),
+          do: Application.delete_env(:trading_options_sim, :hub_line_sweep_delay_ms),
+          else: Application.put_env(:trading_options_sim, :hub_line_sweep_delay_ms, prev)
+      end)
+      :ok
+    end
+
+    # The test env has no HubClient, so the sweep logs that the hub is
+    # unreachable: enough to show the pass scheduled it.
+    test "a reactivation pass schedules HubLineSweep" do
+      Application.put_env(:trading_options_sim, :hub_line_sweep_delay_ms, 0)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, pid} = SimReactivator.start_link()
+          # The sweep runs inside the reactivator, so once a call made
+          # after the 0 ms timer has been served, the sweep has run.
+          Process.sleep(50)
+          _ = :sys.get_state(pid)
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "HubLineSweep: trading_hub unreachable"
+    end
+
+    test ":disabled turns the sweep off" do
+      Application.put_env(:trading_options_sim, :hub_line_sweep_delay_ms, :disabled)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, pid} = SimReactivator.start_link()
+          Process.sleep(100)
+          _ = :sys.get_state(pid)
+          GenServer.stop(pid)
+        end)
+
+      refute log =~ "HubLineSweep"
+    end
+  end
 end

@@ -421,9 +421,30 @@ defmodule TradingOptionsSim.Pricing.IBKRLive do
   """
   def legacy_caller_tag(occ_symbol), do: occ_symbol
 
+  @doc """
+  Runs `fun` holding a node-local lock on `occ_symbol`'s hub line.
+
+  Taken by a listener around its subscribe and by
+  `TradingOptionsSim.Pricing.HubLineSweep` around its "no listener, so
+  release the tag" step. A listener registers its name before it
+  subscribes, so with both under the lock the sweep either sees the
+  listener and skips the line, or releases the tag before the listener's
+  subscribe adds it back. Never both orders at once.
+  """
+  @spec with_line_lock(occ_symbol(), (-> result)) :: result when result: var
+  def with_line_lock(occ_symbol, fun) when is_function(fun, 0) do
+    :global.trans({{__MODULE__, occ_symbol}, self()}, fun, [node()])
+  end
+
+  # Under the contract's line lock, so HubLineSweep can't release this
+  # app's tag between our subscribe and its check (see with_line_lock/2).
+  defp subscribe_to_hub(occ_symbol, contract) do
+    with_line_lock(occ_symbol, fn -> do_subscribe_to_hub(occ_symbol, contract) end)
+  end
+
   # Every failure log includes the contract map that was sent, so a
   # rejected or failed subscribe can be diagnosed from the log alone.
-  defp subscribe_to_hub(occ_symbol, contract) do
+  defp do_subscribe_to_hub(occ_symbol, contract) do
     case IbPortfolio.HubClient.call_hub(
            TradingOptionsSim.HubClient,
            TradingHub.MarketData.Manager,

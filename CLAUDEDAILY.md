@@ -160,6 +160,11 @@ IO.inspect({length(active), expected, Registry.count(TradingOptionsSim.MonitorRe
   again a few minutes later. If the count isn't rising, look for
   `SimReactivator` / `SimActivator` warnings, especially
   `hub_unavailable` (trading_hub not answering).
+- About a minute after a boot, the log has a `HubLineSweep:` line: the
+  release of trading_hub option lines the previous process left behind
+  (an abrupt stop skips the listeners' own release). Report its counts.
+  A `could not list` or `unreachable` warning means it didn't run;
+  report it, since the old lines then stay up until the next restart.
 - `activated_at` must **not** have moved to the boot time. Since PR
   #108 a restart leaves it alone. If every active version shows the
   boot time again, that fix has regressed. Stop and report.
