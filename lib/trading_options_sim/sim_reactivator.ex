@@ -38,6 +38,13 @@ defmodule TradingOptionsSim.SimReactivator do
   contract_key}`), so running it redundantly alongside the boot-time
   pass is safe.
 
+  ## Releasing lines a previous process left on trading_hub
+
+  A minute after each pass, `TradingOptionsSim.Pricing.HubLineSweep`
+  releases this app's tag on hub option lines no local listener holds:
+  an abrupt stop skips `IBKRLive.terminate/2`, so the old process's lines
+  would otherwise stay subscribed forever.
+
   ## Retry on failure
 
   Each reactivation pass is wrapped in `rescue`/`catch` and retried up
@@ -67,6 +74,11 @@ defmodule TradingOptionsSim.SimReactivator do
   # doubles from the base: 30s, 60s, 120s, 240s, 480s by default.
   @max_version_attempts 5
   @default_version_retry_base_ms 30_000
+
+  # After a reactivation pass, the hub line sweep (HubLineSweep) runs this
+  # much later. `config :trading_options_sim, :hub_line_sweep_delay_ms`
+  # overrides it; `:disabled` turns it off.
+  @default_line_sweep_delay_ms 60_000
 
   def start_link(_args \\ []) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
@@ -109,6 +121,17 @@ defmodule TradingOptionsSim.SimReactivator do
   @impl true
   def handle_info({:retry, attempt}, state) do
     do_reactivate(%{state | attempt: attempt})
+  end
+
+  # Best effort: a sweep that raises is logged, never allowed to restart
+  # this process (and with it a whole reactivation pass).
+  def handle_info(:sweep_hub_lines, state) do
+    _ = TradingOptionsSim.Pricing.HubLineSweep.release_orphans()
+    {:noreply, state}
+  rescue
+    error ->
+      Logger.warning("SimReactivator: hub line sweep raised #{Exception.message(error)}")
+      {:noreply, state}
   end
 
   def handle_info({:retry_version, version_id}, state) do
@@ -195,6 +218,39 @@ defmodule TradingOptionsSim.SimReactivator do
       :still_unanswered
   end
 
+  # Release hub option lines a previous process left behind (see
+  # HubLineSweep). Delayed so the hub isn't asked while every listener is
+  # still pinning its contract; listeners are registered by then, since
+  # activate/1 starts them synchronously. Only one sweep is pending at a
+  # time: a second pass inside the delay reuses it.
+  defp schedule_line_sweep do
+    delay =
+      Application.get_env(
+        :trading_options_sim,
+        :hub_line_sweep_delay_ms,
+        @default_line_sweep_delay_ms
+      )
+
+    case Process.get(:hub_line_sweep_timer) do
+      ref when is_reference(ref) ->
+        if Process.read_timer(ref), do: :ok, else: start_line_sweep_timer(delay)
+
+      _ ->
+        start_line_sweep_timer(delay)
+    end
+  end
+
+  # Never raises: a bad setting must not fail the reactivation pass it
+  # runs in. Anything but a non-negative integer (or :disabled) is
+  # treated as unset.
+  defp start_line_sweep_timer(:disabled), do: :ok
+
+  defp start_line_sweep_timer(delay) when is_integer(delay) and delay >= 0 do
+    Process.put(:hub_line_sweep_timer, Process.send_after(self(), :sweep_hub_lines, delay))
+  end
+
+  defp start_line_sweep_timer(_invalid), do: start_line_sweep_timer(@default_line_sweep_delay_ms)
+
   defp schedule_version_retry(version_id, attempt) do
     base =
       Application.get_env(
@@ -215,6 +271,7 @@ defmodule TradingOptionsSim.SimReactivator do
     )
 
     Enum.each(versions, &SimActivator.activate/1)
+    schedule_line_sweep()
 
     {:noreply, state}
   rescue
