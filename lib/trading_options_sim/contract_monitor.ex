@@ -770,15 +770,22 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Recognized structurally (see IbPortfolio.Message's own moduledoc for
   # why this app has no compile-time TradingHub dependency).
   @impl true
-  def handle_info(%{__struct__: TradingHub.Message, type: :price, data: data}, state) do
+  def handle_info(%{__struct__: TradingHub.Message, type: :price, data: data} = message, state) do
     case underlying_price(data) do
       nil ->
         {:noreply, state}
 
       spot ->
         case state.pricing_backend do
-          :black_scholes -> {:noreply, evaluate_black_scholes(state, spot)}
-          :ibkr_live -> {:noreply, evaluate_ibkr_live(state, spot)}
+          :black_scholes ->
+            {:noreply, evaluate_black_scholes(state, spot)}
+
+          # Kept with its time as the second live underlying for the gap
+          # check (live_underlying/4). Map.put so a hot reload doesn't
+          # crash monitors whose struct predates the field.
+          :ibkr_live ->
+            state = Map.put(state, :ibkr_underlying, {spot, message_time(message)})
+            {:noreply, evaluate_ibkr_live(state, spot)}
         end
     end
   end
@@ -978,7 +985,16 @@ defmodule TradingOptionsSim.ContractMonitor do
             fresh? = fresh?(tick, now)
             tick = drop_stale_quote(tick, now)
             values = signal_values(state)
-            source = price_source(tick, fresh?, values["run_poly_last"])
+
+            live =
+              live_underlying(
+                tick,
+                values["run_poly_last"],
+                Map.get(state, :ibkr_underlying),
+                now
+              )
+
+            source = price_source(tick, fresh?, live)
 
             cond do
               fresh? ->
@@ -1103,10 +1119,50 @@ defmodule TradingOptionsSim.ContractMonitor do
   #   * {:model, nil}: use opt_price.
   #
   # `tick` must already have been through drop_stale_quote/2. A usable
-  # quote is bid > 0 and ask >= bid. A nil live underlying (Polygon
-  # stale or absent) skips the gap test.
+  # quote is bid > 0 and ask >= bid. `live_underlying` comes from
+  # live_underlying/4 (Polygon and IBKR); nil skips the gap test.
   @underlying_gap_pct 0.003
   @blocked_warn_interval_ms 60_000
+  @ibkr_underlying_live_ms 30_000
+
+  # The live underlying the gap test compares und_price with, from two
+  # sources: Polygon's last trade (run_poly_last, absent when Polygon is
+  # stale) and the IBKR underlying's last tick, live for 30 s like a
+  # Polygon trade. Matches trading_live PR #408. Polygon alone failed
+  # both ways on 2026-11-23 while the SPY model sat frozen at und 723.84:
+  # with no Polygon price the gap test was skipped and the frozen model
+  # passed, and at 11:30 Polygon still held Friday's close (689.51) and
+  # blocked entries falsely.
+  #
+  #   * neither source live -> nil (gap test skipped);
+  #   * one live -> that one;
+  #   * both -> the one further from und_price, so a gap on either
+  #     source blocks entries (fail closed when they disagree).
+  @doc false
+  def live_underlying(tick, poly_last, ibkr_underlying, now) do
+    ibkr =
+      case ibkr_underlying do
+        {spot, %DateTime{} = at} ->
+          if DateTime.diff(now, at, :millisecond) <= @ibkr_underlying_live_ms, do: num(spot)
+
+        _ ->
+          nil
+      end
+
+    und = num(Map.get(tick, :underlying_price))
+
+    case Enum.filter([num(poly_last), ibkr], &(is_float(&1) and &1 > 0)) do
+      [] -> nil
+      [one] -> one
+      both when is_float(und) -> Enum.max_by(both, &abs(&1 - und))
+      [poly, _ibkr] -> poly
+    end
+  end
+
+  # A TradingHub.Message carries its creation time; a message without
+  # one counts as received now.
+  defp message_time(%{timestamp: %DateTime{} = at}), do: at
+  defp message_time(_message), do: DateTime.utc_now()
 
   @doc false
   def price_source(tick, fresh?, live_underlying) do

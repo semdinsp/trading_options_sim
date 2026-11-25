@@ -3193,6 +3193,86 @@ defmodule TradingOptionsSim.ContractMonitorTest do
       assert Sim.list_sim_fills(run) == []
     end
 
+    # trading_live PR #408: the IBKR underlying is a second live source.
+    defp broadcast_underlying_aged(symbol, last, age_ms) do
+      message =
+        %{
+          type: :price,
+          symbol: symbol,
+          source: :ibkr,
+          data: %{last: last},
+          timestamp: DateTime.add(DateTime.utc_now(), -age_ms, :millisecond)
+        }
+        |> Map.put(:__struct__, TradingHub.Message)
+
+      Phoenix.PubSub.broadcast(TradingOptionsSim.PubSub, "prices:#{symbol}", message)
+    end
+
+    defp frozen_spy_model(occ, bid, ask) do
+      broadcast_aged(occ, %{bid: bid, bid_size: 10}, 0)
+      broadcast_aged(occ, %{ask: ask, ask_size: 10}, 0)
+      broadcast_aged(occ, %{@greeks | opt_price: 11.5, und_price: 723.84}, 0)
+    end
+
+    test "with no Polygon price, a fresh IBKR underlying still catches the gap" do
+      {pid, run} = start_live("GAP6", "GAP6_OCC")
+      frozen_spy_model("GAP6_OCC", 11.6, 11.8)
+      sync(pid)
+
+      capture_log(fn ->
+        broadcast_underlying_aged("GAP6", 726.40, 0)
+        sync(pid)
+      end)
+
+      snap = ContractMonitor.snapshot(pid)
+      refute snap.position_open?
+      assert snap.entry_blocked_reason == :underlying_gap
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    test "when Polygon agrees with a frozen model, the IBKR underlying's gap still blocks" do
+      {pid, run} = start_live("GAP7", "GAP7_OCC")
+      polygon_trade("GAP7", "723.90")
+      frozen_spy_model("GAP7_OCC", 11.4, 11.6)
+      sync(pid)
+
+      capture_log(fn ->
+        broadcast_underlying_aged("GAP7", 726.40, 0)
+        sync(pid)
+      end)
+
+      snap = ContractMonitor.snapshot(pid)
+      refute snap.position_open?
+      assert snap.entry_blocked_reason == :underlying_gap
+      assert Sim.list_sim_fills(run) == []
+    end
+
+    test "an IBKR underlying 45 s old doesn't count, so with no Polygon the entry goes ahead" do
+      {pid, run} = start_live("GAP8", "GAP8_OCC")
+      frozen_spy_model("GAP8_OCC", 11.4, 11.6)
+      sync(pid)
+
+      broadcast_underlying_aged("GAP8", 726.40, 45_000)
+      sync(pid)
+
+      assert ContractMonitor.snapshot(pid).entry_blocked_reason == nil
+      assert [_fill] = Sim.list_sim_fills(run)
+    end
+
+    test "live_underlying/4 picks the source further from und_price" do
+      now = DateTime.utc_now()
+      tick = %{underlying_price: 723.84}
+      fresh = {726.40, now}
+      old = {726.40, DateTime.add(now, -45, :second)}
+
+      assert ContractMonitor.live_underlying(tick, nil, nil, now) == nil
+      assert ContractMonitor.live_underlying(tick, nil, old, now) == nil
+      assert ContractMonitor.live_underlying(tick, nil, fresh, now) == 726.40
+      assert ContractMonitor.live_underlying(tick, Decimal.new("723.90"), old, now) == 723.90
+      assert ContractMonitor.live_underlying(tick, Decimal.new("723.90"), fresh, now) == 726.40
+      assert ContractMonitor.live_underlying(tick, 689.51, fresh, now) == 689.51
+    end
+
     test "entries resume once the und_price agrees with Polygon again" do
       {pid, run} = start_live("GAP2", "GAP2_OCC")
       polygon_trade("GAP2", "149.00")
