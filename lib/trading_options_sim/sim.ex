@@ -1541,6 +1541,29 @@ defmodule TradingOptionsSim.Sim do
   end
 
   @doc """
+  The most recently closed `SimRun` for `version`/`symbol` that actually
+  held a position (`entry_at` set), or `nil`. Unlike
+  `last_closed_sim_run/2`, a run closed by `close_run_without_entry/2`
+  is skipped: the contract roll and every reactivation close the
+  waiting run that way, and counting that as an exit armed the full
+  re-entry cooldown on a version that never traded (drift-to-breadth
+  v3's SPY leg sat out all of 2026-11-25 behind a 24 h cooldown started
+  by the 13:00 roll). `ContractMonitor.seed_last_exit_at/2` reads this.
+  """
+  @spec last_exited_sim_run(StrategyVersion.t(), String.t()) :: SimRun.t() | nil
+  def last_exited_sim_run(%StrategyVersion{id: strategy_version_id}, symbol) do
+    SimRun
+    |> where(
+      [r],
+      r.strategy_version_id == ^strategy_version_id and r.symbol == ^symbol and
+        r.status == "closed" and not is_nil(r.entry_at)
+    )
+    |> order_by([r], desc: r.exit_at)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  @doc """
   Every `SimRun` across every strategy version, most-recently-opened
   first, optionally filtered to one `status` (`"open"` or `"closed"`) —
   the Runs page's data source. Preloads `strategy_version` (through to
