@@ -365,6 +365,17 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       fire until that long after entry (the take-profit is never
       delayed). Single-leg versions only: `ComboMonitor` ignores it.
       See `ContractMonitor.stop_armed?/1`.
+    * `"reentry_cooldown_after_loss_seconds"`: a non-negative integer or
+      `"rest_of_session"` — used instead of `reentry_cooldown_seconds`
+      after a losing exit (net P&L below 0); a winning exit keeps the
+      plain cooldown. Single-leg versions only: `ComboMonitor` ignores it.
+      See `ContractMonitor.cooled_down?/2`.
+    * `"gain_lock"`: `%{"trigger_r" => t, "lock_r" => l}` with `t > 0` and
+      `0 <= l < t`. Once the premium has moved `t` R in the position's
+      favour, the stop moves to lock in `l` R (0 = breakeven), and the
+      take profit stays. R is `risk_controls`' `stop_loss_percent` of the
+      entry premium, so `risk_controls` is required. Single-leg versions
+      only. See `ContractMonitor.gain_lock_stop/6`.
   """
   @spec params_errors(map() | nil) :: [String.t()]
   def params_errors(params) when is_map(params) do
@@ -376,7 +387,9 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
         "reentry_cooldown_seconds",
         Map.get(params, "reentry_cooldown_seconds", :absent)
       ) ++
-      seconds_errors("stop_arm_seconds", Map.get(params, "stop_arm_seconds", :absent))
+      seconds_errors("stop_arm_seconds", Map.get(params, "stop_arm_seconds", :absent)) ++
+      loss_cooldown_errors(Map.get(params, "reentry_cooldown_after_loss_seconds", :absent)) ++
+      gain_lock_errors(Map.get(params, "gain_lock", :absent), Map.get(params, "risk_controls"))
   end
 
   def params_errors(_params), do: []
@@ -384,6 +397,33 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   defp seconds_errors(_key, :absent), do: []
   defp seconds_errors(_key, secs) when is_integer(secs) and secs >= 0, do: []
   defp seconds_errors(key, _), do: ["#{key} must be a non-negative integer"]
+
+  # Used instead of reentry_cooldown_seconds after a losing exit only:
+  # seconds, or "rest_of_session" (until the next New York trading date).
+  defp loss_cooldown_errors(:absent), do: []
+  defp loss_cooldown_errors("rest_of_session"), do: []
+  defp loss_cooldown_errors(secs) when is_integer(secs) and secs >= 0, do: []
+
+  defp loss_cooldown_errors(_),
+    do: [
+      "reentry_cooldown_after_loss_seconds must be a non-negative integer or \"rest_of_session\""
+    ]
+
+  # R is risk_controls' stop_loss_percent of the entry premium, so a gain
+  # lock needs risk_controls (every method carries stop_loss_percent).
+  defp gain_lock_errors(:absent, _risk_controls), do: []
+
+  defp gain_lock_errors(%{"trigger_r" => trigger, "lock_r" => lock}, risk_controls)
+       when is_number(trigger) and is_number(lock) and trigger > 0 and lock >= 0 and
+              lock < trigger do
+    case risk_controls do
+      %{"stop_loss_percent" => pct} when is_number(pct) and pct > 0 -> []
+      _ -> ["gain_lock needs risk_controls with a stop_loss_percent (R is that stop distance)"]
+    end
+  end
+
+  defp gain_lock_errors(_config, _risk_controls),
+    do: ["gain_lock needs trigger_r > 0 and 0 <= lock_r < trigger_r"]
 
   defp entry_delay_errors(:absent), do: []
   defp entry_delay_errors(minutes) when is_integer(minutes) and minutes >= 0, do: []
