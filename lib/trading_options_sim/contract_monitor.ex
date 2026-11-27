@@ -257,10 +257,16 @@ defmodule TradingOptionsSim.ContractMonitor do
     # entry_confirmed?/2 and cooled_down?/2.
     entry_confirm_seconds: 0,
     reentry_cooldown_seconds: 0,
-    # When the entry rule last turned true (nil while it's false), and
-    # when this monitor's contract last exited.
+    # params["reentry_cooldown_after_loss_seconds"]: seconds, or
+    # :rest_of_session, used instead of reentry_cooldown_seconds after a
+    # losing exit; nil = off. Read with Map.get: a monitor started before
+    # this field existed doesn't have it.
+    reentry_cooldown_after_loss: nil,
+    # When the entry rule last turned true (nil while it's false), when
+    # this monitor's contract last exited, and whether that exit lost.
     entry_true_since: nil,
     last_exit_at: nil,
+    last_exit_loss?: false,
     last_snapshot: %{},
     # When last_snapshot was last rebuilt, and (:ibkr_live only) the
     # hub timestamps of the option tick and bid/ask quote it was built
@@ -499,6 +505,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       entry_delay_minutes: TradingOptionsSim.EntryDelay.minutes(strategy_version),
       entry_confirm_seconds: param_seconds(strategy_version, "entry_confirm_seconds"),
       reentry_cooldown_seconds: param_seconds(strategy_version, "reentry_cooldown_seconds"),
+      reentry_cooldown_after_loss: loss_cooldown(strategy_version),
       signal_names: signal_names,
       canonical_names: canonical_names
     }
@@ -530,10 +537,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   defp resume_from_db(state) do
     state
     |> apply_open_run()
-    |> Map.merge(%{
-      last_exit_at: seed_last_exit_at(state.strategy_version, state.symbol),
-      resume_pending?: false
-    })
+    |> Map.merge(seed_last_exit(state.strategy_version, state.symbol))
+    |> Map.put(:resume_pending?, false)
   rescue
     error in [DBConnection.ConnectionError, Postgrex.Error] ->
       Logger.warning(
@@ -1491,14 +1496,53 @@ defmodule TradingOptionsSim.ContractMonitor do
   Public for unit tests.
   """
   @spec cooled_down?(map(), DateTime.t()) :: boolean()
-  def cooled_down?(%{reentry_cooldown_seconds: secs}, _now)
-      when not is_integer(secs) or secs <= 0,
-      do: true
+  def cooled_down?(state, now) do
+    case Map.get(state, :last_exit_at) do
+      nil ->
+        true
 
-  def cooled_down?(%{last_exit_at: nil}, _now), do: true
+      at ->
+        case cooldown_after_exit(state) do
+          :rest_of_session -> et_date(at) != et_date(now)
+          secs -> DateTime.diff(now, at, :second) >= secs
+        end
+    end
+  end
 
-  def cooled_down?(%{reentry_cooldown_seconds: secs, last_exit_at: at}, now),
-    do: DateTime.diff(now, at, :second) >= secs
+  # params["reentry_cooldown_after_loss_seconds"] replaces the plain
+  # cooldown after a losing exit only (realized_pnl_net < 0); a winning
+  # or flat exit keeps reentry_cooldown_seconds. :rest_of_session blocks
+  # until the next New York trading date.
+  defp cooldown_after_exit(state) do
+    base =
+      case Map.get(state, :reentry_cooldown_seconds) do
+        secs when is_integer(secs) and secs > 0 -> secs
+        _ -> 0
+      end
+
+    case {Map.get(state, :last_exit_loss?, false), Map.get(state, :reentry_cooldown_after_loss)} do
+      {true, after_loss} when not is_nil(after_loss) -> after_loss
+      _ -> base
+    end
+  end
+
+  defp et_date(%DateTime{} = at),
+    do: at |> DateTime.shift_zone!("America/New_York") |> DateTime.to_date()
+
+  @doc false
+  def loss_cooldown(%{params: %{"reentry_cooldown_after_loss_seconds" => value}}) do
+    case value do
+      "rest_of_session" -> :rest_of_session
+      secs when is_integer(secs) and secs >= 0 -> secs
+      _ -> nil
+    end
+  end
+
+  def loss_cooldown(_version), do: nil
+
+  @doc false
+  def loss?(%Decimal{} = pnl), do: Decimal.lt?(pnl, 0)
+  def loss?(_pnl), do: false
 
   @doc false
   def param_seconds(%{params: params}, key) when is_map(params) do
@@ -1509,6 +1553,27 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   def param_seconds(_version, _key), do: 0
+
+  @doc """
+  `last_exit_at` and `last_exit_loss?` for a starting monitor, from the
+  last run on this contract that held a position. Empty-handed (nil,
+  false) when the version has no cooldown of either kind.
+  """
+  def seed_last_exit(version, symbol) when is_binary(symbol) do
+    if param_seconds(version, "reentry_cooldown_seconds") > 0 or loss_cooldown(version) != nil do
+      case Sim.last_exited_sim_run(version, symbol) do
+        %{exit_at: %DateTime{} = at} = run ->
+          %{last_exit_at: at, last_exit_loss?: loss?(run.realized_pnl_net || run.realized_pnl)}
+
+        _ ->
+          %{last_exit_at: nil, last_exit_loss?: false}
+      end
+    else
+      %{last_exit_at: nil, last_exit_loss?: false}
+    end
+  end
+
+  def seed_last_exit(_version, _symbol), do: %{last_exit_at: nil, last_exit_loss?: false}
 
   @doc false
   def seed_last_exit_at(version, symbol) when is_binary(symbol) do
@@ -1541,7 +1606,8 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp maybe_transition(%{position_open?: true} = state, snapshot) do
-    state = state |> track_excursion(snapshot) |> maybe_move_stop(snapshot)
+    state =
+      state |> track_excursion(snapshot) |> maybe_move_stop(snapshot) |> maybe_gain_lock(snapshot)
 
     case risk_exit(state, snapshot) do
       nil ->
@@ -1688,6 +1754,66 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   defp opposite("short"), do: "long"
   defp opposite(_long), do: "short"
+
+  # params["gain_lock"] (trigger_r, lock_r): once the premium has moved
+  # trigger_r x R in the position's favour, the stop moves to lock in
+  # lock_r x R (0 = breakeven) and the take profit stays. R is the
+  # initial stop distance as a share of entry, risk_controls'
+  # stop_loss_percent, so it is the same R trading_live computes from the
+  # same params. Unlike exit_strategy "ratchet" it keeps the target, and
+  # it can run alongside an exit_strategy: apply_moved_stop/4 only ever
+  # tightens. In session only, like the ratchet.
+  defp maybe_gain_lock(%{entry_price: nil} = state, _snapshot), do: state
+  defp maybe_gain_lock(%{exit_state: %{gain_locked: true}} = state, _snapshot), do: state
+
+  defp maybe_gain_lock(state, snapshot) do
+    with %{"trigger_r" => trigger_r, "lock_r" => lock_r} <- gain_lock_config(state),
+         stop_pct when is_number(stop_pct) <- stop_loss_percent(state),
+         true <- session_open?(state),
+         %Decimal{} = price <- premium(snapshot),
+         {:lock, stop} <-
+           gain_lock_stop(state.entry_price, price, state.direction, trigger_r, lock_r, stop_pct) do
+      apply_moved_stop(state, stop, %{gain_locked: true}, :keep_take_profit)
+    else
+      _ -> state
+    end
+  end
+
+  @doc """
+  `{:lock, stop}` once `price` has moved `trigger_r` R in the position's
+  favour from `entry`, else `:no_lock`. R = `stop_pct`% of `entry`; the
+  stop locks `lock_r` R of gain. Public for unit tests.
+  """
+  @spec gain_lock_stop(Decimal.t(), Decimal.t(), String.t(), number(), number(), number()) ::
+          {:lock, Decimal.t()} | :no_lock
+  def gain_lock_stop(entry, price, direction, trigger_r, lock_r, stop_pct) do
+    r = Decimal.mult(entry, Decimal.div(dec(stop_pct), 100))
+    sign = if direction == "short", do: -1, else: 1
+    trigger = Decimal.add(entry, Decimal.mult(r, dec(trigger_r * sign)))
+    stop = Decimal.add(entry, Decimal.mult(r, dec(lock_r * sign)))
+
+    reached? =
+      if sign == 1,
+        do: Decimal.compare(price, trigger) != :lt,
+        else: Decimal.compare(price, trigger) != :gt
+
+    if reached?, do: {:lock, stop}, else: :no_lock
+  end
+
+  defp dec(n) when is_integer(n), do: Decimal.new(n)
+  defp dec(n) when is_float(n), do: Decimal.from_float(n)
+
+  defp gain_lock_config(%{strategy_version: %{params: %{"gain_lock" => %{} = config}}}),
+    do: config
+
+  defp gain_lock_config(_state), do: nil
+
+  defp stop_loss_percent(%{
+         strategy_version: %{params: %{"risk_controls" => %{"stop_loss_percent" => pct}}}
+       }),
+       do: pct
+
+  defp stop_loss_percent(_state), do: nil
 
   defp exit_strategy_config(%{strategy_version: %{params: %{"exit_strategy" => %{} = config}}}),
     do: config
@@ -2429,9 +2555,13 @@ defmodule TradingOptionsSim.ContractMonitor do
         same_level?(state.stop_loss_price, context["initial_stop_loss_price"]) ->
           "initial"
 
+        Map.get(state.exit_state, :gain_locked) ->
+          "gain_lock"
+
         true ->
-          case exit_strategy_config(state) do
-            %{"method" => method} when method in ["trailing", "ratchet"] -> method
+          case {exit_strategy_config(state), gain_lock_config(state)} do
+            {%{"method" => method}, _} when method in ["trailing", "ratchet"] -> method
+            {_, %{}} -> "gain_lock"
             _ -> "moved"
           end
       end
@@ -2542,6 +2672,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             entry_price: nil,
             exit_state: %{}
         }
+        |> Map.put(:last_exit_loss?, loss?(realized_pnl_net || realized_pnl))
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} exit fill failed: #{inspect(reason)}")
