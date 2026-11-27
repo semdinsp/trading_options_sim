@@ -84,6 +84,12 @@ defmodule TradingOptionsSim.MCP.Tools.ListSimRuns do
       exit_reason: run.exit_reason,
       realized_pnl: str(run.realized_pnl),
       realized_pnl_net: str(run.realized_pnl_net),
+      # A run that closed on its stop or target: what the same trade would
+      # have done with neither (the stop ladder's no-stop, no-target rung).
+      # nil for any other exit, and for runs before the ladder.
+      shadow_exit_price: (run.context || %{})["shadow_exit_price"],
+      shadow_exit_reason: (run.context || %{})["shadow_exit_reason"],
+      shadow_r: (run.context || %{})["shadow_r"],
       context: run.context,
       tags: Enum.map(run.tags, & &1.name)
     }

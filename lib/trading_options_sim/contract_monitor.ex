@@ -624,14 +624,11 @@ defmodule TradingOptionsSim.ContractMonitor do
     {:noreply, state}
   end
 
-  # An "atr" version reads the underlying's daily ATR at its entry tick
-  # from trading_signal's cache; start the fetch now so that read hits.
-  defp maybe_prewarm_atr(%{
-         symbol: symbol,
-         strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"}}}
-       })
-       when is_binary(symbol),
-       do: TradingOptionsSim.DailyAtr.prewarm(symbol)
+  # Every entry reads the underlying's daily ATR from trading_signal's
+  # cache (an "atr" version for its levels, every version for the stop
+  # ladder's underlying rungs); start the fetch now so that read hits.
+  defp maybe_prewarm_atr(%{symbol: symbol}) when is_binary(symbol),
+    do: TradingOptionsSim.DailyAtr.prewarm(symbol)
 
   defp maybe_prewarm_atr(_state), do: :ok
 
@@ -860,7 +857,9 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   # Until the open run is read, position_open? may be the stale opts flag.
   defp do_force_close(%{resume_pending?: true} = state, _reason), do: state
-  defp do_force_close(%{position_open?: false} = state, _reason), do: state
+
+  defp do_force_close(%{position_open?: false} = state, reason),
+    do: maybe_close_stop_ladders(state, reason)
 
   defp do_force_close(%{last_snapshot: snapshot} = state, _reason)
        when map_size(snapshot) == 0 do
@@ -872,7 +871,154 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp do_force_close(state, reason) do
-    submit_exit(state, state.last_snapshot, to_string(reason))
+    state
+    |> submit_exit(state.last_snapshot, to_string(reason))
+    |> maybe_close_stop_ladders(reason)
+  end
+
+  # -- Stop ladder ------------------------------------------------------------
+  #
+  # Every entered run carries a TradingOptionsSim.StopLadder: virtual stops
+  # (premium %, underlying ATR multiples, a time stop; each with and
+  # without the take-profit) fed the same ticks as the run, and kept
+  # running after the real run closes on its stop or target, until the
+  # rule exit or the end of the session closes them. Held in
+  # state[:stop_ladders] (read with Map.get, so a monitor started before
+  # the key existed works), one per run, so a re-entry runs alongside the
+  # previous run's ladder. A restart or deactivation drops ladders still
+  # open, so a run's ladder is complete only when every rung has a row
+  # (Sim.stop_sizing/2 counts only complete ones). Never fails a tick:
+  # a write error is logged and the rows are dropped.
+  defp start_stop_ladder(state, run, price, action, take_profit_price, snapshot) do
+    ladder =
+      TradingOptionsSim.StopLadder.new(%{
+        sim_run_id: run.id,
+        strategy_version_id: state.strategy_version.id,
+        direction: state.direction,
+        right: state.right,
+        entry_at: run.entry_at,
+        entry_price: price,
+        risk_at_entry: run.risk_at_entry,
+        multiplier: state.multiplier,
+        quantity: state.quantity,
+        entry_commission: estimate_commission(state, price, action),
+        take_profit_price: take_profit_price,
+        underlying_at_entry: number_or_nil(snapshot["run_underlying_price"]),
+        atr20m: ladder_atr20m(state),
+        min_hold_seconds: state.min_hold_seconds
+      })
+
+    Map.put(state, :stop_ladders, [ladder | Map.get(state, :stop_ladders, [])])
+  rescue
+    error ->
+      Logger.warning(
+        "ContractMonitor: #{state.symbol} stop ladder not started: #{Exception.message(error)}"
+      )
+
+      state
+  end
+
+  defp ladder_atr20m(state) do
+    case TradingOptionsSim.DailyAtr.atr(state.symbol) do
+      {:ok, atr} -> TradingOptionsSim.StopLadder.atr20m(atr)
+      _ -> nil
+    end
+  end
+
+  defp number_or_nil(n) when is_number(n), do: n / 1
+  defp number_or_nil(_n), do: nil
+
+  defp step_stop_ladders(state, snapshot) do
+    case Map.get(state, :stop_ladders, []) do
+      [] ->
+        state
+
+      ladders ->
+        now = DateTime.utc_now()
+        tick = ladder_tick(state, snapshot)
+
+        cond do
+          not state.strategy_version.overnight_hold and closing_soon?(state) ->
+            finish_stop_ladders(
+              state,
+              ladders,
+              &TradingOptionsSim.StopLadder.close_all(&1, "eod", tick, now)
+            )
+
+          session_open?(state) ->
+            finish_stop_ladders(state, ladders, &TradingOptionsSim.StopLadder.step(&1, tick, now))
+
+          true ->
+            state
+        end
+    end
+  end
+
+  @ladder_eod_reasons ~w(eod_flatten expiry)
+
+  defp maybe_close_stop_ladders(state, reason) do
+    ladders = Map.get(state, :stop_ladders, [])
+
+    if ladders != [] and to_string(reason) in @ladder_eod_reasons and
+         map_size(state.last_snapshot) > 0 do
+      tick = ladder_tick(state, state.last_snapshot)
+      now = DateTime.utc_now()
+
+      finish_stop_ladders(
+        state,
+        ladders,
+        &TradingOptionsSim.StopLadder.close_all(&1, "eod", tick, now)
+      )
+    else
+      state
+    end
+  end
+
+  defp finish_stop_ladders(state, ladders, fun) do
+    {ladders, rows} =
+      Enum.reduce(ladders, {[], []}, fn ladder, {kept, rows} ->
+        {ladder, closed} = fun.(ladder)
+        kept = if TradingOptionsSim.StopLadder.done?(ladder), do: kept, else: [ladder | kept]
+        {kept, rows ++ closed}
+      end)
+
+    write_stop_ladder_rows(state, rows)
+    Map.put(state, :stop_ladders, Enum.reverse(ladders))
+  end
+
+  defp write_stop_ladder_rows(_state, []), do: :ok
+
+  defp write_stop_ladder_rows(state, rows) do
+    Sim.insert_stop_ladder_rows(rows)
+
+    for %{rung_kind: "premium", rung_value: nil, with_tp: false} = row <- rows,
+        do: Sim.record_shadow_exit(row.sim_run_id, row)
+
+    :ok
+  rescue
+    error ->
+      Logger.warning(
+        "ContractMonitor: #{state.symbol} #{length(rows)} stop ladder rows not written: #{Exception.message(error)}"
+      )
+
+      :ok
+  end
+
+  defp ladder_tick(state, snapshot) do
+    {bid, ask} =
+      case quote_from(snapshot) do
+        {bid, ask} -> {bid, ask}
+        nil -> {nil, nil}
+      end
+
+    %{
+      mid: quote_mid(snapshot),
+      bid: bid,
+      ask: ask,
+      premium: premium(snapshot),
+      underlying: number_or_nil(snapshot["run_underlying_price"]),
+      rule_exit?: RuleEngine.evaluate(state.exit_rule, snapshot) == true
+    }
   end
 
   # See StrategyStockMonitor.subscribe_to_signals/1's identical
@@ -1451,12 +1597,12 @@ defmodule TradingOptionsSim.ContractMonitor do
   #
   # is_integer guard: in Erlang term order every number sorts below nil,
   # so `dte <= nil` is TRUE and a nil cutoff would block entries forever.
-  defp maybe_transition_before_expiry(%{position_open?: false} = state, _snapshot, dte)
+  defp maybe_transition_before_expiry(%{position_open?: false} = state, snapshot, dte)
        when is_integer(state.expiry_close_dte) and dte <= state.expiry_close_dte,
-       do: state
+       do: step_stop_ladders(state, snapshot)
 
   defp maybe_transition_before_expiry(state, snapshot, _dte),
-    do: maybe_transition(state, snapshot)
+    do: state |> step_stop_ladders(snapshot) |> maybe_transition(snapshot)
 
   # Remembers when the entry rule turned true; any false tick resets it,
   # so entry_confirmed?/2 measures an unbroken run of true evaluations.
@@ -2529,6 +2675,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             entry_price: price,
             exit_state: seed_excursion(%{}, price, snapshot["run_underlying_price"])
         }
+        |> start_stop_ladder(run, price, action, take_profit_price, snapshot)
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} entry fill failed: #{inspect(reason)}")
