@@ -678,6 +678,24 @@ defmodule TradingOptionsSim.SimTest do
     end
   end
 
+  describe "last_exited_sim_run/2" do
+    test "skips a run closed without an entry" do
+      version = version_fixture(strategy_fixture())
+      exited = close_run(run_fixture(version, "AAPL"))
+      {:ok, _} = Sim.close_run_without_entry(run_fixture(version, "AAPL"), "manual_no_entry")
+
+      assert Sim.last_closed_sim_run(version, "AAPL").exit_reason == "manual_no_entry"
+      assert Sim.last_exited_sim_run(version, "AAPL").id == exited.id
+    end
+
+    test "returns nil when the only closed run never entered" do
+      version = version_fixture(strategy_fixture())
+      {:ok, _} = Sim.close_run_without_entry(run_fixture(version, "AAPL"), "manual_no_entry")
+
+      assert Sim.last_exited_sim_run(version, "AAPL") == nil
+    end
+  end
+
   describe "list_active_strategy_versions/0" do
     test "returns only versions with activated_at set and deactivated_at nil" do
       strategy = strategy_fixture()

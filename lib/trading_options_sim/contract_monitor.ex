@@ -1483,8 +1483,10 @@ defmodule TradingOptionsSim.ContractMonitor do
   contract's last exit, or when no cooldown is set. Stops the
   exit-then-re-enter-within-minutes churn: on 2026-10-01, 36% of closed
   trades since 09-28 re-entered within 5 minutes of the previous exit.
-  `last_exit_at` is seeded from the last closed run at start, so a
-  restart doesn't reset the cooldown. Entry-side only.
+  `last_exit_at` is seeded from the last closed run that held a
+  position, so a restart doesn't reset the cooldown, and a run the roll
+  or a restart closed without an entry doesn't start one. Entry-side
+  only.
 
   Public for unit tests.
   """
@@ -1511,7 +1513,7 @@ defmodule TradingOptionsSim.ContractMonitor do
   @doc false
   def seed_last_exit_at(version, symbol) when is_binary(symbol) do
     if param_seconds(version, "reentry_cooldown_seconds") > 0 do
-      case Sim.last_closed_sim_run(version, symbol) do
+      case Sim.last_exited_sim_run(version, symbol) do
         %{exit_at: %DateTime{} = at} -> at
         _ -> nil
       end

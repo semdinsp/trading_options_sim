@@ -189,6 +189,27 @@ defmodule TradingOptionsSim.ChurnFiltersTest do
       refute open?(pid)
     end
 
+    # The contract roll and every reactivation close the waiting run
+    # without an entry; that is not an exit and must not start the cooldown.
+    test "a run closed without an entry does not start the cooldown" do
+      version = version_fixture(%{"reentry_cooldown_seconds" => 86_400})
+      {:ok, _} = Sim.close_run_without_entry(open_run(version, "COOL5"), "manual_no_entry")
+      pid = start_monitor(version, "COOL5")
+
+      tick(pid, "COOL5", 150.0)
+      assert open?(pid)
+    end
+
+    test "a real exit before a no-entry close still holds the cooldown" do
+      version = version_fixture(%{"reentry_cooldown_seconds" => 300})
+      closed_run(version, "COOL6", 30)
+      {:ok, _} = Sim.close_run_without_entry(open_run(version, "COOL6"), "manual_no_entry")
+      pid = start_monitor(version, "COOL6")
+
+      tick(pid, "COOL6", 150.0)
+      refute open?(pid)
+    end
+
     test "after the cooldown has passed it enters" do
       version = version_fixture(%{"reentry_cooldown_seconds" => 10})
       closed_run(version, "COOL2", 30)
