@@ -563,6 +563,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             take_profit_price: run.take_profit_price,
             exit_state: %{excursion_resumed: true}
         }
+        |> Map.put(:underlying_stop, (run.context || %{})["underlying_stop_level"])
 
       nil ->
         if state.position_open? and not Sim.sim_run_open?(state.sim_run_id) do
@@ -1756,7 +1757,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       state |> track_excursion(snapshot) |> maybe_move_stop(snapshot) |> maybe_gain_lock(snapshot)
 
     case risk_exit(state, snapshot) do
-      nil ->
+      {nil, state} ->
         if min_hold_elapsed?(state) and RuleEngine.evaluate(state.exit_rule, snapshot) and
              session_open?(state) do
           submit_exit(state, snapshot, "rule_exit")
@@ -1767,7 +1768,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       # Same session gate as a rule exit: a real stop only executes in
       # session, and outside it a model price can move on after-hours
       # underlying ticks. (Stale IBKR data is already blocked upstream.)
-      reason ->
+      {reason, state} ->
         if session_open?(state), do: submit_exit(state, snapshot, reason), else: state
     end
   end
@@ -1781,34 +1782,148 @@ defmodule TradingOptionsSim.ContractMonitor do
   # (run_current_price), since the levels are percentages of the premium
   # paid -- or, when a tick carries a quote but no price, the quote mid,
   # the same fallback fills use, so the levels are never left unchecked.
-  defp risk_exit(%{stop_loss_price: nil, take_profit_price: nil}, _snapshot), do: nil
-
+  #
+  # Returns {reason | nil, state}: the "mid_confirmed" trigger keeps when
+  # a stop was first breached in exit_state.
+  #
+  # Two stop triggers, per params["stop_trigger"]:
+  #   * "current" (the default; every version before 2026-11-27): the stop
+  #     fires on the first tick premium/1 is through it.
+  #   * "mid_confirmed": judged on the quote MID (premium/1 without a
+  #     quote); deferred while the spread is wider than 15% of the mid
+  #     (logged once per run as stop_deferred_wide_spread); and it fires
+  #     only on a second breaching tick at least 2 s after the first. A
+  #     tick back inside the stop resets it. For long options, where the
+  #     risk is a stop fired on a wide or flickering quote.
+  # Either trigger also checks an underlying stop
+  # (risk_controls "underlying_atr", state[:underlying_stop]).
   defp risk_exit(state, snapshot) do
-    case premium(snapshot) do
-      nil ->
-        nil
+    {stop?, state} = stop_hit(state, snapshot)
+    price = premium(snapshot)
 
-      price ->
-        cond do
-          stop_armed?(state) and
-              TradingCore.RiskControls.hit_stop_loss?(
-                state.stop_loss_price,
-                price,
-                state.direction
-              ) ->
-            "stop_loss"
+    cond do
+      stop? ->
+        {"stop_loss", state}
 
+      price != nil and
           TradingCore.RiskControls.hit_take_profit?(
             state.take_profit_price,
             price,
             state.direction
           ) ->
-            "take_profit"
+        {"take_profit", state}
 
-          true ->
-            nil
-        end
+      true ->
+        {nil, state}
     end
+  end
+
+  @stop_confirm_ms 2_000
+  @stop_max_spread_share Decimal.new("0.15")
+
+  defp stop_hit(state, snapshot) do
+    cond do
+      is_nil(state.stop_loss_price) and is_nil(Map.get(state, :underlying_stop)) ->
+        {false, state}
+
+      not stop_armed?(state) ->
+        {false, state}
+
+      stop_trigger(state) == "mid_confirmed" ->
+        confirmed_stop(state, snapshot)
+
+      true ->
+        {premium_stop_breached?(state, premium(snapshot)) or
+           underlying_stop_breached?(state, snapshot), state}
+    end
+  end
+
+  @doc false
+  def confirmed_stop(state, snapshot, now \\ DateTime.utc_now()) do
+    mid = quote_mid(snapshot) || premium(snapshot)
+
+    breached? =
+      premium_stop_breached?(state, mid) or underlying_stop_breached?(state, snapshot)
+
+    breach_at = Map.get(state.exit_state, :stop_breach_at)
+
+    cond do
+      not breached? ->
+        {false, %{state | exit_state: Map.delete(state.exit_state, :stop_breach_at)}}
+
+      wide_spread?(snapshot, mid) ->
+        {false, note_stop_deferred(state, snapshot, mid)}
+
+      is_nil(breach_at) ->
+        {false, %{state | exit_state: Map.put(state.exit_state, :stop_breach_at, now)}}
+
+      DateTime.diff(now, breach_at, :millisecond) >= @stop_confirm_ms ->
+        {true, state}
+
+      true ->
+        {false, state}
+    end
+  end
+
+  @doc false
+  def stop_trigger(%{strategy_version: %{params: %{"stop_trigger" => "mid_confirmed"}}}),
+    do: "mid_confirmed"
+
+  def stop_trigger(_state), do: "current"
+
+  defp premium_stop_breached?(%{stop_loss_price: nil}, _price), do: false
+  defp premium_stop_breached?(_state, nil), do: false
+
+  defp premium_stop_breached?(state, price),
+    do: TradingCore.RiskControls.hit_stop_loss?(state.stop_loss_price, price, state.direction)
+
+  # risk_controls "underlying_atr": the stop is a level on the UNDERLYING,
+  # set at entry; breached once the underlying is at or past it against
+  # the position.
+  defp underlying_stop_breached?(state, snapshot) do
+    case {Map.get(state, :underlying_stop), number_or_nil(snapshot["run_underlying_price"])} do
+      {level, und} when is_number(level) and is_number(und) ->
+        (und - level) * underlying_sign(state.right, state.direction) <= 0
+
+      _ ->
+        false
+    end
+  end
+
+  # +1 when the position gains as the underlying rises (long call, short
+  # put), -1 when it gains as it falls (long put, short call).
+  @doc false
+  def underlying_sign(right, direction) do
+    r = if right == "P", do: -1, else: 1
+    d = if direction == "short", do: -1, else: 1
+    r * d
+  end
+
+  defp wide_spread?(snapshot, mid) do
+    case {quote_from(snapshot), mid} do
+      {{bid, ask}, %Decimal{} = mid} ->
+        Decimal.gt?(mid, 0) and
+          Decimal.gt?(Decimal.div(Decimal.sub(ask, bid), mid), @stop_max_spread_share)
+
+      _ ->
+        false
+    end
+  end
+
+  defp note_stop_deferred(state, snapshot, mid) do
+    exit_state = Map.update(state.exit_state, :stop_deferrals, 1, &(&1 + 1))
+
+    unless Map.get(state.exit_state, :stop_deferred_logged) do
+      {bid, ask} = quote_from(snapshot)
+
+      Logger.info(
+        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+          "stop_deferred_wide_spread: #{Decimal.to_string(bid)}/#{Decimal.to_string(ask)} " <>
+          "is over 15% of the mid #{Decimal.to_string(Decimal.round(mid, 4))}"
+      )
+    end
+
+    %{state | exit_state: Map.put(exit_state, :stop_deferred_logged, true)}
   end
 
   # The option's price, on which every stop and target here is set:
@@ -2070,13 +2185,80 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Same flag name and buffer as trading_live. The stop is left alone.
   @round_number_buffer Decimal.new("0.02")
 
+  # risk_controls "no_take_profit": true drops the target for any method,
+  # leaving the stop (and the rule exit) to close the trade. Explicit, as
+  # TradingCore.RiskControls puts its own default target on a config
+  # without one.
   @doc false
-  def risk_levels(
-        %{strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"} = config}}} =
-          state,
-        price,
-        snapshot
-      ) do
+  def risk_levels(state, price, snapshot) do
+    case state do
+      %{strategy_version: %{params: %{"risk_controls" => %{"no_take_profit" => true} = rc}}} ->
+        # TradingCore needs a target percent to compute the stop (it
+        # raises without one); give it one and discard the target.
+        rc = Map.put_new(rc, "take_profit_percent", rc["stop_loss_percent"] || 100)
+        state = put_in(state.strategy_version.params["risk_controls"], rc)
+        {stop, _take_profit, context} = base_risk_levels(state, price, snapshot)
+        {stop, nil, Map.put(context, "no_take_profit", true)}
+
+      _ ->
+        base_risk_levels(state, price, snapshot)
+    end
+  end
+
+  # "underlying_atr" (underlying_atr_mult k): no premium stop; the stop is
+  # the underlying k x the 20-minute ATR against the position from its
+  # price at entry, the 20-minute ATR being the daily ATR(14) x
+  # sqrt(20/390) (StopLadder.atr20m/1, the same as the stop ladder's
+  # underlying rungs). The level goes into the run's context
+  # ("underlying_stop_level") so a restart resumes it. The target is the
+  # take_profit_percent of the premium. Without a daily ATR at entry the
+  # stop falls back to stop_loss_percent of the premium
+  # (risk_fallback_reason "no_atr").
+  defp base_risk_levels(
+         %{
+           strategy_version: %{
+             params: %{"risk_controls" => %{"method" => "underlying_atr"} = config}
+           }
+         } =
+           state,
+         price,
+         snapshot
+       ) do
+    percent = %{
+      "method" => "percent_of_entry",
+      "stop_loss_percent" => config["stop_loss_percent"],
+      "take_profit_percent" => config["take_profit_percent"] || config["stop_loss_percent"]
+    }
+
+    levels = TradingCore.RiskControls.resolve_levels(price, percent, state.direction, [])
+    und = number_or_nil(snapshot["run_underlying_price"])
+    atr20m = ladder_atr20m(state)
+    mult = config["underlying_atr_mult"]
+
+    if is_number(und) and is_number(atr20m) do
+      level = und - underlying_sign(state.right, state.direction) * mult * atr20m
+
+      {nil, levels.take_profit,
+       %{
+         "risk_method" => "underlying_atr",
+         "underlying_atr_mult" => mult,
+         "atr20m" => atr20m,
+         "underlying_at_entry" => und,
+         "underlying_stop_level" => level,
+         "risk_fallback_reason" => nil
+       }}
+    else
+      {levels.stop_loss, levels.take_profit,
+       %{"risk_method" => "percent_of_entry", "risk_fallback_reason" => "no_atr"}}
+    end
+  end
+
+  defp base_risk_levels(
+         %{strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"} = config}}} =
+           state,
+         price,
+         snapshot
+       ) do
     {daily_vol, atr} = atr_premium_vol(state, price, snapshot)
 
     resolved =
@@ -2108,11 +2290,11 @@ defmodule TradingOptionsSim.ContractMonitor do
     {resolved.stop_loss, take_profit, context}
   end
 
-  def risk_levels(
-        %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
-        price,
-        snapshot
-      ) do
+  defp base_risk_levels(
+         %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
+         price,
+         snapshot
+       ) do
     resolved =
       TradingCore.RiskControls.resolve_levels(price, config, state.direction,
         daily_vol: snapshot["run_premium_daily_vol"]
@@ -2126,7 +2308,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     {resolved.stop_loss, take_profit, risk_context(config, resolved)}
   end
 
-  def risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
+  defp base_risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
 
   # "atr" (sl_atr_mult / tp_atr_mult): the stop sits k daily ATRs of the
   # UNDERLYING away, carried into premium by the entry delta -- a k-ATR
@@ -2675,6 +2857,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             entry_price: price,
             exit_state: seed_excursion(%{}, price, snapshot["run_underlying_price"])
         }
+        |> Map.put(:underlying_stop, risk_context["underlying_stop_level"])
         |> start_stop_ladder(run, price, action, take_profit_price, snapshot)
 
       {:error, reason} ->
@@ -2748,6 +2931,9 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     kind =
       cond do
+        is_number(Map.get(state, :underlying_stop)) ->
+          "underlying"
+
         not Map.has_key?(context, "initial_stop_loss_price") ->
           "unknown"
 
@@ -2872,6 +3058,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             exit_state: %{}
         }
         |> Map.put(:last_exit_loss?, loss?(realized_pnl_net || realized_pnl))
+        |> Map.put(:underlying_stop, nil)
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} exit fill failed: #{inspect(reason)}")
