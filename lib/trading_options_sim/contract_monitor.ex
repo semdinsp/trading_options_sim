@@ -497,7 +497,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       # restart; exit_state starts empty, which is safe because a moved
       # stop only ever tightens (see apply_moved_stop/4). The excursion it
       # tracks restarts too, so a resumed position's is flagged as partial
-      # (see excursion_context/2).
+      # (see excursion_context/3).
       entry_price: Keyword.get(opts, :entry_price),
       exit_state:
         if(Keyword.get(opts, :position_open?, false), do: %{excursion_resumed: true}, else: %{}),
@@ -1729,19 +1729,30 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   # Best and worst premium seen while the position is open (MFE / MAE),
-  # on the same premium/1 and in-session ticks the trailing stop follows,
-  # kept in exit_state (reset at entry and exit) rather than new struct
-  # fields, so a code reload doesn't meet running monitors whose state
-  # lacks them. Written to the run's context at exit (excursion_context/2).
+  # on in-session ticks, kept in exit_state (reset at entry and exit)
+  # rather than new struct fields, so a code reload doesn't meet running
+  # monitors whose state lacks them. Written to the run's context at exit
+  # (excursion_context/3).
+  #
+  # Excursion v2 (2026-11-26): measured on the quote MID (premium/1 when
+  # there is no quote), and both extremes start AT the entry price
+  # (seed_excursion/3), so MFE and MAE are never negative. v1 started them
+  # at the first tick after entry and tracked premium/1: a premium that
+  # never traded below entry gave a negative MAE, and one that never
+  # traded above it a negative MFE (4,424 of 32,426 runs closed since
+  # 2026-11-01). The underlying price at each extreme is kept too.
   defp track_excursion(%{entry_price: nil} = state, _snapshot), do: state
 
   defp track_excursion(state, snapshot) do
     with true <- session_open?(state),
-         %Decimal{} = price <- premium(snapshot) do
+         %Decimal{} = price <- excursion_price(snapshot) do
+      und = snapshot["run_underlying_price"]
+      exit_state = seed_excursion(state.exit_state, state.entry_price, und)
+
       exit_state =
-        state.exit_state
-        |> Map.update(:best_premium, price, &favorable(&1, price, state.direction))
-        |> Map.update(:worst_premium, price, &favorable(&1, price, opposite(state.direction)))
+        exit_state
+        |> extreme(:best_premium, :underlying_at_mfe, price, und, state.direction)
+        |> extreme(:worst_premium, :underlying_at_mae, price, und, opposite(state.direction))
 
       %{state | exit_state: exit_state}
     else
@@ -1749,8 +1760,33 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
-  defp favorable(a, b, "short"), do: Decimal.min(a, b)
-  defp favorable(a, b, _long), do: Decimal.max(a, b)
+  # The mid when there is a two-sided quote, else premium/1.
+  defp excursion_price(snapshot), do: quote_mid(snapshot) || premium(snapshot)
+
+  # Both extremes start at the entry price; the underlying at entry is
+  # the first one seen (the entry tick, or the first after a restart).
+  @doc false
+  def seed_excursion(exit_state, %Decimal{} = entry, und) do
+    exit_state
+    |> Map.put_new(:best_premium, entry)
+    |> Map.put_new(:worst_premium, entry)
+    |> Map.put_new(:underlying_at_entry, und)
+    |> Map.put_new(:underlying_at_mfe, und)
+    |> Map.put_new(:underlying_at_mae, und)
+  end
+
+  def seed_excursion(exit_state, _entry, _und), do: exit_state
+
+  # Replaces the extreme (and the underlying at it) only on a strictly
+  # better price, so a tie keeps the first time it was reached.
+  defp extreme(exit_state, key, und_key, price, und, direction) do
+    if beyond?(price, Map.fetch!(exit_state, key), direction),
+      do: exit_state |> Map.put(key, price) |> Map.put(und_key, und),
+      else: exit_state
+  end
+
+  defp beyond?(price, current, "short"), do: Decimal.lt?(price, current)
+  defp beyond?(price, current, _long), do: Decimal.gt?(price, current)
 
   defp opposite("short"), do: "long"
   defp opposite(_long), do: "short"
@@ -2471,6 +2507,7 @@ defmodule TradingOptionsSim.ContractMonitor do
                |> Map.put("risk_basis", Sim.r_denominator(state.direction))
                |> Map.put("initial_stop_loss_price", decimal_string(stop_loss_price))
                |> Map.put("initial_take_profit_price", decimal_string(take_profit_price))
+               |> Map.put("underlying_at_entry", snapshot["run_underlying_price"])
            }
          ) do
       {:ok, {_fill, run}} ->
@@ -2490,7 +2527,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             stop_loss_price: stop_loss_price,
             take_profit_price: take_profit_price,
             entry_price: price,
-            exit_state: %{}
+            exit_state: seed_excursion(%{}, price, snapshot["run_underlying_price"])
         }
 
       {:error, reason} ->
@@ -2502,39 +2539,54 @@ defmodule TradingOptionsSim.ContractMonitor do
   defp decimal_string(%Decimal{} = d), do: Decimal.to_string(d)
   defp decimal_string(nil), do: nil
 
-  # MFE / MAE as percent of the entry premium, in the position's favor
-  # and against it (both positive for a long that went up 5% and down
-  # 3%; a negative MFE means the premium never traded above entry, a
-  # negative MAE that it never traded below). Measured from the monitor's
-  # own entry price, falling back to the run's; nothing is written when
-  # neither is usable, since this must never fail an exit.
-  # "excursion_from" is "restart" when the monitor was resumed mid-trade,
-  # since the extremes before the restart were not kept.
-  defp excursion_context(%{exit_state: %{best_premium: best, worst_premium: worst}} = state, run) do
+  # MFE / MAE as percent of the entry premium, in the position's favour
+  # and against it, both >= 0 (excursion v2, see track_excursion/2): a
+  # long that went up 5% and down 3% has mfe_pct 5, mae_pct 3. Measured
+  # from the monitor's own entry price, falling back to the run's;
+  # nothing is written when neither is usable, since this must never
+  # fail an exit. "excursion_from" is "restart" when the monitor was
+  # resumed mid-trade, since the extremes before the restart were not
+  # kept. With the underlying at entry, at the MAE, at the MFE and at exit.
+  @excursion_version 2
+
+  defp excursion_context(state, run, snapshot) do
     case state.entry_price || run.entry_price do
       %Decimal{} = entry ->
-        if Decimal.gt?(entry, 0), do: excursion(state, entry, best, worst), else: %{}
+        if Decimal.gt?(entry, 0) do
+          exit_state =
+            seed_excursion(state.exit_state, entry, snapshot["run_underlying_price"])
+
+          excursion(state, entry, exit_state, snapshot)
+        else
+          %{}
+        end
 
       _ ->
         %{}
     end
   end
 
-  defp excursion_context(_state, _run), do: %{}
-
-  defp excursion(state, entry, best, worst) do
+  @doc false
+  def excursion(state, entry, exit_state, snapshot) do
     sign = if state.direction == "short", do: -1, else: 1
+    best = exit_state.best_premium
+    worst = exit_state.worst_premium
 
     pct = fn price ->
       Decimal.to_float(Decimal.div(Decimal.sub(price, entry), entry)) * 100 * sign
     end
 
     %{
-      "mfe_pct" => Float.round(pct.(best), 4),
-      "mae_pct" => Float.round(-pct.(worst), 4),
+      "mfe_pct" => Float.round(max(pct.(best), 0.0), 4),
+      "mae_pct" => Float.round(max(-pct.(worst), 0.0), 4),
       "best_premium" => Decimal.to_string(best),
       "worst_premium" => Decimal.to_string(worst),
-      "excursion_from" => if(state.exit_state[:excursion_resumed], do: "restart", else: "entry")
+      "excursion_version" => @excursion_version,
+      "underlying_at_entry" => exit_state[:underlying_at_entry],
+      "underlying_at_mfe" => exit_state[:underlying_at_mfe],
+      "underlying_at_mae" => exit_state[:underlying_at_mae],
+      "underlying_at_exit" => snapshot["run_underlying_price"],
+      "excursion_from" => if(exit_state[:excursion_resumed], do: "restart", else: "entry")
     }
   end
 
@@ -2651,7 +2703,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              exit_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context),
              context:
                (run.context || %{})
-               |> Map.merge(excursion_context(state, run))
+               |> Map.merge(excursion_context(state, run, snapshot))
                |> Map.merge(stop_context(state, run, exit_reason))
            }
          ) do
