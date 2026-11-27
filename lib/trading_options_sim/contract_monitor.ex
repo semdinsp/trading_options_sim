@@ -497,7 +497,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       # restart; exit_state starts empty, which is safe because a moved
       # stop only ever tightens (see apply_moved_stop/4). The excursion it
       # tracks restarts too, so a resumed position's is flagged as partial
-      # (see excursion_context/2).
+      # (see excursion_context/3).
       entry_price: Keyword.get(opts, :entry_price),
       exit_state:
         if(Keyword.get(opts, :position_open?, false), do: %{excursion_resumed: true}, else: %{}),
@@ -563,6 +563,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             take_profit_price: run.take_profit_price,
             exit_state: %{excursion_resumed: true}
         }
+        |> Map.put(:underlying_stop, (run.context || %{})["underlying_stop_level"])
 
       nil ->
         if state.position_open? and not Sim.sim_run_open?(state.sim_run_id) do
@@ -624,14 +625,11 @@ defmodule TradingOptionsSim.ContractMonitor do
     {:noreply, state}
   end
 
-  # An "atr" version reads the underlying's daily ATR at its entry tick
-  # from trading_signal's cache; start the fetch now so that read hits.
-  defp maybe_prewarm_atr(%{
-         symbol: symbol,
-         strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"}}}
-       })
-       when is_binary(symbol),
-       do: TradingOptionsSim.DailyAtr.prewarm(symbol)
+  # Every entry reads the underlying's daily ATR from trading_signal's
+  # cache (an "atr" version for its levels, every version for the stop
+  # ladder's underlying rungs); start the fetch now so that read hits.
+  defp maybe_prewarm_atr(%{symbol: symbol}) when is_binary(symbol),
+    do: TradingOptionsSim.DailyAtr.prewarm(symbol)
 
   defp maybe_prewarm_atr(_state), do: :ok
 
@@ -860,7 +858,9 @@ defmodule TradingOptionsSim.ContractMonitor do
 
   # Until the open run is read, position_open? may be the stale opts flag.
   defp do_force_close(%{resume_pending?: true} = state, _reason), do: state
-  defp do_force_close(%{position_open?: false} = state, _reason), do: state
+
+  defp do_force_close(%{position_open?: false} = state, reason),
+    do: maybe_close_stop_ladders(state, reason)
 
   defp do_force_close(%{last_snapshot: snapshot} = state, _reason)
        when map_size(snapshot) == 0 do
@@ -872,7 +872,154 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   defp do_force_close(state, reason) do
-    submit_exit(state, state.last_snapshot, to_string(reason))
+    state
+    |> submit_exit(state.last_snapshot, to_string(reason))
+    |> maybe_close_stop_ladders(reason)
+  end
+
+  # -- Stop ladder ------------------------------------------------------------
+  #
+  # Every entered run carries a TradingOptionsSim.StopLadder: virtual stops
+  # (premium %, underlying ATR multiples, a time stop; each with and
+  # without the take-profit) fed the same ticks as the run, and kept
+  # running after the real run closes on its stop or target, until the
+  # rule exit or the end of the session closes them. Held in
+  # state[:stop_ladders] (read with Map.get, so a monitor started before
+  # the key existed works), one per run, so a re-entry runs alongside the
+  # previous run's ladder. A restart or deactivation drops ladders still
+  # open, so a run's ladder is complete only when every rung has a row
+  # (Sim.stop_sizing/2 counts only complete ones). Never fails a tick:
+  # a write error is logged and the rows are dropped.
+  defp start_stop_ladder(state, run, price, action, take_profit_price, snapshot) do
+    ladder =
+      TradingOptionsSim.StopLadder.new(%{
+        sim_run_id: run.id,
+        strategy_version_id: state.strategy_version.id,
+        direction: state.direction,
+        right: state.right,
+        entry_at: run.entry_at,
+        entry_price: price,
+        risk_at_entry: run.risk_at_entry,
+        multiplier: state.multiplier,
+        quantity: state.quantity,
+        entry_commission: estimate_commission(state, price, action),
+        take_profit_price: take_profit_price,
+        underlying_at_entry: number_or_nil(snapshot["run_underlying_price"]),
+        atr20m: ladder_atr20m(state),
+        min_hold_seconds: state.min_hold_seconds
+      })
+
+    Map.put(state, :stop_ladders, [ladder | Map.get(state, :stop_ladders, [])])
+  rescue
+    error ->
+      Logger.warning(
+        "ContractMonitor: #{state.symbol} stop ladder not started: #{Exception.message(error)}"
+      )
+
+      state
+  end
+
+  defp ladder_atr20m(state) do
+    case TradingOptionsSim.DailyAtr.atr(state.symbol) do
+      {:ok, atr} -> TradingOptionsSim.StopLadder.atr20m(atr)
+      _ -> nil
+    end
+  end
+
+  defp number_or_nil(n) when is_number(n), do: n / 1
+  defp number_or_nil(_n), do: nil
+
+  defp step_stop_ladders(state, snapshot) do
+    case Map.get(state, :stop_ladders, []) do
+      [] ->
+        state
+
+      ladders ->
+        now = DateTime.utc_now()
+        tick = ladder_tick(state, snapshot)
+
+        cond do
+          not state.strategy_version.overnight_hold and closing_soon?(state) ->
+            finish_stop_ladders(
+              state,
+              ladders,
+              &TradingOptionsSim.StopLadder.close_all(&1, "eod", tick, now)
+            )
+
+          session_open?(state) ->
+            finish_stop_ladders(state, ladders, &TradingOptionsSim.StopLadder.step(&1, tick, now))
+
+          true ->
+            state
+        end
+    end
+  end
+
+  @ladder_eod_reasons ~w(eod_flatten expiry)
+
+  defp maybe_close_stop_ladders(state, reason) do
+    ladders = Map.get(state, :stop_ladders, [])
+
+    if ladders != [] and to_string(reason) in @ladder_eod_reasons and
+         map_size(state.last_snapshot) > 0 do
+      tick = ladder_tick(state, state.last_snapshot)
+      now = DateTime.utc_now()
+
+      finish_stop_ladders(
+        state,
+        ladders,
+        &TradingOptionsSim.StopLadder.close_all(&1, "eod", tick, now)
+      )
+    else
+      state
+    end
+  end
+
+  defp finish_stop_ladders(state, ladders, fun) do
+    {ladders, rows} =
+      Enum.reduce(ladders, {[], []}, fn ladder, {kept, rows} ->
+        {ladder, closed} = fun.(ladder)
+        kept = if TradingOptionsSim.StopLadder.done?(ladder), do: kept, else: [ladder | kept]
+        {kept, rows ++ closed}
+      end)
+
+    write_stop_ladder_rows(state, rows)
+    Map.put(state, :stop_ladders, Enum.reverse(ladders))
+  end
+
+  defp write_stop_ladder_rows(_state, []), do: :ok
+
+  defp write_stop_ladder_rows(state, rows) do
+    Sim.insert_stop_ladder_rows(rows)
+
+    for %{rung_kind: "premium", rung_value: nil, with_tp: false} = row <- rows,
+        do: Sim.record_shadow_exit(row.sim_run_id, row)
+
+    :ok
+  rescue
+    error ->
+      Logger.warning(
+        "ContractMonitor: #{state.symbol} #{length(rows)} stop ladder rows not written: #{Exception.message(error)}"
+      )
+
+      :ok
+  end
+
+  defp ladder_tick(state, snapshot) do
+    {bid, ask} =
+      case quote_from(snapshot) do
+        {bid, ask} -> {bid, ask}
+        nil -> {nil, nil}
+      end
+
+    %{
+      mid: quote_mid(snapshot),
+      bid: bid,
+      ask: ask,
+      premium: premium(snapshot),
+      underlying: number_or_nil(snapshot["run_underlying_price"]),
+      rule_exit?: RuleEngine.evaluate(state.exit_rule, snapshot) == true
+    }
   end
 
   # See StrategyStockMonitor.subscribe_to_signals/1's identical
@@ -1451,12 +1598,12 @@ defmodule TradingOptionsSim.ContractMonitor do
   #
   # is_integer guard: in Erlang term order every number sorts below nil,
   # so `dte <= nil` is TRUE and a nil cutoff would block entries forever.
-  defp maybe_transition_before_expiry(%{position_open?: false} = state, _snapshot, dte)
+  defp maybe_transition_before_expiry(%{position_open?: false} = state, snapshot, dte)
        when is_integer(state.expiry_close_dte) and dte <= state.expiry_close_dte,
-       do: state
+       do: step_stop_ladders(state, snapshot)
 
   defp maybe_transition_before_expiry(state, snapshot, _dte),
-    do: maybe_transition(state, snapshot)
+    do: state |> step_stop_ladders(snapshot) |> maybe_transition(snapshot)
 
   # Remembers when the entry rule turned true; any false tick resets it,
   # so entry_confirmed?/2 measures an unbroken run of true evaluations.
@@ -1610,7 +1757,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       state |> track_excursion(snapshot) |> maybe_move_stop(snapshot) |> maybe_gain_lock(snapshot)
 
     case risk_exit(state, snapshot) do
-      nil ->
+      {nil, state} ->
         if min_hold_elapsed?(state) and RuleEngine.evaluate(state.exit_rule, snapshot) and
              session_open?(state) do
           submit_exit(state, snapshot, "rule_exit")
@@ -1621,7 +1768,7 @@ defmodule TradingOptionsSim.ContractMonitor do
       # Same session gate as a rule exit: a real stop only executes in
       # session, and outside it a model price can move on after-hours
       # underlying ticks. (Stale IBKR data is already blocked upstream.)
-      reason ->
+      {reason, state} ->
         if session_open?(state), do: submit_exit(state, snapshot, reason), else: state
     end
   end
@@ -1635,34 +1782,148 @@ defmodule TradingOptionsSim.ContractMonitor do
   # (run_current_price), since the levels are percentages of the premium
   # paid -- or, when a tick carries a quote but no price, the quote mid,
   # the same fallback fills use, so the levels are never left unchecked.
-  defp risk_exit(%{stop_loss_price: nil, take_profit_price: nil}, _snapshot), do: nil
-
+  #
+  # Returns {reason | nil, state}: the "mid_confirmed" trigger keeps when
+  # a stop was first breached in exit_state.
+  #
+  # Two stop triggers, per params["stop_trigger"]:
+  #   * "current" (the default; every version before 2026-11-27): the stop
+  #     fires on the first tick premium/1 is through it.
+  #   * "mid_confirmed": judged on the quote MID (premium/1 without a
+  #     quote); deferred while the spread is wider than 15% of the mid
+  #     (logged once per run as stop_deferred_wide_spread); and it fires
+  #     only on a second breaching tick at least 2 s after the first. A
+  #     tick back inside the stop resets it. For long options, where the
+  #     risk is a stop fired on a wide or flickering quote.
+  # Either trigger also checks an underlying stop
+  # (risk_controls "underlying_atr", state[:underlying_stop]).
   defp risk_exit(state, snapshot) do
-    case premium(snapshot) do
-      nil ->
-        nil
+    {stop?, state} = stop_hit(state, snapshot)
+    price = premium(snapshot)
 
-      price ->
-        cond do
-          stop_armed?(state) and
-              TradingCore.RiskControls.hit_stop_loss?(
-                state.stop_loss_price,
-                price,
-                state.direction
-              ) ->
-            "stop_loss"
+    cond do
+      stop? ->
+        {"stop_loss", state}
 
+      price != nil and
           TradingCore.RiskControls.hit_take_profit?(
             state.take_profit_price,
             price,
             state.direction
           ) ->
-            "take_profit"
+        {"take_profit", state}
 
-          true ->
-            nil
-        end
+      true ->
+        {nil, state}
     end
+  end
+
+  @stop_confirm_ms 2_000
+  @stop_max_spread_share Decimal.new("0.15")
+
+  defp stop_hit(state, snapshot) do
+    cond do
+      is_nil(state.stop_loss_price) and is_nil(Map.get(state, :underlying_stop)) ->
+        {false, state}
+
+      not stop_armed?(state) ->
+        {false, state}
+
+      stop_trigger(state) == "mid_confirmed" ->
+        confirmed_stop(state, snapshot)
+
+      true ->
+        {premium_stop_breached?(state, premium(snapshot)) or
+           underlying_stop_breached?(state, snapshot), state}
+    end
+  end
+
+  @doc false
+  def confirmed_stop(state, snapshot, now \\ DateTime.utc_now()) do
+    mid = quote_mid(snapshot) || premium(snapshot)
+
+    breached? =
+      premium_stop_breached?(state, mid) or underlying_stop_breached?(state, snapshot)
+
+    breach_at = Map.get(state.exit_state, :stop_breach_at)
+
+    cond do
+      not breached? ->
+        {false, %{state | exit_state: Map.delete(state.exit_state, :stop_breach_at)}}
+
+      wide_spread?(snapshot, mid) ->
+        {false, note_stop_deferred(state, snapshot, mid)}
+
+      is_nil(breach_at) ->
+        {false, %{state | exit_state: Map.put(state.exit_state, :stop_breach_at, now)}}
+
+      DateTime.diff(now, breach_at, :millisecond) >= @stop_confirm_ms ->
+        {true, state}
+
+      true ->
+        {false, state}
+    end
+  end
+
+  @doc false
+  def stop_trigger(%{strategy_version: %{params: %{"stop_trigger" => "mid_confirmed"}}}),
+    do: "mid_confirmed"
+
+  def stop_trigger(_state), do: "current"
+
+  defp premium_stop_breached?(%{stop_loss_price: nil}, _price), do: false
+  defp premium_stop_breached?(_state, nil), do: false
+
+  defp premium_stop_breached?(state, price),
+    do: TradingCore.RiskControls.hit_stop_loss?(state.stop_loss_price, price, state.direction)
+
+  # risk_controls "underlying_atr": the stop is a level on the UNDERLYING,
+  # set at entry; breached once the underlying is at or past it against
+  # the position.
+  defp underlying_stop_breached?(state, snapshot) do
+    case {Map.get(state, :underlying_stop), number_or_nil(snapshot["run_underlying_price"])} do
+      {level, und} when is_number(level) and is_number(und) ->
+        (und - level) * underlying_sign(state.right, state.direction) <= 0
+
+      _ ->
+        false
+    end
+  end
+
+  # +1 when the position gains as the underlying rises (long call, short
+  # put), -1 when it gains as it falls (long put, short call).
+  @doc false
+  def underlying_sign(right, direction) do
+    r = if right == "P", do: -1, else: 1
+    d = if direction == "short", do: -1, else: 1
+    r * d
+  end
+
+  defp wide_spread?(snapshot, mid) do
+    case {quote_from(snapshot), mid} do
+      {{bid, ask}, %Decimal{} = mid} ->
+        Decimal.gt?(mid, 0) and
+          Decimal.gt?(Decimal.div(Decimal.sub(ask, bid), mid), @stop_max_spread_share)
+
+      _ ->
+        false
+    end
+  end
+
+  defp note_stop_deferred(state, snapshot, mid) do
+    exit_state = Map.update(state.exit_state, :stop_deferrals, 1, &(&1 + 1))
+
+    unless Map.get(state.exit_state, :stop_deferred_logged) do
+      {bid, ask} = quote_from(snapshot)
+
+      Logger.info(
+        "ContractMonitor: #{state.symbol} #{state.expiry} #{Decimal.to_string(state.strike)}#{state.right} " <>
+          "stop_deferred_wide_spread: #{Decimal.to_string(bid)}/#{Decimal.to_string(ask)} " <>
+          "is over 15% of the mid #{Decimal.to_string(Decimal.round(mid, 4))}"
+      )
+    end
+
+    %{state | exit_state: Map.put(exit_state, :stop_deferred_logged, true)}
   end
 
   # The option's price, on which every stop and target here is set:
@@ -1729,19 +1990,30 @@ defmodule TradingOptionsSim.ContractMonitor do
   end
 
   # Best and worst premium seen while the position is open (MFE / MAE),
-  # on the same premium/1 and in-session ticks the trailing stop follows,
-  # kept in exit_state (reset at entry and exit) rather than new struct
-  # fields, so a code reload doesn't meet running monitors whose state
-  # lacks them. Written to the run's context at exit (excursion_context/2).
+  # on in-session ticks, kept in exit_state (reset at entry and exit)
+  # rather than new struct fields, so a code reload doesn't meet running
+  # monitors whose state lacks them. Written to the run's context at exit
+  # (excursion_context/3).
+  #
+  # Excursion v2 (2026-11-26): measured on the quote MID (premium/1 when
+  # there is no quote), and both extremes start AT the entry price
+  # (seed_excursion/3), so MFE and MAE are never negative. v1 started them
+  # at the first tick after entry and tracked premium/1: a premium that
+  # never traded below entry gave a negative MAE, and one that never
+  # traded above it a negative MFE (4,424 of 32,426 runs closed since
+  # 2026-11-01). The underlying price at each extreme is kept too.
   defp track_excursion(%{entry_price: nil} = state, _snapshot), do: state
 
   defp track_excursion(state, snapshot) do
     with true <- session_open?(state),
-         %Decimal{} = price <- premium(snapshot) do
+         %Decimal{} = price <- excursion_price(snapshot) do
+      und = snapshot["run_underlying_price"]
+      exit_state = seed_excursion(state.exit_state, state.entry_price, und)
+
       exit_state =
-        state.exit_state
-        |> Map.update(:best_premium, price, &favorable(&1, price, state.direction))
-        |> Map.update(:worst_premium, price, &favorable(&1, price, opposite(state.direction)))
+        exit_state
+        |> extreme(:best_premium, :underlying_at_mfe, price, und, state.direction)
+        |> extreme(:worst_premium, :underlying_at_mae, price, und, opposite(state.direction))
 
       %{state | exit_state: exit_state}
     else
@@ -1749,8 +2021,33 @@ defmodule TradingOptionsSim.ContractMonitor do
     end
   end
 
-  defp favorable(a, b, "short"), do: Decimal.min(a, b)
-  defp favorable(a, b, _long), do: Decimal.max(a, b)
+  # The mid when there is a two-sided quote, else premium/1.
+  defp excursion_price(snapshot), do: quote_mid(snapshot) || premium(snapshot)
+
+  # Both extremes start at the entry price; the underlying at entry is
+  # the first one seen (the entry tick, or the first after a restart).
+  @doc false
+  def seed_excursion(exit_state, %Decimal{} = entry, und) do
+    exit_state
+    |> Map.put_new(:best_premium, entry)
+    |> Map.put_new(:worst_premium, entry)
+    |> Map.put_new(:underlying_at_entry, und)
+    |> Map.put_new(:underlying_at_mfe, und)
+    |> Map.put_new(:underlying_at_mae, und)
+  end
+
+  def seed_excursion(exit_state, _entry, _und), do: exit_state
+
+  # Replaces the extreme (and the underlying at it) only on a strictly
+  # better price, so a tie keeps the first time it was reached.
+  defp extreme(exit_state, key, und_key, price, und, direction) do
+    if beyond?(price, Map.fetch!(exit_state, key), direction),
+      do: exit_state |> Map.put(key, price) |> Map.put(und_key, und),
+      else: exit_state
+  end
+
+  defp beyond?(price, current, "short"), do: Decimal.lt?(price, current)
+  defp beyond?(price, current, _long), do: Decimal.gt?(price, current)
 
   defp opposite("short"), do: "long"
   defp opposite(_long), do: "short"
@@ -1888,13 +2185,80 @@ defmodule TradingOptionsSim.ContractMonitor do
   # Same flag name and buffer as trading_live. The stop is left alone.
   @round_number_buffer Decimal.new("0.02")
 
+  # risk_controls "no_take_profit": true drops the target for any method,
+  # leaving the stop (and the rule exit) to close the trade. Explicit, as
+  # TradingCore.RiskControls puts its own default target on a config
+  # without one.
   @doc false
-  def risk_levels(
-        %{strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"} = config}}} =
-          state,
-        price,
-        snapshot
-      ) do
+  def risk_levels(state, price, snapshot) do
+    case state do
+      %{strategy_version: %{params: %{"risk_controls" => %{"no_take_profit" => true} = rc}}} ->
+        # TradingCore needs a target percent to compute the stop (it
+        # raises without one); give it one and discard the target.
+        rc = Map.put_new(rc, "take_profit_percent", rc["stop_loss_percent"] || 100)
+        state = put_in(state.strategy_version.params["risk_controls"], rc)
+        {stop, _take_profit, context} = base_risk_levels(state, price, snapshot)
+        {stop, nil, Map.put(context, "no_take_profit", true)}
+
+      _ ->
+        base_risk_levels(state, price, snapshot)
+    end
+  end
+
+  # "underlying_atr" (underlying_atr_mult k): no premium stop; the stop is
+  # the underlying k x the 20-minute ATR against the position from its
+  # price at entry, the 20-minute ATR being the daily ATR(14) x
+  # sqrt(20/390) (StopLadder.atr20m/1, the same as the stop ladder's
+  # underlying rungs). The level goes into the run's context
+  # ("underlying_stop_level") so a restart resumes it. The target is the
+  # take_profit_percent of the premium. Without a daily ATR at entry the
+  # stop falls back to stop_loss_percent of the premium
+  # (risk_fallback_reason "no_atr").
+  defp base_risk_levels(
+         %{
+           strategy_version: %{
+             params: %{"risk_controls" => %{"method" => "underlying_atr"} = config}
+           }
+         } =
+           state,
+         price,
+         snapshot
+       ) do
+    percent = %{
+      "method" => "percent_of_entry",
+      "stop_loss_percent" => config["stop_loss_percent"],
+      "take_profit_percent" => config["take_profit_percent"] || config["stop_loss_percent"]
+    }
+
+    levels = TradingCore.RiskControls.resolve_levels(price, percent, state.direction, [])
+    und = number_or_nil(snapshot["run_underlying_price"])
+    atr20m = ladder_atr20m(state)
+    mult = config["underlying_atr_mult"]
+
+    if is_number(und) and is_number(atr20m) do
+      level = und - underlying_sign(state.right, state.direction) * mult * atr20m
+
+      {nil, levels.take_profit,
+       %{
+         "risk_method" => "underlying_atr",
+         "underlying_atr_mult" => mult,
+         "atr20m" => atr20m,
+         "underlying_at_entry" => und,
+         "underlying_stop_level" => level,
+         "risk_fallback_reason" => nil
+       }}
+    else
+      {levels.stop_loss, levels.take_profit,
+       %{"risk_method" => "percent_of_entry", "risk_fallback_reason" => "no_atr"}}
+    end
+  end
+
+  defp base_risk_levels(
+         %{strategy_version: %{params: %{"risk_controls" => %{"method" => "atr"} = config}}} =
+           state,
+         price,
+         snapshot
+       ) do
     {daily_vol, atr} = atr_premium_vol(state, price, snapshot)
 
     resolved =
@@ -1926,11 +2290,11 @@ defmodule TradingOptionsSim.ContractMonitor do
     {resolved.stop_loss, take_profit, context}
   end
 
-  def risk_levels(
-        %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
-        price,
-        snapshot
-      ) do
+  defp base_risk_levels(
+         %{strategy_version: %{params: %{"risk_controls" => %{} = config}}} = state,
+         price,
+         snapshot
+       ) do
     resolved =
       TradingCore.RiskControls.resolve_levels(price, config, state.direction,
         daily_vol: snapshot["run_premium_daily_vol"]
@@ -1944,7 +2308,7 @@ defmodule TradingOptionsSim.ContractMonitor do
     {resolved.stop_loss, take_profit, risk_context(config, resolved)}
   end
 
-  def risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
+  defp base_risk_levels(_state, _price, _snapshot), do: {nil, nil, %{}}
 
   # "atr" (sl_atr_mult / tp_atr_mult): the stop sits k daily ATRs of the
   # UNDERLYING away, carried into premium by the entry delta -- a k-ATR
@@ -2471,6 +2835,7 @@ defmodule TradingOptionsSim.ContractMonitor do
                |> Map.put("risk_basis", Sim.r_denominator(state.direction))
                |> Map.put("initial_stop_loss_price", decimal_string(stop_loss_price))
                |> Map.put("initial_take_profit_price", decimal_string(take_profit_price))
+               |> Map.put("underlying_at_entry", snapshot["run_underlying_price"])
            }
          ) do
       {:ok, {_fill, run}} ->
@@ -2490,8 +2855,10 @@ defmodule TradingOptionsSim.ContractMonitor do
             stop_loss_price: stop_loss_price,
             take_profit_price: take_profit_price,
             entry_price: price,
-            exit_state: %{}
+            exit_state: seed_excursion(%{}, price, snapshot["run_underlying_price"])
         }
+        |> Map.put(:underlying_stop, risk_context["underlying_stop_level"])
+        |> start_stop_ladder(run, price, action, take_profit_price, snapshot)
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} entry fill failed: #{inspect(reason)}")
@@ -2502,39 +2869,54 @@ defmodule TradingOptionsSim.ContractMonitor do
   defp decimal_string(%Decimal{} = d), do: Decimal.to_string(d)
   defp decimal_string(nil), do: nil
 
-  # MFE / MAE as percent of the entry premium, in the position's favor
-  # and against it (both positive for a long that went up 5% and down
-  # 3%; a negative MFE means the premium never traded above entry, a
-  # negative MAE that it never traded below). Measured from the monitor's
-  # own entry price, falling back to the run's; nothing is written when
-  # neither is usable, since this must never fail an exit.
-  # "excursion_from" is "restart" when the monitor was resumed mid-trade,
-  # since the extremes before the restart were not kept.
-  defp excursion_context(%{exit_state: %{best_premium: best, worst_premium: worst}} = state, run) do
+  # MFE / MAE as percent of the entry premium, in the position's favour
+  # and against it, both >= 0 (excursion v2, see track_excursion/2): a
+  # long that went up 5% and down 3% has mfe_pct 5, mae_pct 3. Measured
+  # from the monitor's own entry price, falling back to the run's;
+  # nothing is written when neither is usable, since this must never
+  # fail an exit. "excursion_from" is "restart" when the monitor was
+  # resumed mid-trade, since the extremes before the restart were not
+  # kept. With the underlying at entry, at the MAE, at the MFE and at exit.
+  @excursion_version 2
+
+  defp excursion_context(state, run, snapshot) do
     case state.entry_price || run.entry_price do
       %Decimal{} = entry ->
-        if Decimal.gt?(entry, 0), do: excursion(state, entry, best, worst), else: %{}
+        if Decimal.gt?(entry, 0) do
+          exit_state =
+            seed_excursion(state.exit_state, entry, snapshot["run_underlying_price"])
+
+          excursion(state, entry, exit_state, snapshot)
+        else
+          %{}
+        end
 
       _ ->
         %{}
     end
   end
 
-  defp excursion_context(_state, _run), do: %{}
-
-  defp excursion(state, entry, best, worst) do
+  @doc false
+  def excursion(state, entry, exit_state, snapshot) do
     sign = if state.direction == "short", do: -1, else: 1
+    best = exit_state.best_premium
+    worst = exit_state.worst_premium
 
     pct = fn price ->
       Decimal.to_float(Decimal.div(Decimal.sub(price, entry), entry)) * 100 * sign
     end
 
     %{
-      "mfe_pct" => Float.round(pct.(best), 4),
-      "mae_pct" => Float.round(-pct.(worst), 4),
+      "mfe_pct" => Float.round(max(pct.(best), 0.0), 4),
+      "mae_pct" => Float.round(max(-pct.(worst), 0.0), 4),
       "best_premium" => Decimal.to_string(best),
       "worst_premium" => Decimal.to_string(worst),
-      "excursion_from" => if(state.exit_state[:excursion_resumed], do: "restart", else: "entry")
+      "excursion_version" => @excursion_version,
+      "underlying_at_entry" => exit_state[:underlying_at_entry],
+      "underlying_at_mfe" => exit_state[:underlying_at_mfe],
+      "underlying_at_mae" => exit_state[:underlying_at_mae],
+      "underlying_at_exit" => snapshot["run_underlying_price"],
+      "excursion_from" => if(exit_state[:excursion_resumed], do: "restart", else: "entry")
     }
   end
 
@@ -2549,6 +2931,9 @@ defmodule TradingOptionsSim.ContractMonitor do
 
     kind =
       cond do
+        is_number(Map.get(state, :underlying_stop)) ->
+          "underlying"
+
         not Map.has_key?(context, "initial_stop_loss_price") ->
           "unknown"
 
@@ -2651,7 +3036,7 @@ defmodule TradingOptionsSim.ContractMonitor do
              exit_snapshot: stamp(jsonify_snapshot(Map.merge(snapshot, fill_basis)), context),
              context:
                (run.context || %{})
-               |> Map.merge(excursion_context(state, run))
+               |> Map.merge(excursion_context(state, run, snapshot))
                |> Map.merge(stop_context(state, run, exit_reason))
            }
          ) do
@@ -2673,6 +3058,7 @@ defmodule TradingOptionsSim.ContractMonitor do
             exit_state: %{}
         }
         |> Map.put(:last_exit_loss?, loss?(realized_pnl_net || realized_pnl))
+        |> Map.put(:underlying_stop, nil)
 
       {:error, reason} ->
         Logger.error("ContractMonitor: #{state.symbol} exit fill failed: #{inspect(reason)}")

@@ -370,6 +370,17 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       after a losing exit (net P&L below 0); a winning exit keeps the
       plain cooldown. Single-leg versions only: `ComboMonitor` ignores it.
       See `ContractMonitor.cooled_down?/2`.
+    * `"stop_trigger"`: `"current"` (the default) or `"mid_confirmed"`:
+      the stop is judged on the quote mid, deferred while the spread is
+      over 15% of the mid, and fires on a second breaching tick at least
+      2 s after the first. See `ContractMonitor.risk_exit/2`.
+    * `risk_controls` `"no_take_profit": true` (any method) drops the
+      target; `take_profit_percent` is then not required.
+    * `risk_controls` `"underlying_atr"` with positive
+      `"underlying_atr_mult"` k and `"stop_loss_percent"` (the fallback
+      without an ATR): no premium stop; the stop is the underlying k x
+      the 20-minute ATR (daily ATR(14) x sqrt(20/390)) against the
+      position. Single-leg versions only.
     * `"gain_lock"`: `%{"trigger_r" => t, "lock_r" => l}` with `t > 0` and
       `0 <= l < t`. Once the premium has moved `t` R in the position's
       favour, the stop moves to lock in `l` R (0 = breakeven), and the
@@ -389,6 +400,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       ) ++
       seconds_errors("stop_arm_seconds", Map.get(params, "stop_arm_seconds", :absent)) ++
       loss_cooldown_errors(Map.get(params, "reentry_cooldown_after_loss_seconds", :absent)) ++
+      stop_trigger_errors(Map.get(params, "stop_trigger", :absent)) ++
       gain_lock_errors(Map.get(params, "gain_lock", :absent), Map.get(params, "risk_controls"))
   end
 
@@ -397,6 +409,12 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   defp seconds_errors(_key, :absent), do: []
   defp seconds_errors(_key, secs) when is_integer(secs) and secs >= 0, do: []
   defp seconds_errors(key, _), do: ["#{key} must be a non-negative integer"]
+
+  defp stop_trigger_errors(:absent), do: []
+  defp stop_trigger_errors(trigger) when trigger in ["current", "mid_confirmed"], do: []
+
+  defp stop_trigger_errors(_),
+    do: ["stop_trigger must be \"current\" or \"mid_confirmed\""]
 
   # Used instead of reentry_cooldown_seconds after a losing exit only:
   # seconds, or "rest_of_session" (until the next New York trading date).
@@ -432,7 +450,18 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   defp risk_controls_errors(:absent), do: []
 
   defp risk_controls_errors(%{"method" => "percent_of_entry"} = config),
-    do: levels_config_errors(config, ["stop_loss_percent", "take_profit_percent"])
+    do: levels_config_errors(config, ["stop_loss_percent" | take_profit_key(config)])
+
+  # "underlying_atr": the stop is underlying_atr_mult x the 20-minute ATR
+  # of the underlying against the position (no premium stop);
+  # stop_loss_percent is the fallback when there is no ATR at entry.
+  # Single-leg versions only.
+  defp risk_controls_errors(%{"method" => "underlying_atr"} = config),
+    do:
+      levels_config_errors(config, [
+        "underlying_atr_mult",
+        "stop_loss_percent" | take_profit_key(config)
+      ])
 
   # The percents are required too: they are the fallback when the entry
   # tick has no premium vol, and without them RiskControls would use its
@@ -462,7 +491,7 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
   defp risk_controls_errors(%{"method" => method}),
     do: [
       "risk_controls.method #{inspect(method)} is not supported; " <>
-        "use percent_of_entry, volatility_multiple or atr"
+        "use percent_of_entry, volatility_multiple, atr or underlying_atr"
     ]
 
   defp risk_controls_errors(_config),
@@ -475,8 +504,17 @@ defmodule TradingOptionsSim.Sim.StrategyVersion do
       if(Map.get(config, "round_numbers", false) in [true, false],
         do: [],
         else: ["risk_controls.round_numbers must be true or false"]
+      ) ++
+      if(Map.get(config, "no_take_profit", false) in [true, false],
+        do: [],
+        else: ["risk_controls.no_take_profit must be true or false"]
       )
   end
+
+  # "no_take_profit": true drops the target, so take_profit_percent isn't
+  # required (for percent_of_entry and underlying_atr).
+  defp take_profit_key(%{"no_take_profit" => true}), do: []
+  defp take_profit_key(_config), do: ["take_profit_percent"]
 
   defp exit_strategy_errors(:absent), do: []
 

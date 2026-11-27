@@ -2775,7 +2775,10 @@ defmodule TradingOptionsSim.ContractMonitorTest do
         |> Decimal.div(run.entry_price)
         |> Decimal.to_float()
 
-      assert_in_delta run.context["mae_pct"], expected_mae * 100, 0.001
+      # Excursion v2: the worst premium starts at entry, so MAE is never negative.
+      assert_in_delta run.context["mae_pct"], max(expected_mae * 100, 0.0), 0.001
+      assert run.context["mae_pct"] >= 0
+      assert run.context["excursion_version"] == 2
       assert run.context["excursion_from"] == "entry"
       # Entry-time context is kept alongside the exit additions.
       assert run.context["risk_basis"]

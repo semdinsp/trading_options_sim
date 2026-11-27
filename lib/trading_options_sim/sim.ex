@@ -17,12 +17,60 @@ defmodule TradingOptionsSim.Sim do
     SimFill,
     SimRun,
     SimRunLeg,
+    SimRunStopLadder,
     Strategy,
     StrategyVersion,
     Tag,
     TargetPool,
     TargetPoolMember
   }
+
+  # --- Stop ladder -------------------------------------------------------------
+
+  @doc """
+  Writes closed `StopLadder` rungs (the row maps `StopLadder.step/3` and
+  `close_all/4` return) as `sim_run_stop_ladder` rows.
+  """
+  @spec insert_stop_ladder_rows([map()]) :: {non_neg_integer(), nil}
+  def insert_stop_ladder_rows([]), do: {0, nil}
+
+  def insert_stop_ladder_rows(rows) do
+    now = DateTime.utc_now()
+
+    rows =
+      Enum.map(rows, &(&1 |> Map.put(:id, UUIDv7.generate()) |> Map.put(:inserted_at, now)))
+
+    Repo.insert_all(SimRunStopLadder, rows)
+  end
+
+  @shadow_exit_reasons ~w(stop_loss take_profit)
+
+  @doc """
+  Writes the no-stop, no-target rung's result into a run that closed on
+  its stop or target, as `shadow_exit_price` / `shadow_exit_reason` /
+  `shadow_r` in its context: what the trade would have done with
+  neither. A run that closed any other way is left alone (its shadow is
+  its own exit).
+  """
+  @spec record_shadow_exit(String.t(), map()) :: :ok
+  def record_shadow_exit(sim_run_id, row) do
+    shadow = %{
+      "shadow_exit_price" => row.exit_price && Decimal.to_string(row.exit_price),
+      "shadow_exit_reason" => row.exit_reason,
+      "shadow_r" => row.r_net
+    }
+
+    from(r in SimRun,
+      where:
+        r.id == ^sim_run_id and r.status == "closed" and r.exit_reason in @shadow_exit_reasons,
+      update: [
+        set: [context: fragment("coalesce(?, '{}'::jsonb) || ?::jsonb", r.context, ^shadow)]
+      ]
+    )
+    |> Repo.update_all([])
+
+    :ok
+  end
 
   # --- Strategies -----------------------------------------------------------
 
